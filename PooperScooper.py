@@ -5,13 +5,12 @@ import logging
 import argparse
 from discord.ext import commands
 
-
 description = """
 Yo, this PooperScooper. Need any poop scooped? '!' me dawg. These my commands.
 """
 
 initial_extensions = [
-
+    'cogs.general'
 ]
 
 # Set up logging
