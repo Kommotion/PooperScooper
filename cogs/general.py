@@ -14,7 +14,7 @@ class General(Cog):
         self.bot = bot
 
     def _get_bot_uptime(self):
-        """ Returns the uptime of the bot """
+        """Returns the uptime of the bot """
         now = datetime.datetime.utcnow()
         delta = now - self.bot.uptime
         hours, remainder = divmod(int(delta.total_seconds()), 3600)
@@ -39,10 +39,11 @@ class General(Cog):
 
     @commands.command()
     async def about(self, ctx):
-        """Prints out information about the bot along with invite link"""
-        pooper_scooper_author_path = os.path.join(utils.get_pics_path(), POOPERSCOOPER_PICTURE)
-        pooper_scooper_thumbnail_path = os.path.join(utils.get_pics_path(), COOKS_AND_MOCHA)
-        pooper_scooper_image_path = os.path.join(utils.get_pics_path(), GOOD_BOYS_AND_GIRLS)
+        """Displays an embed with information about the bot"""
+        pics_path = utils.get_pics_path()
+        pooper_scooper_author_path = os.path.join(pics_path, POOPERSCOOPER_PICTURE)
+        pooper_scooper_thumbnail_path = os.path.join(pics_path, COOKS_AND_MOCHA)
+        pooper_scooper_image_path = os.path.join(pics_path, GOOD_BOYS_AND_GIRLS)
 
         pooper_scooper_author_name = 'pooper.png'
         pooper_scooper_thumbnail_name = 'thumb.png'
