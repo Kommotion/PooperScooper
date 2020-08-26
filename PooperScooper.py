@@ -26,15 +26,6 @@ pooper_bot = commands.Bot(command_prefix=['!'], description=description, pm_help
 pooper_bot.commands_executed = 0
 
 
-# TODO
-# @pooper_bot.event
-# async def on_command_error(error, ctx):
-#     if isinstance(error, commands.NoPrivateMessage):
-#         await bot.say(ctx.message.author, 'This command cannot be used in private messages.')
-#     elif isinstance(error, commands.DisabledCommand):
-#         await bot.send_message(ctx.message.author, 'Sorry. This command is disabled and cannot be used.')
-
-
 @pooper_bot.event
 async def on_ready():
     """Event that occurs when pooper_bot is ready"""
@@ -48,6 +39,17 @@ async def on_ready():
 async def on_resumed():
     """Event that occurs when pooper_bot has resumed"""
     log.info('pooper_bot has resumed...')
+
+
+@pooper_bot.event
+async def on_command_error(ctx, error):
+    """Event that occurs when there's a command error"""
+    if isinstance(error, commands.NoPrivateMessage):
+        await ctx.author.send('This command cannot be used in private messages')
+    elif isinstance(error, commands.DisabledCommand):
+        await ctx.author.send('This command is disabled and cannot be used')
+    elif isinstance(error, commands.CommandInvokeError):
+        await ctx.author.send('There was an error invoking this command')
 
 
 @pooper_bot.event
