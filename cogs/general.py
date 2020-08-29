@@ -88,6 +88,13 @@ class General(Cog):
 
         await ctx.send(files=file_list, embed=embed)
 
+    @Cog.listener('on_message')
+    async def check_for_emojis(self, message):
+        """Checks the message for any emojis and adds the emoji as a reaction"""
+        for emoji in message.guild.emojis:
+            if emoji.name in message.content and emoji.is_usable():
+                await message.add_reaction(emoji)
+
 
 def setup(bot):
     bot.add_cog(General(bot))

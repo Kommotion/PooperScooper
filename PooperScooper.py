@@ -68,6 +68,7 @@ async def on_command(ctx):
     log.info('{0.created_at}: {0.author.name} in {1}: {0.content}'.format(message, destination))
 
 
+@pooper_bot.listen()
 @pooper_bot.event
 async def on_message(message):
     """Event that happens on every message
