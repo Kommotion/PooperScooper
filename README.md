@@ -1,2 +1,2 @@
 # PooperScooper
-Man I need some garlic
+Personal Discord Bot that is WIP
