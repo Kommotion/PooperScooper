@@ -43,6 +43,8 @@ async def on_ready():
     log.info('Username: {}'.format(pooper_bot.user.name))
     log.info('ID: {}'.format(pooper_bot.user.id))
     pooper_bot.uptime = datetime.datetime.utcnow()
+    activity = discord.Activity(name='humans scoop 💩', type=discord.ActivityType.watching)
+    await pooper_bot.change_presence(activity=activity)
 
 
 @pooper_bot.event
