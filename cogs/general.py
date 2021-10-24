@@ -60,7 +60,8 @@ class General(Cog):
             colour=discord.Colour.blue()
         )
 
-        embed.set_author(name='Want to know more about me?', icon_url='attachment://{}'.format(pooper_scooper_author_name))
+        attachment = 'attachment://{}'.format(pooper_scooper_author_name)
+        embed.set_author(name='Want to know more about me?', icon_url=attachment)
         embed.set_thumbnail(url='attachment://{}'.format(pooper_scooper_thumbnail_name))
         embed.set_image(url='attachment://{}'.format(pooper_scooper_image_name))
 
