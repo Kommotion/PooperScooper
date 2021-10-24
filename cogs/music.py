@@ -142,7 +142,14 @@ class Music(Cog):
     async def volume(self, ctx, volume: int):
         """Adjust the bot's voice volume. """
         ctx.voice_client.source.volume = volume / 100
-        await ctx.send("Changed volume to {}%".format(volume))
+
+        embed = discord.Embed(
+            title='Player Volume',
+            description=str(volume),
+            colour=discord.Colour.blue()
+        )
+
+        await ctx.send(embed=embed)
 
     @commands.command()
     async def skip(self, ctx):
@@ -189,6 +196,14 @@ class Music(Cog):
         if ctx.voice_client is None:
             await ctx.send("Not connected to a voice channel.")
             raise commands.CommandError("Bot is not connected to a voice channel")
+
+    @stop.after_invoke
+    @skip.after_invoke
+    @resume.after_invoke
+    @pause.after_invoke
+    @volume.after_invoke
+    async def thumbs_up(self, ctx):
+        await ctx.message.add_reaction('👍')
 
 
 def setup(bot):
