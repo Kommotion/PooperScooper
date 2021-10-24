@@ -1,11 +1,7 @@
 import asyncio
-import datetime
 import discord
-import os
 from discord.ext import commands, tasks
 from discord.ext.commands import Cog
-from cogs.utils import utils
-from cogs.utils.constants import *
 import youtube_dl
 
 ytdl_format_options = {
