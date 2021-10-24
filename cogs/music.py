@@ -32,7 +32,7 @@ class MusicEntry:
 
 
 class YTDLSource(discord.PCMVolumeTransformer):
-    def __init__(self, source, *, data, volume=0.4):
+    def __init__(self, source, *, data, volume=0.3):
         super().__init__(source, volume)
         self.data = data
         self.title = data.get('title')
@@ -64,13 +64,53 @@ class Music(Cog):
     async def music_player(self):
         self.next_song.clear()
         entry = await self.music_queue.get()
-        await entry.ctx.send('Now Playing: {}'.format(entry.player.title))
+        embed = self.now_playing_embed(entry)
+        await entry.ctx.send(embed=embed)
         entry.voice_client.play(entry.player, after=self.play_next_entry)
         await self.next_song.wait()
 
+    def now_playing_embed(self, entry):
+        embed = discord.Embed(
+            title='Now Playing 🎵',
+            description=entry.player.title,
+            colour=discord.Colour.blue(),
+        )
+
+        name = 'Artist'
+        value = self._get_value(entry, 'artist')
+        embed.add_field(name=name, value=value, inline=True)
+
+        name = 'Album'
+        value = self._get_value(entry, 'album')
+        embed.add_field(name=name, value=value, inline=True)
+
+        name = 'Requester'
+        value = entry.ctx.message.author
+        embed.add_field(name=name, value=value, inline=True)
+
+        name = 'Songs in Queue'
+        value = str(self.music_queue.qsize())
+        embed.add_field(name=name, value=value, inline=True)
+
+        name = 'Source'
+        webpage_url = self._get_value(entry, 'webpage_url')
+        value = '[{}]({})'.format(webpage_url, webpage_url)
+        embed.add_field(name=name, value=value, inline=False)
+
+        url = self._get_value(entry, 'thumbnail')
+        if url != 'No thumbnail specified':
+            embed.set_thumbnail(url=url)
+
+        return embed
+
+    def _get_value(self, entry, value):
+        try:
+            return entry.player.data[value]
+        except KeyError:
+            return 'No {} specified'.format(value)
+
     def play_next_entry(self, error):
-        if error:
-            print('Player error: %s' % error)
+        print('Player error: %s' % error) if error else None
         self.bot.loop.call_soon_threadsafe(self.next_song.set)
 
     @music_player.before_loop
@@ -90,7 +130,13 @@ class Music(Cog):
             entry = MusicEntry(player, ctx.voice_client, ctx)
             await self.music_queue.put(entry)
 
-        await ctx.send('Queued up: {}'.format(player.title))
+            embed = discord.Embed(
+                title='Queued up',
+                description=player.title,
+                colour=discord.Colour.blue()
+            )
+
+        await ctx.send(embed=embed)
 
     @commands.command()
     async def volume(self, ctx, volume: int):
@@ -107,6 +153,8 @@ class Music(Cog):
     @commands.command()
     async def stop(self, ctx):
         """Stops what's playing. """
+        while not self.music_queue.empty():
+            self.music_queue.get_nowait()
         await ctx.voice_client.disconnect()
 
     @commands.command()
