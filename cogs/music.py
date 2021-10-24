@@ -144,7 +144,7 @@ class Music(Cog):
         ctx.voice_client.source.volume = volume / 100
 
         embed = discord.Embed(
-            title='Player Volume',
+            title='Player Volume 🔊',
             description=str(volume),
             colour=discord.Colour.blue()
         )
