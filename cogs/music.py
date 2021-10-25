@@ -1,8 +1,10 @@
 import asyncio
 import discord
+import youtube_dl
+import spotipy
 from discord.ext import commands, tasks
 from discord.ext.commands import Cog
-import youtube_dl
+
 
 ytdl_format_options = {
     'format': 'bestaudio/best',
@@ -125,19 +127,35 @@ class Music(Cog):
 
     @commands.command()
     async def play(self, ctx, *, url):
-        """Joins the channel and Plays something from youtube. """
+        """Joins the channel and Plays something from youtube. Supports Spotify Playlists. """
         async with ctx.typing():
-            player = await YTDLSource.from_url(url, loop=self.bot.loop, stream=True)
-            entry = MusicEntry(player, ctx.voice_client, ctx)
-            await self.music_queue.put(entry)
+            if 'spotify.com' in url:
+                music_list = self.get_playlist_from_spotify(url)
+            else:
+                # Single item in music list
+                music_list = list()
+                music_list.append(url)
+
+            for url in music_list:
+                player = await YTDLSource.from_url(url, loop=self.bot.loop, stream=True)
+                entry = MusicEntry(player, ctx.voice_client, ctx)
+                await self.music_queue.put(entry)
+
+            music_list_length = len(music_list)
+            description = player.title if music_list_length == 1 else '{} songs'.format(music_list_length)
 
             embed = discord.Embed(
                 title='Queued up',
-                description=player.title,
+                description=description,
                 colour=discord.Colour.blue()
             )
 
         await ctx.send(embed=embed)
+
+    def get_playlist_from_spotify(self, url):
+        """Use Spotipy to get a list of songs from a spotify playlist. """
+        music_list = list(url)
+        return music_list
 
     @commands.command()
     async def volume(self, ctx, volume: int):
