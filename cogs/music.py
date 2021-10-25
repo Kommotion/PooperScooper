@@ -1,9 +1,12 @@
 import asyncio
 import discord
-import youtube_dl
+import json
 import spotipy
+from spotipy.oauth2 import SpotifyClientCredentials
+import youtube_dl
 from discord.ext import commands, tasks
 from discord.ext.commands import Cog
+from pprint import pprint
 
 
 ytdl_format_options = {
@@ -25,6 +28,14 @@ ffmpeg_options = {
 }
 
 ytdl = youtube_dl.YoutubeDL(ytdl_format_options)
+
+
+def load_credentials():
+    with open('config.json') as f:
+        return json.load(f)
+
+
+credentials = load_credentials()
 
 
 class MusicEntry:
@@ -62,6 +73,10 @@ class Music(Cog):
         self.music_queue = asyncio.Queue()
         self.next_song = asyncio.Event()
         self.music_player.start()
+        client_id = credentials['spotify_client_id']
+        client_secret = credentials['spotify_secret']
+        auth_manager = SpotifyClientCredentials(client_id=client_id, client_secret=client_secret)
+        self.spotipy = spotipy.Spotify(auth_manager=auth_manager)
 
     @tasks.loop(seconds=1)
     async def music_player(self):
@@ -127,9 +142,9 @@ class Music(Cog):
 
     @commands.command()
     async def play(self, ctx, *, url):
-        """Joins the channel and Plays something from youtube. Supports Spotify Playlists. """
+        """Joins the channel and Plays something from youtube. Supports Spotify Playlists URLs. """
         async with ctx.typing():
-            if 'spotify.com' in url:
+            if 'spotify' in url:
                 music_list = self.get_playlist_from_spotify(url)
             else:
                 # Single item in music list
@@ -154,8 +169,16 @@ class Music(Cog):
 
     def get_playlist_from_spotify(self, url):
         """Use Spotipy to get a list of songs from a spotify playlist. """
-        music_list = list(url)
-        return music_list
+        fields = 'items.track.name,items.track.artists'
+        music_list = self.spotipy.playlist_items(url, fields=fields, additional_types=['track'])
+        return_list = list()
+        for track in music_list['items']:
+            url_info = ''
+            url_info += '{} '.format(track['track']['name'])
+            for artist in track['track']['artists']:
+                url_info += '{} '.format(artist['name'])
+            return_list.append(url_info)
+        return return_list
 
     @commands.command()
     async def volume(self, ctx, volume: int):
