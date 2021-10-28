@@ -1,4 +1,6 @@
 {
     "token" : "",
-    "client_id" : ""
+    "client_id" : "",
+    "spotify_client_id" : "",
+    "spotify_secret": ""
 }
