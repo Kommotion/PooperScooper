@@ -30,6 +30,7 @@ ffmpeg_options = {
 ytdl = youtube_dl.YoutubeDL(ytdl_format_options)
 ONE_MEMBER = 1
 
+
 def load_credentials():
     with open('config.json') as f:
         return json.load(f)
@@ -96,7 +97,6 @@ class Music(Cog):
         if number_of_members <= ONE_MEMBER:
             while not self.music_queue.empty():
                 self.music_queue.get_nowait()
-
             embed = discord.Embed(
                 title='Disconnecting to save my owner some bandwidth',
                 description='{} people detected as connected to this channel'.format(number_of_members - 1),
