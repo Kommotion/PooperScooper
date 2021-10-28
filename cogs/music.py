@@ -39,10 +39,11 @@ credentials = load_credentials()
 
 
 class MusicEntry:
-    def __init__(self, player, voice_client, ctx):
+    def __init__(self, url, voice_client, ctx, player=None):
         self.player = player
         self.voice_client = voice_client
         self.ctx = ctx
+        self.url = url
 
 
 class YTDLSource(discord.PCMVolumeTransformer):
@@ -82,6 +83,7 @@ class Music(Cog):
     async def music_player(self):
         self.next_song.clear()
         entry = await self.music_queue.get()
+        entry.player = await YTDLSource.from_url(entry.url, loop=self.bot.loop, stream=True)
         embed = self.now_playing_embed(entry)
         await entry.ctx.send(embed=embed)
         entry.voice_client.play(entry.player, after=self.play_next_entry)
@@ -152,12 +154,11 @@ class Music(Cog):
                 music_list.append(url)
 
             for url in music_list:
-                player = await YTDLSource.from_url(url, loop=self.bot.loop, stream=True)
-                entry = MusicEntry(player, ctx.voice_client, ctx)
+                entry = MusicEntry(url, ctx.voice_client, ctx)
                 await self.music_queue.put(entry)
 
             music_list_length = len(music_list)
-            description = player.title if music_list_length == 1 else '{} songs'.format(music_list_length)
+            description = url if music_list_length == 1 else '{} songs'.format(music_list_length)
 
             embed = discord.Embed(
                 title='Queued up',
