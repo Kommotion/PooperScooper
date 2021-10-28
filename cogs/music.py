@@ -28,7 +28,7 @@ ffmpeg_options = {
 }
 
 ytdl = youtube_dl.YoutubeDL(ytdl_format_options)
-
+ONE_MEMBER = 1
 
 def load_credentials():
     with open('config.json') as f:
@@ -83,11 +83,29 @@ class Music(Cog):
     async def music_player(self):
         self.next_song.clear()
         entry = await self.music_queue.get()
+        if await self.bot_is_alone(entry):
+            return
         entry.player = await YTDLSource.from_url(entry.url, loop=self.bot.loop, stream=True)
         embed = self.now_playing_embed(entry)
         await entry.ctx.send(embed=embed)
         entry.voice_client.play(entry.player, after=self.play_next_entry)
         await self.next_song.wait()
+
+    async def bot_is_alone(self, entry):
+        number_of_members = len(entry.ctx.voice_client.channel.voice_states)
+        if number_of_members <= ONE_MEMBER:
+            while not self.music_queue.empty():
+                self.music_queue.get_nowait()
+
+            embed = discord.Embed(
+                title='Disconnecting to save my owner some bandwidth',
+                description='{} people detected as connected to this channel'.format(number_of_members - 1),
+                colour=discord.Colour.blue(),
+            )
+            await entry.ctx.send(embed=embed)
+            await entry.ctx.voice_client.disconnect()
+            return True
+        return False
 
     def now_playing_embed(self, entry):
         embed = discord.Embed(
@@ -247,6 +265,11 @@ class Music(Cog):
     @volume.after_invoke
     async def thumbs_up(self, ctx):
         await ctx.message.add_reaction('👍')
+
+    @commands.command()
+    async def count(self, ctx):
+        voice_states = ctx.voice_client.channel.voice_states
+        await ctx.send("{} people detected as connected to this channel".format(len(voice_states)))
 
 
 def setup(bot):
