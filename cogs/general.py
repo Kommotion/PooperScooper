@@ -40,54 +40,55 @@ class General(Cog):
     @commands.command()
     async def about(self, ctx):
         """Displays an embed with information about the bot"""
-        pics_path = utils.get_pics_path()
-        pooper_scooper_author_path = os.path.join(pics_path, POOPERSCOOPER_PICTURE)
-        pooper_scooper_thumbnail_path = os.path.join(pics_path, COOKS_AND_MOCHA)
-        pooper_scooper_image_path = os.path.join(pics_path, GOOD_BOYS_AND_GIRLS)
+        async with ctx.typing():
+            pics_path = utils.get_pics_path()
+            pooper_scooper_author_path = os.path.join(pics_path, POOPERSCOOPER_PICTURE)
+            pooper_scooper_thumbnail_path = os.path.join(pics_path, COOKS_AND_MOCHA)
+            pooper_scooper_image_path = os.path.join(pics_path, GOOD_BOYS_AND_GIRLS)
 
-        pooper_scooper_author_name = 'pooper.png'
-        pooper_scooper_thumbnail_name = 'thumb.png'
-        pooper_scooper_image_name = 'image.png'
+            pooper_scooper_author_name = 'pooper.png'
+            pooper_scooper_thumbnail_name = 'thumb.png'
+            pooper_scooper_image_name = 'image.png'
 
-        pooper_scooper_author = discord.File(pooper_scooper_author_path, filename=pooper_scooper_author_name)
-        pooper_scooper_thumb = discord.File(pooper_scooper_thumbnail_path, filename=pooper_scooper_thumbnail_name)
-        pooper_scooper_image = discord.File(pooper_scooper_image_path, filename=pooper_scooper_image_name)
-        file_list = list([pooper_scooper_author, pooper_scooper_thumb, pooper_scooper_image])
+            pooper_scooper_author = discord.File(pooper_scooper_author_path, filename=pooper_scooper_author_name)
+            pooper_scooper_thumb = discord.File(pooper_scooper_thumbnail_path, filename=pooper_scooper_thumbnail_name)
+            pooper_scooper_image = discord.File(pooper_scooper_image_path, filename=pooper_scooper_image_name)
+            file_list = list([pooper_scooper_author, pooper_scooper_thumb, pooper_scooper_image])
 
-        embed = discord.Embed(
-            title='PooperScooper',
-            description='A personal bot made for fun and scooping your poop.',
-            colour=discord.Colour.blue()
-        )
+            embed = discord.Embed(
+                title='PooperScooper',
+                description='A personal bot made for fun and scooping your poop.',
+                colour=discord.Colour.blue()
+            )
 
-        attachment = 'attachment://{}'.format(pooper_scooper_author_name)
-        embed.set_author(name='Want to know more about me?', icon_url=attachment)
-        embed.set_thumbnail(url='attachment://{}'.format(pooper_scooper_thumbnail_name))
-        embed.set_image(url='attachment://{}'.format(pooper_scooper_image_name))
+            attachment = 'attachment://{}'.format(pooper_scooper_author_name)
+            embed.set_author(name='Want to know more about me?', icon_url=attachment)
+            embed.set_thumbnail(url='attachment://{}'.format(pooper_scooper_thumbnail_name))
+            embed.set_image(url='attachment://{}'.format(pooper_scooper_image_name))
 
-        name = 'Version'
-        value = 'PooperScooper ' + VERSION
-        embed.add_field(name=name, value=value, inline=True)
+            name = 'Version'
+            value = 'PooperScooper ' + VERSION
+            embed.add_field(name=name, value=value, inline=True)
 
-        name = 'Author'
-        value = BOT_AUTHOR
-        embed.add_field(name=name, value=value, inline=True)
+            name = 'Author'
+            value = BOT_AUTHOR
+            embed.add_field(name=name, value=value, inline=True)
 
-        name = 'Github Link'
-        value = '[https://github.com/Kommotion/PooperScooper](https://github.com/Kommotion/PooperScooper)'
-        embed.add_field(name=name, value=value, inline=False)
+            name = 'Github Link'
+            value = '[https://github.com/Kommotion/PooperScooper](https://github.com/Kommotion/PooperScooper)'
+            embed.add_field(name=name, value=value, inline=False)
 
-        name = 'Library'
-        value = '[Discord.py](https://github.com/Rapptz/discord.py)'
-        embed.add_field(name=name, value=value, inline=True)
+            name = 'Library'
+            value = '[Discord.py](https://github.com/Rapptz/discord.py)'
+            embed.add_field(name=name, value=value, inline=True)
 
-        name = 'Language'
-        value = 'Python'
-        embed.add_field(name=name, value=value, inline=True)
+            name = 'Language'
+            value = 'Python'
+            embed.add_field(name=name, value=value, inline=True)
 
-        embed.set_footer(text='In memory of all the good boys and girls - Junior, Cole, and Shirley.')
+            embed.set_footer(text='In memory of all the good boys and girls - Junior, Cole, and Shirley.')
 
-        await ctx.send(files=file_list, embed=embed)
+            await ctx.send(files=file_list, embed=embed)
 
 
 def setup(bot):
