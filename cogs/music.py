@@ -88,6 +88,7 @@ class Music(Cog):
             await entry.ctx.send(embed=embed)
             entry.voice_client.play(entry.player, after=self.play_next_entry)
         except Exception as e:
+            self.error_playing_embed(entry)
             self.play_next_entry(e)
 
         await self.next_song.wait()
@@ -106,6 +107,14 @@ class Music(Cog):
             await entry.ctx.voice_client.disconnect()
             return True
         return False
+
+    def error_playing_embed(self, entry):
+        embed = discord.Embed(
+            title='Error While Playing:',
+            description=entry.url,
+            colour=discord.Colour.blue(),
+        )
+        await entry.ctx.send(embed=embed)
 
     def now_playing_embed(self, entry):
         embed = discord.Embed(
