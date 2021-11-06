@@ -1,9 +1,10 @@
 import discord
 import datetime
-import json
 import logging
 import argparse
 from discord.ext import commands
+from cogs.utils.utils import load_credentials
+
 
 description = """
 Yo, this PooperScooper. Need any poop scooped? '!' me dawg. These my commands.
@@ -81,11 +82,6 @@ async def on_message(message):
         return
 
     await pooper_bot.process_commands(message)
-
-
-def load_credentials():
-    with open('config.json') as f:
-        return json.load(f)
 
 
 if __name__ == '__main__':
