@@ -1,13 +1,15 @@
 import asyncio
 import discord
-import json
+import logging
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
 import youtube_dl
 from discord.ext import commands, tasks
 from discord.ext.commands import Cog
-from pprint import pprint
+from utils.utils import load_credentials
 
+
+log = logging.getLogger(__name__)
 
 ytdl_format_options = {
     'format': 'bestaudio/best',
@@ -15,8 +17,8 @@ ytdl_format_options = {
     'restrictfilenames': True,
     'noplaylist': True,
     'nocheckcertificate': True,
-    'ignoreerrors': False,
-    'logtostderr': False,
+    'ignoreerrors': True,
+    'logtostderr': True,
     'quiet': True,
     'no_warnings': True,
     'default_search': 'auto',
@@ -29,13 +31,6 @@ ffmpeg_options = {
 
 ytdl = youtube_dl.YoutubeDL(ytdl_format_options)
 ONE_MEMBER = 1
-
-
-def load_credentials():
-    with open('config.json') as f:
-        return json.load(f)
-
-
 credentials = load_credentials()
 
 
@@ -86,10 +81,15 @@ class Music(Cog):
         entry = await self.music_queue.get()
         if await self.bot_is_alone(entry):
             return
-        entry.player = await YTDLSource.from_url(entry.url, loop=self.bot.loop, stream=True)
-        embed = self.now_playing_embed(entry)
-        await entry.ctx.send(embed=embed)
-        entry.voice_client.play(entry.player, after=self.play_next_entry)
+
+        try:
+            entry.player = await YTDLSource.from_url(entry.url, loop=self.bot.loop, stream=True)
+            embed = self.now_playing_embed(entry)
+            await entry.ctx.send(embed=embed)
+            entry.voice_client.play(entry.player, after=self.play_next_entry)
+        except Exception as e:
+            self.play_next_entry(e)
+
         await self.next_song.wait()
 
     async def bot_is_alone(self, entry):
@@ -148,7 +148,7 @@ class Music(Cog):
             return 'No {} specified'.format(value)
 
     def play_next_entry(self, error):
-        print('Player error: %s' % error) if error else None
+        log.debug('Player error: %s' % error) if error else None
         self.bot.loop.call_soon_threadsafe(self.next_song.set)
 
     @music_player.before_loop
