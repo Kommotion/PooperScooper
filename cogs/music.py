@@ -18,7 +18,7 @@ ytdl_format_options = {
     'noplaylist': True,
     'nocheckcertificate': True,
     'ignoreerrors': True,
-    'logtostderr': True,
+    'logtostderr': False,
     'quiet': True,
     'no_warnings': True,
     'default_search': 'auto',
