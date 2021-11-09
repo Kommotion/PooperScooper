@@ -6,7 +6,7 @@ from spotipy.oauth2 import SpotifyClientCredentials
 import youtube_dl
 from discord.ext import commands, tasks
 from discord.ext.commands import Cog
-from utils.utils import load_credentials
+from cogs.utils.utils import load_credentials
 
 
 log = logging.getLogger(__name__)
@@ -88,7 +88,7 @@ class Music(Cog):
             await entry.ctx.send(embed=embed)
             entry.voice_client.play(entry.player, after=self.play_next_entry)
         except Exception as e:
-            self.error_playing_embed(entry)
+            await self.error_playing_embed(entry)
             self.play_next_entry(e)
 
         await self.next_song.wait()
@@ -108,7 +108,7 @@ class Music(Cog):
             return True
         return False
 
-    def error_playing_embed(self, entry):
+    async def error_playing_embed(self, entry):
         embed = discord.Embed(
             title='Error While Playing:',
             description=entry.url,
