@@ -1,9 +1,11 @@
 ## PooperScooper
 Personal Discord bot using the discord.py library by Rapptz (https://github.com/Rapptz/discord.py)
 
+This bot was intended to be a single server bot and was not developed to be in multiple servers.
+
 ## Key Features
 1. Music
-2. TBD
+2. Gametime (WIP)
 
 ## Installing
 
