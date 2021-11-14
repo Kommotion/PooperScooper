@@ -12,7 +12,8 @@ Yo, this PooperScooper. Need any poop scooped? '!' me dawg. These my commands.
 
 initial_extensions = [
     'cogs.general',
-    'cogs.music'
+    'cogs.music',
+    'cogs.gametime'
 ]
 
 # Set up logging
@@ -24,7 +25,23 @@ log.addHandler(handler)
 
 # discord.ext.commands.Bot setup
 help_attrs = dict(hidden=True)
-pooper_bot = commands.Bot(command_prefix=['!'], description=description, pm_help=False, help_attrs=help_attrs)
+allowed_mentions = discord.AllowedMentions(roles=False, everyone=False, users=True)
+intents = discord.Intents(
+    guilds=True,
+    members=True,
+    bans=True,
+    emojis=True,
+    voice_states=True,
+    messages=True,
+    reactions=True,
+    presences=True
+)
+pooper_bot = commands.Bot(command_prefix=['?'],
+                          description=description,
+                          pm_help=False,
+                          help_attrs=help_attrs,
+                          intents=intents
+)
 pooper_bot.commands_executed = 0
 
 
