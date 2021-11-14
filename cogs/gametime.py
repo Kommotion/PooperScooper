@@ -67,7 +67,7 @@ class Gametime(Cog):
     @tasks.loop(seconds=UPDATE_FREQUENCY)
     async def update_gametime(self):
         """Updates the gametime for each member on the server. """
-        if time.time() - self.last_update_time < UPDATE_FREQUENCY:
+        if time.time() - self.last_update_time < UPDATE_FREQUENCY - 1:
             log.debug("It hasn't been {} seconds since the last update, skipping this update".format(UPDATE_FREQUENCY))
             return
 
@@ -85,6 +85,7 @@ class Gametime(Cog):
 
         self.last_update_time = time.time()
         log.debug("Finished updating gametime data")
+        self.save_game_data()
 
     @update_gametime.before_loop
     async def before_gametime(self):
@@ -92,20 +93,15 @@ class Gametime(Cog):
 
     @update_gametime.after_loop
     async def save_gametime(self):
-        """Saves the current gametime data on the following conditions.
+        """Saves the current gametime data to storage. """
+        self.save_game_data(force=True)
 
-        If update_gametime is being cancelled.
-        It's been SAVE_FREQUENCY seconds since last save.
-        """
-        if self.update_gametime.is_being_cancelled():
-            self.game_data.dump_json()
-            return
-
+    def save_game_data(self, force=False):
         time_now = time.time()
-        if time_now - self.last_save_time >= SAVE_FREQUENCY:
+        if time_now - self.last_save_time >= SAVE_FREQUENCY or force:
+            log.debug("Saving gamedata to Storage")
             self.game_data.dump_json()
             self.last_save_time = time_now
-            log.debug("Dumping JSON data")
 
     @commands.command()
     async def played(self, ctx):
