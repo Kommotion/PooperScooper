@@ -30,7 +30,30 @@ class General(Cog):
     @commands.command()
     async def stats(self, ctx):
         """Prints out the stats of the bot """
-        await ctx.send('To be implemented')
+        async with ctx.typing():
+            embed = discord.Embed(
+                title='Pooper Stats 📝',
+                colour=discord.Colour.blue()
+            )
+            name = 'Commands Processed'
+            value = self.bot.commands_executed
+            embed.add_field(name=name, value=value, inline=True)
+
+            name = 'Members Connected'
+            value = str(len(self.bot.users))
+            embed.add_field(name=name, value=value, inline=True)
+
+            name = 'Total Uptime'
+            value = self._get_bot_uptime()
+            embed.add_field(name=name, value=value, inline=True)
+
+            name = 'Cogs Loaded'
+            value = '{}: '.format(len(self.bot.cogs))
+            for cog in self.bot.cogs:
+                value += '{}, '.format(cog)
+            embed.add_field(name=name, value=value.rstrip(', '), inline=True)
+
+            await ctx.send(embed=embed)
 
     @commands.command()
     async def uptime(self, ctx):
