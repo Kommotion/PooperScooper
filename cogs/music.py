@@ -279,6 +279,7 @@ class Music(Cog):
 
     @commands.command()
     async def count(self, ctx):
+        """Prints the number of people connected to the voice channel that the bot is connected to. """
         voice_states = ctx.voice_client.channel.voice_states
         await ctx.send("{} people detected as connected to this channel".format(len(voice_states)))
 
