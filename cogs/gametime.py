@@ -142,7 +142,7 @@ class Gametime(Cog):
 
     @commands.command()
     async def save(self, ctx):
-        """Force saves the gametime data to storage. """
+        """Force saves the gametime data to storage. This is automatic. """
         self.update_gametime.cancel()
         self.update_gametime.restart()
         await ctx.message.add_reaction('👍')
