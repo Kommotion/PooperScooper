@@ -211,11 +211,13 @@ class Music(Cog):
     @commands.command()
     async def volume(self, ctx, volume: int):
         """Adjust the bot's voice volume. """
+        original = ctx.voice_client.source.volume
         ctx.voice_client.source.volume = volume / 100
 
+        description = '{} -> {}'.format(str(original), str(ctx.voice_client.source.volume))
         embed = discord.Embed(
             title='Player Volume 🔊',
-            description=str(volume),
+            description=description,
             colour=discord.Colour.blue()
         )
 
