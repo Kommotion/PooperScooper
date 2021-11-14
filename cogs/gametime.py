@@ -141,7 +141,7 @@ class Gametime(Cog):
         return fmt.format(d=days, h=hours, m=minutes, s=seconds)
 
     @commands.command()
-    async def force_save(self, ctx):
+    async def save(self, ctx):
         """Force saves the gametime data to storage. """
         self.update_gametime.cancel()
         self.update_gametime.restart()
