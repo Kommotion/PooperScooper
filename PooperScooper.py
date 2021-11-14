@@ -36,7 +36,7 @@ intents = discord.Intents(
     reactions=True,
     presences=True
 )
-pooper_bot = commands.Bot(command_prefix=['?'],
+pooper_bot = commands.Bot(command_prefix=['!'],
                           description=description,
                           pm_help=False,
                           help_attrs=help_attrs,
