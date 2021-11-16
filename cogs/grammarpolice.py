@@ -9,16 +9,16 @@ from typing import Union
 
 log = logging.getLogger(__name__)
 GRAMMARPOLICE_JSON = 'grammarpolice.json'
-GRAMMAR_POLICE = "Grammar Police 🚨"
-YOUR = "your"
-YOURE = "you're"
-YOURRE = "youre"
+GRAMMAR_POLICE = 'Grammar Police 🚨'
+YOUR = 'your'
+YOURE = 'you\'re'
+YOURRE = 'youre'
 YOUR_LIST = [YOUR, YOURE, YOURRE]
 
 # Language Tool Rules
 YOUR_NN = 'YOUR_NN'
-YOUR_UPPERCASE = "YOUR"
-YOUR_YOU_2 = "YOUR_YOU_2"
+YOUR_UPPERCASE = 'YOUR'
+YOUR_YOU_2 = 'YOUR_YOU_2'
 YOUR_RULES: [YOUR_NN, YOUR_UPPERCASE, YOUR_YOU_2]
 
 
@@ -99,11 +99,11 @@ class GrammarPolice(Cog):
             errors = self.grammar.get_error_count(member_id)
 
             if errors is None:
-                description = "{} has not opted into error checking!".format(member.mention)
+                description = '{} has not opted into error checking!'.format(member.mention)
             elif errors == 0:
-                description = "{} has not made any errors!".format(member.mention)
+                description = '{} has not made any errors!'.format(member.mention)
             else:
-                description = "{} Your vs You're Error Count: {}".format(member.mention, errors)
+                description = '{} Your vs You\'re Error Count: {}'.format(member.mention, errors)
 
             embed = discord.Embed(
                 title=GRAMMAR_POLICE,
