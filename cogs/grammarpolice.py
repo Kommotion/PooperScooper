@@ -1,18 +1,25 @@
 import discord
 import json
 import language_tool_python
+import logging
 from discord.ext import commands
 from discord.ext.commands import Cog
 from typing import Union
 
 
-EMRON_ID = "786822389610577921"
-YOUR = "your"
-YOURE = "you're"
-YOUR_NN = 'YOUR_NN'
-YOUR_UPPERCASE = "YOUR"
+log = logging.getLogger(__name__)
 GRAMMARPOLICE_JSON = 'grammarpolice.json'
 GRAMMAR_POLICE = "Grammar Police 🚨"
+YOUR = "your"
+YOURE = "you're"
+YOURRE = "youre"
+YOUR_LIST = [YOUR, YOURE, YOURRE]
+
+# Language Tool Rules
+YOUR_NN = 'YOUR_NN'
+YOUR_UPPERCASE = "YOUR"
+YOUR_YOU_2 = "YOUR_YOU_2"
+YOUR_RULES: [YOUR_NN, YOUR_UPPERCASE, YOUR_YOU_2]
 
 
 class GrammarErrors:
@@ -67,8 +74,9 @@ class GrammarPolice(Cog):
     async def emron_checker(self, message):
         if str(message.author.id) in self.grammar.grammar_errors:
             content = message.content.lower()
-            if YOUR in content or YOURE in content:
+            if any(your in content for your in YOUR_LIST):
                 matches = self.spell_checker.check(content)
+                log.debug('Spell Checker Matches: {}'.format(matches))
                 for match in matches:
                     if match.ruleId in [YOUR_NN, YOUR_UPPERCASE]:
                         self.grammar.increment_error(str(message.author.id))
@@ -110,7 +118,7 @@ class GrammarPolice(Cog):
         async with ctx.typing():
             member_id = str(ctx.message.author.id)
             if member_id in self.grammar.grammar_errors:
-                await ctx.message.send('You are already opted in!')
+                await ctx.send('You are already opted in!')
                 return
 
             self.grammar.add_member(member_id)
