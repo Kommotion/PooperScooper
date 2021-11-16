@@ -13,7 +13,8 @@ Yo, this PooperScooper. Need any poop scooped? '!' me dawg. These my commands.
 initial_extensions = [
     'cogs.general',
     'cogs.music',
-    'cogs.gametime'
+    'cogs.gametime',
+    'cogs.grammarpolice'
 ]
 
 # Set up logging
