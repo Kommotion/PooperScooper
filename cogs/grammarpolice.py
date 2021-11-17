@@ -15,12 +15,6 @@ YOURE = 'you\'re'
 YOURRE = 'youre'
 YOUR_LIST = [YOUR, YOURE, YOURRE]
 
-# Language Tool Rules
-YOUR_NN = 'YOUR_NN'
-YOUR_UPPERCASE = 'YOUR'
-YOUR_YOU_2 = 'YOUR_YOU_2'
-YOUR_RULES: [YOUR_NN, YOUR_UPPERCASE, YOUR_YOU_2]
-
 
 class GrammarErrors:
     def __init__(self):
@@ -78,7 +72,7 @@ class GrammarPolice(Cog):
                 matches = self.spell_checker.check(content)
                 log.debug('Spell Checker Matches: {}'.format(matches))
                 for match in matches:
-                    if match.ruleId in [YOUR_NN, YOUR_UPPERCASE]:
+                    if any(your in match.replacements for your in YOUR_LIST):
                         self.grammar.increment_error(str(message.author.id))
                         await self.send_error_message(match, message)
 
