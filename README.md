@@ -5,7 +5,8 @@ This bot was intended to be a single server bot and was not developed to be in m
 
 ## Key Features
 1. Music
-2. Gametime (WIP)
+2. Gametime
+3. GrammarPolice
 
 ## Installing
 
