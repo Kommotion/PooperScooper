@@ -87,6 +87,7 @@ class GrammarPolice(Cog):
 
     @commands.command()
     async def errors(self, ctx, *, user: Union[discord.Member, discord.User] = None):
+        """Prints the number of grammar errors. Can be another user."""
         async with ctx.typing():
             member = user if user else ctx.message.author
             member_id = str(member.id)
@@ -108,7 +109,7 @@ class GrammarPolice(Cog):
 
     @commands.command()
     async def opt_in(self, ctx):
-        """Opts out of Grammar Police monitoring. """
+        """Opts in of Grammar Police monitoring. """
         async with ctx.typing():
             member_id = str(ctx.message.author.id)
             if member_id in self.grammar.grammar_errors:
@@ -120,7 +121,7 @@ class GrammarPolice(Cog):
 
     @commands.command()
     async def opt_out(self, ctx):
-        """Opts out of Grammar Police monitoring. WARNING: Deletes all of your grammar mistake data! """
+        """Opts out. WARNING: Deletes all of your grammar mistake data! """
         async with ctx.typing():
             member_id = str(ctx.message.author.id)
             self.grammar.remove_member(member_id)
