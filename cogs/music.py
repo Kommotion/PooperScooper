@@ -205,6 +205,7 @@ class Music(Cog):
             url_info += '{} '.format(track['track']['name'])
             for artist in track['track']['artists']:
                 url_info += '{} '.format(artist['name'])
+            url_info += 'song music'
             return_list.append(url_info)
         return return_list
 
