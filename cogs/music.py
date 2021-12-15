@@ -172,11 +172,12 @@ class Music(Cog):
 
     @commands.group(invoke_without_command=True)
     async def play(self, ctx, *, url):
-        """Joins the channel and Plays something from youtube. Supports Spotify Playlists URLs. """
+        """Plays a youtube url or spotify playlist."""
         await self._play(ctx, url)
 
     @play.command(name="shuffle")
     async def play_shuffle(self, ctx, *, url):
+        """Plays a youtube url or spotify playlist and shuffles before playing."""
         await self._play(ctx, url, shuffle=True)
 
     async def _play(self, ctx, url, shuffle=False):
