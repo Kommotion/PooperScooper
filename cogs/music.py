@@ -170,9 +170,16 @@ class Music(Cog):
         """Joins the voice channel. """
         pass
 
-    @commands.command()
+    @commands.group(invoke_without_command=True)
     async def play(self, ctx, *, url):
         """Joins the channel and Plays something from youtube. Supports Spotify Playlists URLs. """
+        await self._play(ctx, url)
+
+    @play.command(name="shuffle")
+    async def play_shuffle(self, ctx, *, url):
+        await self._play(ctx, url, shuffle=True)
+
+    async def _play(self, ctx, url, shuffle=False):
         async with ctx.typing():
             if 'spotify' in url:
                 music_list = self.get_playlist_from_spotify(url)
@@ -180,6 +187,9 @@ class Music(Cog):
                 # Single item in music list
                 music_list = list()
                 music_list.append(url)
+
+            if shuffle:
+                random.shuffle(music_list)
 
             for url in music_list:
                 entry = MusicEntry(url, ctx.voice_client, ctx)
@@ -260,6 +270,7 @@ class Music(Cog):
 
     @play.before_invoke
     @join.before_invoke
+    @play_shuffle.before_invoke
     async def ensure_voice(self, ctx):
         if ctx.voice_client is None:
             if ctx.author.voice:
