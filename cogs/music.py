@@ -1,6 +1,7 @@
 import asyncio
 import discord
 import logging
+import random
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
 import youtube_dl
@@ -157,7 +158,7 @@ class Music(Cog):
             return 'No {} specified'.format(value)
 
     def play_next_entry(self, error):
-        log.debug('Player error: %s' % error) if error else None
+        log.warning('Player error: %s' % error) if error else None
         self.bot.loop.call_soon_threadsafe(self.next_song.set)
 
     @music_player.before_loop
@@ -194,6 +195,16 @@ class Music(Cog):
             )
 
         await ctx.send(embed=embed)
+
+    @commands.command()
+    async def shuffle(self, ctx):
+        """Shuffles the current music queue."""
+        try:
+            random.shuffle(self.music_queue._queue)
+        except Exception as e:
+            log.warning("Failed to shuffle the music queue: {}".format(e))
+            await ctx.send("Error shuffling music queue!")
+        await ctx.message.add_reaction('👍')
 
     def get_playlist_from_spotify(self, url):
         """Use Spotipy to get a list of songs from a spotify playlist. """
