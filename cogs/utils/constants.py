@@ -1,7 +1,7 @@
 """
 Constants file
 """
-VERSION = '0.2.0'
+VERSION = '0.2.1'
 BOT_AUTHOR = 'Kommotion#1371'
 POOPERSCOOPER_PICTURE = 'pooperscooper.jpg'
 COOKS_AND_MOCHA = 'cooksandmocha.jpg'

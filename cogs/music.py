@@ -1,4 +1,6 @@
 import asyncio
+import pprint
+
 import discord
 import logging
 import random
@@ -172,18 +174,18 @@ class Music(Cog):
 
     @commands.group(invoke_without_command=True)
     async def play(self, ctx, *, url):
-        """Plays a youtube url or spotify playlist."""
+        """Plays a youtube url or spotify playlist/album."""
         await self._play(ctx, url)
 
     @play.command(name="shuffle")
     async def play_shuffle(self, ctx, *, url):
-        """Plays a youtube url or spotify playlist and shuffles before playing."""
+        """Plays a youtube url or spotify album/playlist and shuffles before playing."""
         await self._play(ctx, url, shuffle=True)
 
     async def _play(self, ctx, url, shuffle=False):
         async with ctx.typing():
             if 'spotify' in url:
-                music_list = self.get_playlist_from_spotify(url)
+                music_list = self.get_from_spotify(url)
             else:
                 # Single item in music list
                 music_list = list()
@@ -217,8 +219,16 @@ class Music(Cog):
             await ctx.send("Error shuffling music queue!")
         await ctx.message.add_reaction('👍')
 
-    def get_playlist_from_spotify(self, url):
-        """Use Spotipy to get a list of songs from a spotify playlist. """
+    def get_from_spotify(self, url):
+        """Use Spotipy to get a list of songs from a spotify. """
+        try:
+            return_list = self._get_playlist_from_spotify(url)
+        except spotipy.SpotifyException:
+            return_list = self._get_playlist_from_album(url)
+
+        return return_list
+
+    def _get_playlist_from_spotify(self, url):
         fields = 'items.track.name,items.track.artists'
         music_list = self.spotipy.playlist_items(url, fields=fields, additional_types=['track'])
         return_list = list()
@@ -226,6 +236,18 @@ class Music(Cog):
             url_info = ''
             url_info += '{} '.format(track['track']['name'])
             for artist in track['track']['artists']:
+                url_info += '{} '.format(artist['name'])
+            url_info += 'song music'
+            return_list.append(url_info)
+        return return_list
+
+    def _get_playlist_from_album(self, url):
+        music_list = self.spotipy.album_tracks(url)
+        return_list = list()
+        for track in music_list['items']:
+            url_info = ''
+            url_info += '{} '.format(track['name'])
+            for artist in track['artists']:
                 url_info += '{} '.format(artist['name'])
             url_info += 'song music'
             return_list.append(url_info)
