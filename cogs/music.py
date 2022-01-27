@@ -1,6 +1,4 @@
 import asyncio
-import pprint
-
 import discord
 import logging
 import random
@@ -73,6 +71,7 @@ class Music(Cog):
         self.music_queue = asyncio.Queue()
         self.next_song = asyncio.Event()
         self.music_player.start()
+        self.idle_timeout.start()
         client_id = credentials['spotify_client_id']
         client_secret = credentials['spotify_secret']
         auth_manager = SpotifyClientCredentials(client_id=client_id, client_secret=client_secret)
@@ -82,7 +81,7 @@ class Music(Cog):
     async def music_player(self):
         self.next_song.clear()
         entry = await self.music_queue.get()
-        if await self.bot_is_alone(entry):
+        if await self.bot_is_alone(entry.ctx):
             return
 
         try:
@@ -96,18 +95,28 @@ class Music(Cog):
 
         await self.next_song.wait()
 
-    async def bot_is_alone(self, entry):
-        number_of_members = len(entry.ctx.voice_client.channel.voice_states)
+    @tasks.loop(seconds=30)
+    async def idle_timeout(self):
+        for voice_client in self.bot.voice_clients:
+            if len(voice_client.channel.voice_states) <= ONE_MEMBER:
+                await voice_client.disconnect()
+
+    @idle_timeout.before_loop
+    async def before_timeout(self):
+        await self.bot.wait_until_ready()
+
+    async def bot_is_alone(self, ctx):
+        number_of_members = len(ctx.voice_client.channel.voice_states)
         if number_of_members <= ONE_MEMBER:
             while not self.music_queue.empty():
                 self.music_queue.get_nowait()
             embed = discord.Embed(
                 title='Disconnecting to save my owner some bandwidth',
-                description='{} people detected as connected to this channel'.format(number_of_members - 1),
+                description='{} other(s) detected as connected to this channel'.format(number_of_members - 1),
                 colour=discord.Colour.blue(),
             )
-            await entry.ctx.send(embed=embed)
-            await entry.ctx.voice_client.disconnect()
+            await ctx.send(embed=embed)
+            await ctx.voice_client.disconnect()
             return True
         return False
 
