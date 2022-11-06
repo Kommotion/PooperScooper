@@ -1,2 +1,2 @@
-discord~=1.7.3
-spotipy~=2.19.0
+discord.py==1.7.3
+spotipy==2.19.0
