@@ -266,7 +266,7 @@ class Music(Cog):
     @commands.command()
     async def volume(self, ctx, volume: int):
         """Adjust the bot's voice volume (15 is the default). """
-        original = ctx.voice_client.source.volume * 100
+        original = int(ctx.voice_client.source.volume * 100)
         ctx.voice_client.source.volume = volume / 100
 
         description = '{} -> {}'.format(str(original), str(volume))
