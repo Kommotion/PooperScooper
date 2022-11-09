@@ -1,4 +1,3 @@
-import datetime
 import discord
 import os
 from discord.ext import commands
@@ -15,7 +14,7 @@ class General(Cog):
 
     def _get_bot_uptime(self):
         """Returns the uptime of the bot """
-        now = datetime.datetime.utcnow()
+        now = discord.utils.utcnow()
         delta = now - self.bot.uptime
         hours, remainder = divmod(int(delta.total_seconds()), 3600)
         minutes, seconds = divmod(remainder, 60)
@@ -26,6 +25,15 @@ class General(Cog):
             fmt = '{h} hours, {m} minutes, and {s} seconds'
 
         return fmt.format(d=days, h=hours, m=minutes, s=seconds)
+
+    # @commands.command()
+    # async def servers(self, ctx):
+    #     """Lazy implementation to see which servers the bot is currently connected in. """
+    #     for server in self.bot.guilds:
+    #         print(server.name)
+    #         print(server.owner)
+    #         print(server.members)
+    #         print(len(server.members))
 
     @commands.command()
     async def stats(self, ctx):
@@ -114,5 +122,5 @@ class General(Cog):
             await ctx.send(files=file_list, embed=embed)
 
 
-def setup(bot):
-    bot.add_cog(General(bot))
+async def setup(bot):
+    await bot.add_cog(General(bot))

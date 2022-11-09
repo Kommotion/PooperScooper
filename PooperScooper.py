@@ -1,5 +1,5 @@
+import asyncio
 import discord
-import datetime
 import logging
 import argparse
 from discord.ext import commands
@@ -24,82 +24,60 @@ handler = logging.FileHandler(filename='pooperscooper.log', encoding='utf-8', mo
 handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
 log.addHandler(handler)
 
-# discord.ext.commands.Bot setup
-help_attrs = dict(hidden=True)
-allowed_mentions = discord.AllowedMentions(roles=False, everyone=False, users=True)
-intents = discord.Intents(
-    guilds=True,
-    members=True,
-    bans=True,
-    emojis=True,
-    voice_states=True,
-    messages=True,
-    reactions=True,
-    presences=True
-)
-pooper_bot = commands.Bot(command_prefix=['!'],
-                          description=description,
-                          pm_help=False,
-                          help_attrs=help_attrs,
-                          intents=intents
-)
-pooper_bot.commands_executed = 0
+
+class PooperScooper(commands.AutoShardedBot):
+    def __init__(self):
+        allowed_mentions = discord.AllowedMentions(roles=False, everyone=False, users=True)
+        intents = discord.Intents(
+            guilds=True,
+            members=True,
+            bans=True,
+            emojis=True,
+            voice_states=True,
+            messages=True,
+            reactions=True,
+            presences=True,
+            message_content=True
+        )
+        super().__init__(
+            command_prefix=['?'],
+            description=description,
+            pm_help=None,
+            intents=intents,
+            allowed_mentions=allowed_mentions,
+            help_attrs=dict(hidden=True)
+        )
+
+        self.client_id: str = credentials['client_id']
+        self.commands_executed = None
+
+    async def on_ready(self) -> None:
+        """Event that occurs when PooperScooper is ready"""
+        if not hasattr(self, 'uptime'):
+            self.uptime = discord.utils.utcnow()
+
+        log.info('Logging in as:')
+        log.info('Username: {}'.format(self.user.name))
+        log.info('ID: {}'.format(self.user.id))
+        activity = discord.Activity(name='humans scoop 💩', type=discord.ActivityType.watching)
+        await self.change_presence(activity=activity)
+
+    async def setup_hook(self) -> None:
+        """Sets up the bot one time."""
+        self.bot_app_info = await self.application_info()
+        self.owner_id = self.bot_app_info.owner.id
+        self.commands_executed = 0
+
+        for extension in initial_extensions:
+            try:
+                await self.load_extension(extension)
+            except Exception as e:
+                log.exception('Failed to load extension {}\n{}'.format(extension, e))
 
 
-# TODO
-# @pooper_bot.event
-# async def on_command_error(error, ctx):
-#     if isinstance(error, commands.NoPrivateMessage):
-#         await bot.say(ctx.message.author, 'This command cannot be used in private messages.')
-#     elif isinstance(error, commands.DisabledCommand):
-#         await bot.send_message(ctx.message.author, 'Sorry. This command is disabled and cannot be used.')
-
-
-@pooper_bot.event
-async def on_ready():
-    """Event that occurs when pooper_bot is ready"""
-    log.info('Logging in as:')
-    log.info('Username: {}'.format(pooper_bot.user.name))
-    log.info('ID: {}'.format(pooper_bot.user.id))
-    pooper_bot.uptime = datetime.datetime.utcnow()
-    activity = discord.Activity(name='humans scoop 💩', type=discord.ActivityType.watching)
-    await pooper_bot.change_presence(activity=activity)
-
-
-@pooper_bot.event
-async def on_resumed():
-    """Event that occurs when pooper_bot has resumed"""
-    log.info('pooper_bot has resumed...')
-
-
-@pooper_bot.event
-async def on_command(ctx):
-    """Event that occurs when pooper_bot detects a command
-
-    Logs the command detected.
-    """
-    pooper_bot.commands_executed += 1
-    message = ctx.message
-    if isinstance(message.channel, discord.abc.PrivateChannel):
-        destination = 'Private Message'
-    else:
-        destination = '#{0.channel.name} ({0.guild.name})'.format(message)
-
-    log.info('{0.created_at}: {0.author.name} in {1}: {0.content}'.format(message, destination))
-
-
-@pooper_bot.event
-async def on_message(message):
-    """Event that happens on every message
-
-    Filters out the bot's own messages. This might not be needed according to the documentation:
-    https://discordpy.readthedocs.io/en/latest/api.html?highlight=on_message#discord.on_message
-    """
-    if message.author.bot:
-        logging.debug('Detected my own message')
-        return
-
-    await pooper_bot.process_commands(message)
+async def run_bot():
+    async with PooperScooper() as bot:
+        await bot.start(token, reconnect=True)
 
 
 if __name__ == '__main__':
@@ -114,15 +92,8 @@ if __name__ == '__main__':
 
     credentials = load_credentials()
     token = credentials['token']
-    pooper_bot.client_id = credentials['client_id']
 
-    for extension in initial_extensions:
-        try:
-            pooper_bot.load_extension(extension)
-        except Exception as e:
-            log.critical('Failed to load extension {}\n{}: {}'.format(extension, type(e).__name__, e))
-
-    pooper_bot.run(token)
+    asyncio.run(run_bot())
 
     handlers = log.handlers[:]
     for hdlr in handlers:

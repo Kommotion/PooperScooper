@@ -33,6 +33,7 @@ ffmpeg_options = {
 ytdl = youtube_dl.YoutubeDL(ytdl_format_options)
 ONE_MEMBER = 1
 credentials = load_credentials()
+DEFAULT_VOLUME = 0.15
 
 
 class MusicEntry:
@@ -44,7 +45,7 @@ class MusicEntry:
 
 
 class YTDLSource(discord.PCMVolumeTransformer):
-    def __init__(self, source, *, data, volume=0.3):
+    def __init__(self, source, *, data, volume=DEFAULT_VOLUME):
         super().__init__(source, volume)
         self.data = data
         self.title = data.get('title')
@@ -264,11 +265,11 @@ class Music(Cog):
 
     @commands.command()
     async def volume(self, ctx, volume: int):
-        """Adjust the bot's voice volume. """
-        original = ctx.voice_client.source.volume
+        """Adjust the bot's voice volume (15 is the default). """
+        original = int(ctx.voice_client.source.volume * 100)
         ctx.voice_client.source.volume = volume / 100
 
-        description = '{} -> {}'.format(str(original), str(ctx.voice_client.source.volume))
+        description = '{} -> {}'.format(str(original), str(volume))
         embed = discord.Embed(
             title='Player Volume 🔊',
             description=description,
@@ -339,5 +340,5 @@ class Music(Cog):
         await ctx.send("{} people detected as connected to this channel".format(len(voice_states)))
 
 
-def setup(bot):
-    bot.add_cog(Music(bot))
+async def setup(bot):
+    await bot.add_cog(Music(bot))
