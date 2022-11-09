@@ -341,5 +341,5 @@ class Music(Cog):
         await ctx.send("{} people detected as connected to this channel".format(len(voice_states)))
 
 
-def setup(bot):
-    bot.add_cog(Music(bot))
+async def setup(bot):
+    await bot.add_cog(Music(bot))
