@@ -1,6 +1,3 @@
-import datetime
-import logging
-
 import discord
 import os
 from discord.ext import commands
@@ -17,7 +14,7 @@ class General(Cog):
 
     def _get_bot_uptime(self):
         """Returns the uptime of the bot """
-        now = datetime.datetime.utcnow()
+        now = discord.utils.utcnow()
         delta = now - self.bot.uptime
         hours, remainder = divmod(int(delta.total_seconds()), 3600)
         minutes, seconds = divmod(remainder, 60)
