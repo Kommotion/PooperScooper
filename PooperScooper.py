@@ -14,7 +14,8 @@ initial_extensions = [
     'cogs.general',
     'cogs.music',
     'cogs.gametime',
-    'cogs.grammarpolice'
+    'cogs.grammarpolice',
+    'cogs.menacesroles'
 ]
 
 # Set up logging
@@ -40,7 +41,7 @@ class PooperScooper(commands.AutoShardedBot):
             message_content=True
         )
         super().__init__(
-            command_prefix=['?'],
+            command_prefix=['!'],
             description=description,
             pm_help=None,
             intents=intents,
