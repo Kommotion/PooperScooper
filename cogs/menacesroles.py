@@ -20,7 +20,9 @@ class MenacesRoles(Cog):
             '🍻': 1040117797084213248,  # VRChat
             '🤓': 1040118067579076628,  # League of Legends
             '📺': 1040118203554205716,  # Jackbox
-            '👻': 1040118299314356294  # Phasmophobia
+            '👻': 1040118299314356294,  # Phasmophobia
+            '👟': 1040149691297443871,  # "Kick it" in voice chat
+            '🔫': 1040149753121480725   # Squad
         }
 
     def _ensure_guild_and_channel(self, guild_id, channel_id) -> bool:
