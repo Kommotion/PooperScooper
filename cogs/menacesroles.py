@@ -41,7 +41,7 @@ class MenacesRoles(Cog):
         target_role = payload.member.guild.get_role(target_role_id)
         await payload.member.add_roles(target_role, reason=f'User reacted with {payload.emoji.name}')
 
-    @commands.Cog.listener('on_reaction_remove')
+    @commands.Cog.listener('on_raw_reaction_remove')
     async def remove_role(self, payload) -> None:
         if not self._ensure_guild_and_channel(payload.guild_id, payload.channel_id):
             return
