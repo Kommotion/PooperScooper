@@ -51,8 +51,10 @@ class MenacesRoles(Cog):
         except KeyError:
             return
 
-        target_role = payload.member.guild.get_role(target_role_id)
-        await payload.member.remove_roles(target_role, reason=f'User reacted with {payload.emoji.name}')
+        guild = self.bot.get_guild(payload.guild_id)
+        member = guild.get_member(payload.user_id)
+        target_role = member.guild.get_role(target_role_id)
+        await member.remove_roles(target_role, reason=f'User reacted with {payload.emoji.name}')
 
 
 async def setup(bot):
