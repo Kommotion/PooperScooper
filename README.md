@@ -32,7 +32,7 @@ Create your integrations for Spotify and Discord:
 
 5. **Configure Credentials**
 
-Add credentials to config.json from Spotify/Discord
+Add credentials to config.json from Spotify/Discord. Place in root dir of bot.
 ```j
 {
   "token": "",
