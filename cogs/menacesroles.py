@@ -22,7 +22,9 @@ class MenacesRoles(Cog):
             '📺': 1040118203554205716,  # Jackbox
             '👻': 1040118299314356294,  # Phasmophobia
             '👟': 1040149691297443871,  # "Kick it" in voice chat
-            '🔫': 1040149753121480725   # Squad
+            '🔫': 1040149753121480725,  # Squad
+            '🛒': 1026082898098540544,  # Mario Kart
+            '🥳': 1040474269836128266  # Mario Party
         }
 
     def _ensure_guild_and_channel(self, guild_id, channel_id) -> bool:
