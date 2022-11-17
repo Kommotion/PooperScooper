@@ -21,3 +21,7 @@ def load_json(file_name):
 def dump_json(file_name, data):
     with open(file_name, 'w') as f:
         return json.dump(data, f)
+
+
+def create_json(file_name):
+    dump_json(file_name, dict())

@@ -2,7 +2,9 @@ import discord
 import json
 import logging
 import time
+import os
 from cogs.utils.constants import *
+from cogs.utils.utils import create_json
 from discord.ext import commands, tasks
 from discord.ext.commands import Cog
 from pprint import pprint
@@ -19,6 +21,9 @@ class GameData:
     """A class containing the data of the players currently playing. """
     def __init__(self):
         self.game_data = None
+
+        if not os.path.isfile(GAMETIME_JSON):
+            create_json(GAMETIME_JSON)
 
     def load_json(self):
         with open(GAMETIME_JSON, 'r') as f:

@@ -2,8 +2,10 @@ import discord
 import json
 import language_tool_python
 import logging
+import os
 from discord.ext import commands
 from discord.ext.commands import Cog
+from cogs.utils.utils import create_json
 from typing import Union
 
 
@@ -19,6 +21,10 @@ YOUR_LIST = [YOUR, YOURE, YOURRE]
 class GrammarErrors:
     def __init__(self):
         self.grammar_errors = None
+
+        if not os.path.isfile(GRAMMARPOLICE_JSON):
+            create_json(GRAMMARPOLICE_JSON)
+
         self.load_json()
 
     def load_json(self):
