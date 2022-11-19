@@ -25,7 +25,11 @@ class MenacesRoles(Cog):
             '🔫': 1040149753121480725,  # Squad
             '🛒': 1026082898098540544,  # Mario Kart
             '🥳': 1040474269836128266,  # Mario Party
-            '🍙': 1042655669955866664   # Pokemon
+            '🍙': 1042655669955866664,  # Pokemon
+            'he': 1043434842999750706,
+            'she': 1043434950222938172,
+            'they': 1043435084331614279,
+            'nb': 1043435221313388554
         }
 
     def _ensure_guild_and_channel(self, guild_id, channel_id) -> bool:
