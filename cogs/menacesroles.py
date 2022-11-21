@@ -29,7 +29,8 @@ class MenacesRoles(Cog):
             'he': 1043434842999750706,
             'she': 1043434950222938172,
             'they': 1043435084331614279,
-            'nb': 1043435221313388554
+            'nb': 1043435221313388554,
+            '❓': 1044064871148429312
         }
 
     def _ensure_guild_and_channel(self, guild_id, channel_id) -> bool:
