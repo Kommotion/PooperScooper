@@ -15,7 +15,8 @@ initial_extensions = [
     'cogs.music',
     'cogs.gametime',
     'cogs.grammarpolice',
-    'cogs.menacesroles'
+    'cogs.menacesroles',
+    'cogs.imagediffusion'
 ]
 
 # Set up logging
