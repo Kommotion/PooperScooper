@@ -1,9 +1,11 @@
 import asyncio
+import typing
+import functools
 from io import BytesIO
 
 import discord
 import torch
-from diffusers import StableDiffusionPipeline
+from diffusers import StableDiffusionPipeline, EulerDiscreteScheduler
 from discord.ext import commands, tasks
 from discord.ext.commands import Cog
 from torch import autocast
@@ -11,6 +13,18 @@ from torch import autocast
 WAIFU_DIFFUSION = "hakurei/waifu-diffusion"
 STABLE_DIFFUSION = "CompVis/stable-diffusion-v1-4"
 CUDA = 'cuda'
+
+
+def to_thread(func: typing.Callable) -> typing.Coroutine:
+    @functools.wraps(func)
+    async def wrapper(*args, **kwargs):
+        return await asyncio.to_thread(func, *args, **kwargs)
+    return wrapper
+
+
+@to_thread
+def image_generation(pipe, prompt):
+    return pipe(prompt)
 
 
 class ImageCreation:
@@ -41,15 +55,15 @@ class ImageDiffusion(Cog):
         """Subcommand for Waifu command. NSFW Channel ONLY"""
         await self.schedule_generation(ctx, prompt, WAIFU_DIFFUSION, allow_nsfw=True)
 
-    # @commands.group(invoke_without_command=True)
-    # async def stable(self, ctx: commands.Context, *, prompt: str) -> None:
-    #     """Queues up a regular image generation using AI. Best for generic image generation. """
-    #     await self.schedule_generation(ctx, prompt, STABLE_DIFFUSION, allow_nsfw=False)
-    #
-    # @stable.command(name="nsfw")
-    # async def stable_nsfw(self, ctx: commands.Context, *, prompt: str) -> None:
-    #     """Subcommand for stable command. NSFW Channel ONLY"""
-    #     await self.schedule_generation(ctx, prompt, STABLE_DIFFUSION, allow_nsfw=True)
+    @commands.group(invoke_without_command=True)
+    async def stable(self, ctx: commands.Context, *, prompt: str) -> None:
+        """Queues up a regular image generation using AI. Best for generic image generation. """
+        await self.schedule_generation(ctx, prompt, STABLE_DIFFUSION, allow_nsfw=False)
+
+    @stable.command(name="nsfw")
+    async def stable_nsfw(self, ctx: commands.Context, *, prompt: str) -> None:
+        """Subcommand for stable command. NSFW Channel ONLY"""
+        await self.schedule_generation(ctx, prompt, STABLE_DIFFUSION, allow_nsfw=True)
 
     # @app_commands.command(name="waifu")
     # async def generate_waifu_quietly(self, interaction: discord.Interaction) -> None:
@@ -77,12 +91,14 @@ class ImageDiffusion(Cog):
             return await ctx.reply("This command only works in NSFW channels!")
 
         pipe = StableDiffusionPipeline.from_pretrained(model, torch_dtype=torch.float16).to(CUDA)
+        pipe.scheduler = EulerDiscreteScheduler.from_config(pipe.scheduler.config)
+        pipe.enable_attention_slicing()
 
         if allow_nsfw:
             pipe.safety_checker = lambda images, clip_input: (images, False)
 
         with autocast(CUDA):
-            output = pipe(prompt)
+            output = await image_generation(pipe, prompt)
 
             # Because we are mega confused as to why nsfw_content_detected can be a list or a bool, do some hacks
             if type(output.nsfw_content_detected) == list:
