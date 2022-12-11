@@ -23,8 +23,20 @@ def to_thread(func: typing.Callable) -> typing.Coroutine:
 
 
 @to_thread
-def image_generation(pipe, prompt):
-    return pipe(prompt)
+def image_generation(image):
+    model = image.model
+    allow_nsfw = image.allow_nsfw
+    prompt = image.prompt
+
+    pipe = StableDiffusionPipeline.from_pretrained(model, torch_dtype=torch.float16).to(CUDA)
+    pipe.scheduler = EulerDiscreteScheduler.from_config(pipe.scheduler.config)
+    pipe.enable_attention_slicing()
+
+    if allow_nsfw:
+        pipe.safety_checker = lambda images, clip_input: (images, False)
+
+    with autocast(CUDA):
+        return pipe(prompt)
 
 
 class ImageCreation:
@@ -85,31 +97,22 @@ class ImageDiffusion(Cog):
         ctx = image.ctx
         prompt = image.prompt
         allow_nsfw = image.allow_nsfw
-        model = image.model
 
         if allow_nsfw and not ctx.message.channel.is_nsfw():
             return await ctx.reply("This command only works in NSFW channels!")
 
-        pipe = StableDiffusionPipeline.from_pretrained(model, torch_dtype=torch.float16).to(CUDA)
-        pipe.scheduler = EulerDiscreteScheduler.from_config(pipe.scheduler.config)
-        pipe.enable_attention_slicing()
+        output = await image_generation(image)
 
-        if allow_nsfw:
-            pipe.safety_checker = lambda images, clip_input: (images, False)
+        # Because we are mega confused as to why nsfw_content_detected can be a list or a bool, do some hacks
+        if type(output.nsfw_content_detected) == list:
+            nsfw_content_detected = output.nsfw_content_detected[0]
+        else:
+            nsfw_content_detected = output.nsfw_content_detected
 
-        with autocast(CUDA):
-            output = await image_generation(pipe, prompt)
+        if nsfw_content_detected and not allow_nsfw:
+            return await ctx.reply("NSFW content was detected! Please retry with a different prompt")
 
-            # Because we are mega confused as to why nsfw_content_detected can be a list or a bool, do some hacks
-            if type(output.nsfw_content_detected) == list:
-                nsfw_content_detected = output.nsfw_content_detected[0]
-            else:
-                nsfw_content_detected = output.nsfw_content_detected
-
-            if nsfw_content_detected and not allow_nsfw:
-                return await ctx.reply("NSFW content was detected! Please retry with a different prompt")
-
-            image = output.images[0]
+        image = output.images[0]
 
         buffer = BytesIO()
         image.save(buffer, format="PNG")
