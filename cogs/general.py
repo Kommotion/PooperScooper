@@ -1,4 +1,8 @@
+import typing
+from typing import Literal
+
 import discord
+from discord import app_commands
 import os
 from discord.ext import commands
 from discord.ext.commands import Cog
@@ -34,6 +38,41 @@ class General(Cog):
     #         print(server.owner)
     #         print(server.members)
     #         print(len(server.members))
+
+    @app_commands.command(name="command-1")
+    async def my_command(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_message("Hello from command 1!", ephemeral=True)
+
+    @commands.is_owner()
+    @commands.guild_only()
+    @commands.command()
+    async def sync(self, ctx: commands.Context, guilds: commands.Greedy[discord.Object], spec: typing.Optional[Literal["~", "*", "^"]] = None) -> None:
+        if not guilds:
+            if spec == "~":
+                synced = await ctx.bot.tree.sync(guild=ctx.guild)
+            elif spec == "*":
+                ctx.bot.tree.copy_global_to(guild=ctx.guild)
+                synced = await ctx.bot.tree.sync(guild=ctx.guild)
+            elif spec == "^":
+                ctx.bot.tree.clear_commands(guild=ctx.guild)
+                await ctx.bot.tree.sync(guild=ctx.guild)
+                synced = []
+            else:
+                synced = await ctx.bot.tree.sync()
+
+            await ctx.send(
+                f"Synced {len(synced)} commands {'globally' if spec is None else 'to the current guild.'}"
+            )
+            return
+
+        ret = 0
+        for guild in guilds:
+            try:
+                await ctx.bot.tree.sync(guild=guild)
+            except discord.HTTPException:
+                pass
+            else:
+                ret += 1
 
     @commands.command()
     async def stats(self, ctx):
