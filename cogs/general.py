@@ -30,14 +30,15 @@ class General(Cog):
 
         return fmt.format(d=days, h=hours, m=minutes, s=seconds)
 
-    # @commands.command()
-    # async def servers(self, ctx):
-    #     """Lazy implementation to see which servers the bot is currently connected in. """
-    #     for server in self.bot.guilds:
-    #         print(server.name)
-    #         print(server.owner)
-    #         print(server.members)
-    #         print(len(server.members))
+    @commands.is_owner()
+    @commands.command()
+    async def servers(self, ctx):
+        """Lazy implementation to see which servers the bot is currently connected in. """
+        for server in self.bot.guilds:
+            print(server.name)
+            print(server.owner)
+            print(server.members)
+            print(len(server.members))
 
     @app_commands.command(name="command-1")
     async def my_command(self, interaction: discord.Interaction) -> None:
