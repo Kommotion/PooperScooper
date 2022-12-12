@@ -16,6 +16,10 @@ class General(Cog):
     def __init__(self, bot):
         self.bot = bot
 
+    @commands.Cog.listener('on_command')
+    async def update_command_count(self, ctx) -> None:
+        self.bot.commands_executed += 1
+
     def _get_bot_uptime(self):
         """Returns the uptime of the bot """
         now = discord.utils.utcnow()
