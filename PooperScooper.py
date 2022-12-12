@@ -2,6 +2,8 @@ import asyncio
 import discord
 import logging
 import argparse
+import pathlib
+import os
 from discord.ext import commands
 from cogs.utils.utils import load_credentials
 
@@ -91,6 +93,9 @@ if __name__ == '__main__':
     if parsed_args.debug is True:
         log.setLevel(logging.DEBUG)
         logging.debug('Enabling Debug Level Logging')
+
+    base_file_path = pathlib.Path(__file__).parent.resolve()
+    os.chdir(base_file_path)
 
     credentials = load_credentials()
     token = credentials['token']
