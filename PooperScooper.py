@@ -22,6 +22,8 @@ initial_extensions = [
 ]
 
 # Set up logging
+base_file_path = pathlib.Path(__file__).parent.resolve()
+os.chdir(base_file_path)
 log = logging.getLogger()
 log.setLevel(logging.INFO)
 handler = logging.FileHandler(filename='pooperscooper.log', encoding='utf-8', mode='w')
@@ -93,9 +95,6 @@ if __name__ == '__main__':
     if parsed_args.debug is True:
         log.setLevel(logging.DEBUG)
         logging.debug('Enabling Debug Level Logging')
-
-    base_file_path = pathlib.Path(__file__).parent.resolve()
-    os.chdir(base_file_path)
 
     credentials = load_credentials()
     token = credentials['token']
