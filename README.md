@@ -2,11 +2,17 @@
 Personal Discord bot using the discord.py library by Rapptz (https://github.com/Rapptz/discord.py)
 
 This bot was intended to be a single server bot and was not developed to be in multiple servers.
+Feel free to use this as a reference for your own bot.
+
+Note: Some stuff will be hardcoded to particular servers such as menacesroles and grammarpolice cogs.
+I was too lazy to write something dynamic.
 
 ## Key Features
 1. Music
 2. Gametime
-3. GrammarPolice
+3. ImageDiffusion
+4. GrammarPolice
+5. Role Selection by Emoji
 
 ## Installing
 
@@ -47,8 +53,15 @@ Add credentials to config.json from Spotify/Discord. Place in root dir of bot.
 Download FFMPEG and add the executable to your environment variables
 * https://www.ffmpeg.org/download.html
 
+7. **Install Stable/Waifu Diffusion**
+
+NOTE: This requires a powerful host platform with at least 4GB+ of VRAM recommended
+
+Follow the instructions to set up Stable/Waifu Diffusion if your system is powerful enough
+* https://huggingface.co/hakurei/waifu-diffusion
+
 ## Running
-Run the following with administrator priviledges
+Run the following with administrator privileges
 
 `python PooperScooper.py`
 
