@@ -5,11 +5,13 @@ from io import BytesIO
 
 import discord
 import torch
+import logging
 from diffusers import StableDiffusionPipeline, EulerDiscreteScheduler
 from discord.ext import commands, tasks
 from discord.ext.commands import Cog
 from torch import autocast
 
+log = logging.getLogger(__name__)
 WAIFU_DIFFUSION = "hakurei/waifu-diffusion"
 STABLE_DIFFUSION = "CompVis/stable-diffusion-v1-4"
 CUDA = 'cuda'
@@ -59,7 +61,10 @@ class ImageDiffusion(Cog):
 
     @commands.group(invoke_without_command=True)
     async def waifu(self, ctx: commands.Context, *, prompt: str) -> None:
-        """Queues up a image generation using Waifu trained AI. Best for WAIFUs. """
+        """Queues up image creation using waifu trained AI model.
+
+        Example prompt: Makise Kurisu with a Christmas outfit in a cozy room
+        """
         await self.schedule_generation(ctx, prompt, WAIFU_DIFFUSION)
 
     @waifu.command(name="nsfw")
@@ -69,21 +74,16 @@ class ImageDiffusion(Cog):
 
     @commands.group(invoke_without_command=True)
     async def stable(self, ctx: commands.Context, *, prompt: str) -> None:
-        """Queues up a regular image generation using AI. Best for generic image generation. """
-        await self.schedule_generation(ctx, prompt, STABLE_DIFFUSION, allow_nsfw=False)
+        """Queues up image creation using generic AI model.
+
+        Example prompt: Monkey drinking coffee on the beach
+        """
+        await self.schedule_generation(ctx, prompt, STABLE_DIFFUSION)
 
     @stable.command(name="nsfw")
     async def stable_nsfw(self, ctx: commands.Context, *, prompt: str) -> None:
         """Subcommand for stable command. NSFW Channel ONLY"""
         await self.schedule_generation(ctx, prompt, STABLE_DIFFUSION, allow_nsfw=True)
-
-    # @app_commands.command(name="waifu")
-    # async def generate_waifu_quietly(self, interaction: discord.Interaction) -> None:
-    #     await self._generate_waifu(interaction)
-    #
-    # @app_commands.command(name="waifu")
-    # async def generate_waifu_quietly(self, interaction: discord.Interaction) -> None:
-    #     await self._generate_waifu(interaction)
 
     async def schedule_generation(self, ctx, prompt, model, allow_nsfw=False) -> None:
         entry = ImageCreation(ctx, prompt, allow_nsfw, model)
