@@ -13,7 +13,7 @@ from torch import autocast
 
 log = logging.getLogger(__name__)
 WAIFU_DIFFUSION = "hakurei/waifu-diffusion"
-STABLE_DIFFUSION = "CompVis/stable-diffusion-v1-4"
+STABLE_DIFFUSION = "stabilityai/stable-diffusion-2"
 CUDA = 'cuda'
 
 
@@ -38,7 +38,7 @@ def image_generation(image):
         pipe.safety_checker = lambda images, clip_input: (images, False)
 
     with autocast(CUDA):
-        return pipe(prompt)
+        return pipe(prompt, guidance_scale=6)
 
 
 class ImageCreation:
