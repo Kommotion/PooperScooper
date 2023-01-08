@@ -30,7 +30,8 @@ class MenacesRoles(Cog):
             'she': 1043434950222938172,
             'they': 1043435084331614279,
             'nb': 1043435221313388554,
-            '❓': 1044064871148429312
+            '❓': 1044064871148429312,
+            '🎲': 1061747191879843890     # Dungeons and Dragons
         }
 
     def _ensure_guild_and_channel(self, guild_id, channel_id) -> bool:
