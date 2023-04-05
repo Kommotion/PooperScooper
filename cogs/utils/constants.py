@@ -8,6 +8,7 @@ COOKS_AND_MOCHA = 'cooksandmocha.jpg'
 COOKS = 'cooks.jpg'
 GOOD_BOYS_AND_GIRLS = 'goodboysandgirls.jpg'
 GAMETIME_JSON = 'gametime.json'
+BIRTHDAY_JSON = 'birthday.json'
 
 SECONDS_IN_HOUR = 3600
 MINUTES_IN_HOUR = 60
