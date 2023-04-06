@@ -18,10 +18,11 @@ MIDNIGHT = datetime.time()
 FAILED = "failed"
 REPLACED = "replaced"
 ADDED = "added"
-DONT_CARE = 1945
+NO_YEAR = 1945
 BIRTHDAY = "birthday"
-ALREADY_SAID_HAPPY_BIRTHDAY = "birthday_announced"
+BIRTHDAY_ALREADY_ANNOUNCED = "birthday_announced"
 SERVER_REQUESTED = "server_requested"
+GENERAL = "general"
 
 
 class BirthdayData:
@@ -47,23 +48,26 @@ class BirthdayData:
         log.debug(f"Adding date: {date} from user id:{user_id} in server id: {server}")
 
         try:
-            self.birthday_data[user_id][BIRTHDAY] = date
-            self.birthday_data[user_id][ALREADY_SAID_HAPPY_BIRTHDAY] = False
+            self.birthday_data[user_id][BIRTHDAY] = date.isoformat()
+            self.birthday_data[user_id][BIRTHDAY_ALREADY_ANNOUNCED] = False
             self.birthday_data[user_id][SERVER_REQUESTED] = server
             log.debug(f"Replaced user's data in birthday list")
-            return REPLACED
+            status = REPLACED
         except KeyError:
             log.debug(f"User doesn't have a current birthday, adding to dictionary")
             self.birthday_data[user_id] = dict()
-            self.birthday_data[user_id][BIRTHDAY] = date
-            self.birthday_data[user_id][ALREADY_SAID_HAPPY_BIRTHDAY] = False
+            self.birthday_data[user_id][BIRTHDAY] = date.isoformat()
+            self.birthday_data[user_id][BIRTHDAY_ALREADY_ANNOUNCED] = False
             self.birthday_data[user_id][SERVER_REQUESTED] = server
-            return ADDED
+            status = ADDED
+
+        self.dump_json()
+        return status
 
     def delete_birthday_data(self, user_id: discord.User.id) -> None:
         log.debug(f"Deleting birthday data for {user_id}")
         try:
-            del self.birthday_data[user_id]
+            del self.birthday_data[str(user_id)]
             self.dump_json()
         except KeyError:
             pass
@@ -72,49 +76,94 @@ class BirthdayData:
 class BirthdayTracker(Cog):
     """Commands and loop for tracking birthdays. """
 
-    def __init__(self, bot):
+    def __init__(self, bot: commands.AutoShardedBot):
         self.bot = bot
         self.birthdays = BirthdayData()
         self.check_for_birthdays.start()
 
-    @tasks.loop(time=MIDNIGHT)
+    # @tasks.loop(time=MIDNIGHT)
+    @tasks.loop(seconds=10)
     async def check_for_birthdays(self):
         """Checks if there's any birthdays and sends a message if there is. """
         self.birthdays.load_json()
+        today = datetime.date.today()
 
-        # TODO
-        # Check for if any birthdays are today, if yes, check if a birthday message has already been sent
-        # If a message has already been sent, then don't send another one
-        # Finally, if it's not the birthday, then ensure that message sent has been reset to False for next year
+        for user in self.birthdays.birthday_data:
+            birthday = datetime.date.fromisoformat(self.birthdays.birthday_data[user][BIRTHDAY])
+
+            if birthday.day == today.day and birthday.month == today.month:
+                if self.birthdays.birthday_data[user][BIRTHDAY_ALREADY_ANNOUNCED]:
+                    log.debug(f"It's {user}'s birthday but we've already said happy birthday")
+                    continue
+
+                # Find the proper guild
+                requested_guild_id = int(self.birthdays.birthday_data[user][SERVER_REQUESTED])
+                bday_guild = discord.utils.get(self.bot.guilds, id=requested_guild_id)
+                if not bday_guild:
+                    log.warning(f"We've somehow found a guild ID that is not in the bot's list: {requested_guild_id}")
+                    continue
+
+                log.debug(f"Found guild: {bday_guild.name}, {bday_guild.id}")
+
+                # Find the proper channel from the guild
+                bday_channel = discord.utils.get(bday_guild.text_channels, name=GENERAL)
+                if not bday_channel:
+                    bday_channel = bday_guild.system_channel
+
+                log.debug(f"Found channel: {bday_channel.name}, {bday_channel.id}")
+
+                # Find the person that we're mentioning
+                bday_user = discord.utils.get(bday_guild.members, id=int(user))
+                if not bday_user:
+                    log.warning(f"We've somehow found a guild member that's not in the targeted guild")
+                    continue
+
+                # Find out if the person has given their year as a birthday
+                bday_message = f"EVERYBODY WISH {bday_user.mention} A HAPPY BIRTHDAY!"
+                if birthday.year != NO_YEAR:
+                    years_old = today.year - birthday.year
+                    bday_message += f"\nWelcome to being {years_old} years old 😊"
+
+                # Sending out the happy birthday
+                embed = discord.Embed(title=f"HAPPY BIRTHDAY {bday_user.name} 🎉🎂".upper(), description=bday_message,
+                                      colour=discord.Colour.blue())
+                await bday_channel.send(embed=embed)
+                self.birthdays.birthday_data[user][BIRTHDAY_ALREADY_ANNOUNCED] = True
+
+            # Birthday is not today, let's make sure we reset birthday announcement
+            else:
+                self.birthdays.birthday_data[user][BIRTHDAY_ALREADY_ANNOUNCED] = False
+
+        self.birthdays.dump_json()
 
     @check_for_birthdays.before_loop
-    async def before_gametime(self):
+    async def before_birthday(self):
         await self.bot.wait_until_ready()
 
     @app_commands.command(name="birthday-add")
-    async def birthday(self, interaction: discord.Interaction, month: int, day: int,
-                       year: Optional[int] = DONT_CARE) -> None:
+    async def birthday_add(self, interaction: discord.Interaction, month: int, day: int,
+                           year: Optional[int] = NO_YEAR) -> None:
         """Adds your birthday to the birthday tracker. If it's your birthday, the server will be reminded.
 
-        If your birthday has already been added, it'll be replaced.
+        If your birthday has already been added, it'll be replaced. Cannot do this in multiple servers!
         """
         birthday = datetime.date(year=year, month=month, day=day)
         status = self.birthdays.add_birthday_data(interaction.user.id, birthday, interaction.guild.id)
 
         if status == ADDED:
-            response = "Added your birthday"
+            response = "Your birthday has been added to the tracker"
         elif status == REPLACED:
-            response = "Replaced your birthday"
+            response = "Your previous birthday has been replaced in the tracker"
         else:
             response = "Honestly, I have no clue how you got to this point of the flow, wtf did you do?"
 
         await interaction.response.send_message(response, ephemeral=True)
 
     @app_commands.command(name="birthday-delete")
-    async def birthday(self, interaction: discord.Interaction) -> None:
+    async def birthday_delete(self, interaction: discord.Interaction) -> None:
         """Deletes your birthday from the birthday tracker if it exists."""
         self.birthdays.delete_birthday_data(interaction.user.id)
-        await interaction.response.send_message("Deleted your birthday", ephemeral=True)
+        await interaction.response.send_message("Your birthday has been removed from the tracker", ephemeral=True)
 
 
 async def setup(bot):

@@ -18,7 +18,8 @@ initial_extensions = [
     'cogs.gametime',
     'cogs.grammarpolice',
     'cogs.menacesroles',
-    'cogs.imagediffusion'
+    'cogs.imagediffusion',
+    'cogs.birthdaytracker'
 ]
 
 # Set up logging
