@@ -84,6 +84,7 @@ class BirthdayTracker(Cog):
     @tasks.loop(time=MIDNIGHT)
     async def check_for_birthdays(self):
         """Checks if there's any birthdays and sends a message if there is. """
+        log.info("Checking for birthdays")
         self.birthdays.load_json()
         today = datetime.date.today()
 
@@ -134,6 +135,7 @@ class BirthdayTracker(Cog):
                 self.birthdays.birthday_data[user][BIRTHDAY_ALREADY_ANNOUNCED] = False
 
         self.birthdays.dump_json()
+        log.info("Finished checking for birthdays")
 
     @check_for_birthdays.before_loop
     async def before_birthday(self):
