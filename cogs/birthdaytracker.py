@@ -81,8 +81,7 @@ class BirthdayTracker(Cog):
         self.birthdays = BirthdayData()
         self.check_for_birthdays.start()
 
-    # @tasks.loop(time=MIDNIGHT)
-    @tasks.loop(seconds=10)
+    @tasks.loop(time=MIDNIGHT)
     async def check_for_birthdays(self):
         """Checks if there's any birthdays and sends a message if there is. """
         self.birthdays.load_json()
