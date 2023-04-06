@@ -13,6 +13,7 @@ I was too lazy to write something dynamic.
 3. ImageDiffusion
 4. GrammarPolice
 5. Role Selection by Emoji
+6. Birthday Tracking (Opt in)
 
 ## Installing
 
