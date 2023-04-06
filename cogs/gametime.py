@@ -13,8 +13,8 @@ from pprint import pprint
 log = logging.getLogger(__name__)
 
 # Frequencies in seconds
-UPDATE_FREQUENCY = 15
-SAVE_FREQUENCY = 1807
+UPDATE_FREQUENCY = 60
+SAVE_FREQUENCY = 2000
 
 
 class GameData:
