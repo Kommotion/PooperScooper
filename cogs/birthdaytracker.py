@@ -46,6 +46,7 @@ class BirthdayData:
 
     def add_birthday_data(self, user_id: discord.User.id, date: datetime.date, server: discord.Guild.id) -> str:
         log.debug(f"Adding date: {date} from user id:{user_id} in server id: {server}")
+        user_id = str(user_id)
 
         try:
             self.birthday_data[user_id][BIRTHDAY] = date.isoformat()
