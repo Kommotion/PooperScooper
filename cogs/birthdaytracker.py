@@ -68,6 +68,7 @@ class BirthdayData:
     def delete_birthday_data(self, user_id: discord.User.id) -> None:
         log.debug(f"Deleting birthday data for {user_id}")
         try:
+            self.load_json()
             del self.birthday_data[str(user_id)]
             self.dump_json()
         except KeyError:
