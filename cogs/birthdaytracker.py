@@ -149,12 +149,16 @@ class BirthdayTracker(Cog):
         If your birthday has already been added, it'll be replaced. Cannot do this in multiple servers!
         """
         birthday = datetime.date(year=year, month=month, day=day)
+        if birthday.year != NO_YEAR:
+            birthday_string = f"{birthday.month}-{birthday.day}-{birthday.year}"
+        else:
+            birthday_string = f"{birthday.month}-{birthday.day}"
         status = self.birthdays.add_birthday_data(interaction.user.id, birthday, interaction.guild.id)
 
         if status == ADDED:
-            response = "Your birthday has been added to the tracker"
+            response = f"Your birthday has been added to the tracker as {birthday_string}"
         elif status == REPLACED:
-            response = "Your previous birthday has been replaced in the tracker"
+            response = f"Your previous birthday has been replaced in the tracker as {birthday_string}"
         else:
             response = "Honestly, I have no clue how you got to this point of the flow, wtf did you do?"
 
