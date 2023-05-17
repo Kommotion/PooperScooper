@@ -1,4 +1,4 @@
-discord.py[voice]==2.0.1
+discord.py[voice]==2.2.3
 spotipy==2.21.0
-youtube_dl
 language_tool_python
+yt-dlp

@@ -4,7 +4,7 @@ import logging
 import random
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
-import youtube_dl
+import yt_dlp as youtube_dl
 from discord.ext import commands, tasks
 from discord.ext.commands import Cog
 from cogs.utils.utils import load_credentials
@@ -154,7 +154,7 @@ class Music(Cog):
 
         name = 'Source'
         webpage_url = self._get_value(entry, 'webpage_url')
-        value = '[{}]({})'.format(webpage_url, webpage_url)
+        value = '{}'.format(webpage_url)
         embed.add_field(name=name, value=value, inline=False)
 
         url = self._get_value(entry, 'thumbnail')
