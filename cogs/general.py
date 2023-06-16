@@ -150,7 +150,7 @@ class General(Cog):
             embed.add_field(name=name, value=value, inline=True)
 
             name = 'Github Link'
-            value = '[https://github.com/Kommotion/PooperScooper](https://github.com/Kommotion/PooperScooper)'
+            value = 'https://github.com/Kommotion/PooperScooper'
             embed.add_field(name=name, value=value, inline=False)
 
             name = 'Library'
