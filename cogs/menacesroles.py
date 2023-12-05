@@ -33,7 +33,8 @@ class MenacesRoles(Cog):
             '❓': 1044064871148429312,
             '🎲': 1061747191879843890,     # Dungeons and Dragons
             '❌': 1082501622405550260,   # Opt-out Confessions
-            '🎥': 1075620515571564556
+            '🎥': 1075620515571564556,
+            '🕹️': 1181439853326503946
         }
 
     def _ensure_guild_and_channel(self, guild_id, channel_id) -> bool:
