@@ -133,7 +133,7 @@ class Gametime(Cog):
             total_messages = items // max_embed + 1
             current_message = 1
             embeds_list = list()
-            current_embed = discord.Embed(title=f'Time Played 🎮 {current_message}/{total_messages}',
+            current_embed = discord.Embed(title=f'Time Played (On Discord) 🎮 {current_message}/{total_messages}',
                                           colour=discord.Colour.blue())
 
             for game in sorted_member_data:
@@ -142,7 +142,7 @@ class Gametime(Cog):
                     items_added = 0
                     current_message = total_items_added // max_embed + 1
                     embeds_list.append(current_embed)
-                    current_embed = discord.Embed(title=f'Time Played 🎮 {current_message}/{total_messages}',
+                    current_embed = discord.Embed(title=f'Time Played (On Discord) 🎮 {current_message}/{total_messages}',
                                                   colour=discord.Colour.blue())
                     print('adding to current embed list')
 
