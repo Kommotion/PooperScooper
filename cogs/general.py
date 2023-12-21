@@ -37,12 +37,17 @@ class General(Cog):
     @commands.is_owner()
     @commands.command()
     async def servers(self, ctx):
-        """Lazy implementation to see which servers the bot is currently connected in. """
-        for server in self.bot.guilds:
-            print(server.name)
-            print(server.owner)
-            print(server.members)
-            print(len(server.members))
+        """Servers that the bot is currently connected to."""
+        if len(self.bot.guilds) > 25:
+            embed = discord.Embed(title=f'Servers connected to', description=str(self.bot.guilds),
+                                  colour=discord.Colour.blue())
+        else:
+            embed = discord.Embed(title=f'Servers Connected', colour=discord.Colour.blue())
+            for server in self.bot.guilds:
+                msg = f"Owner: {server.owner}\n"
+                msg += f"Members: {len(server.members)}"
+                embed.add_field(name=server.name, value=msg, inline=False)
+        await ctx.send(embed=embed)
 
     @app_commands.command(name="command-1")
     async def my_command(self, interaction: discord.Interaction) -> None:
