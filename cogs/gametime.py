@@ -1,3 +1,5 @@
+import asyncio
+
 import discord
 import json
 import logging
@@ -110,7 +112,10 @@ class Gametime(Cog):
 
     @commands.command()
     async def played(self, ctx):
-        """Prints the time played for every game Pooper has detected. """
+        """Prints the time played for every game Pooper has detected.
+
+        Ordered from most played to least played game.
+        """
         async with ctx.typing():
             member_id = str(ctx.author.id)
             try:
@@ -119,16 +124,36 @@ class Gametime(Cog):
                 await ctx.send("I scooped a lot but couldn't find any of your data!")
                 return
 
-            embed = discord.Embed(
-                title='Time Played 🎮',
-                colour=discord.Colour.blue()
-            )
+            sorted_member_data = dict(sorted(member_data.items(), key=lambda item: int(item[1]), reverse=True))
 
-            for game in member_data:
+            items_added = 0
+            total_items_added = 0
+            items = len(sorted_member_data)
+            max_embed = 25
+            total_messages = items // max_embed + 1
+            current_message = 1
+            embeds_list = list()
+            current_embed = discord.Embed(title=f'Time Played 🎮 {current_message}/{total_messages}',
+                                          colour=discord.Colour.blue())
+
+            for game in sorted_member_data:
+                if items_added >= max_embed:
+                    total_items_added += items_added
+                    items_added = 0
+                    current_message = total_items_added // max_embed + 1
+                    embeds_list.append(current_embed)
+                    current_embed = discord.Embed(title=f'Time Played 🎮 {current_message}/{total_messages}',
+                                                  colour=discord.Colour.blue())
+                    print('adding to current embed list')
+
                 gametime = self.convert_seconds_to_string(int(member_data[game]))
-                embed.add_field(name=game, value=gametime, inline=False)
+                current_embed.add_field(name=game, value=gametime, inline=False)
+                items_added += 1
 
-            await ctx.send(embed=embed)
+            embeds_list.append(current_embed)
+
+            for embed in embeds_list:
+                await ctx.send(embed=embed)
 
     def convert_seconds_to_string(self, seconds):
         hours, remainder = divmod(seconds, SECONDS_IN_HOUR)
