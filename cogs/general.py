@@ -21,7 +21,7 @@ class General(Cog):
         self.bot.commands_executed += 1
 
     def _get_bot_uptime(self):
-        """Returns the uptime of the bot """
+        """Returns the uptime of the bot."""
         now = discord.utils.utcnow()
         delta = now - self.bot.uptime
         hours, remainder = divmod(int(delta.total_seconds()), 3600)
@@ -57,6 +57,7 @@ class General(Cog):
     @commands.guild_only()
     @commands.command()
     async def sync(self, ctx: commands.Context, guilds: commands.Greedy[discord.Object], spec: typing.Optional[Literal["~", "*", "^"]] = None) -> None:
+        """Owner-only. Remember: Has usage restrictions."""
         if not guilds:
             if spec == "~":
                 synced = await ctx.bot.tree.sync(guild=ctx.guild)
@@ -86,7 +87,7 @@ class General(Cog):
 
     @commands.command()
     async def stats(self, ctx):
-        """Prints out the stats of the bot """
+        """Prints out the stats of the bot."""
         async with ctx.typing():
             embed = discord.Embed(
                 title='Pooper Stats 📝',
@@ -114,12 +115,12 @@ class General(Cog):
 
     @commands.command()
     async def uptime(self, ctx):
-        """Prints out how long the bot has been online """
+        """Prints out how long the bot has been online."""
         await ctx.send('Uptime: **{}**'.format(self._get_bot_uptime()))
 
     @commands.command()
     async def about(self, ctx):
-        """Displays an embed with information about the bot"""
+        """Displays information about the bot."""
         async with ctx.typing():
             pics_path = utils.get_pics_path()
             pooper_scooper_author_path = os.path.join(pics_path, POOPERSCOOPER_PICTURE)

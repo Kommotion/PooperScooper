@@ -115,7 +115,7 @@ class GrammarPolice(Cog):
 
     @commands.command()
     async def opt_in(self, ctx):
-        """Opts in of Grammar Police monitoring. """
+        """Opts in of Grammar Police monitoring."""
         async with ctx.typing():
             member_id = str(ctx.message.author.id)
             if member_id in self.grammar.grammar_errors:

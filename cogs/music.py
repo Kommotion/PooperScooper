@@ -265,7 +265,7 @@ class Music(Cog):
 
     @commands.command()
     async def volume(self, ctx, volume: int):
-        """Adjust the bot's voice volume (15 is the default). """
+        """Adjust the bot's voice volume (15 is the default)."""
         original = int(ctx.voice_client.source.volume * 100)
         ctx.voice_client.source.volume = volume / 100
 
@@ -280,25 +280,25 @@ class Music(Cog):
 
     @commands.command()
     async def skip(self, ctx):
-        """Skip the current song. """
+        """Skip the current song."""
         if ctx.voice_client.is_playing():
             ctx.voice_client.stop()
 
     @commands.command()
     async def stop(self, ctx):
-        """Stops what's playing. """
+        """Stops what's playing."""
         while not self.music_queue.empty():
             self.music_queue.get_nowait()
         await ctx.voice_client.disconnect()
 
     @commands.command()
     async def pause(self, ctx):
-        """Pauses the current song. """
+        """Pauses the current song."""
         ctx.voice_client.pause()
 
     @commands.command()
     async def resume(self, ctx):
-        """Pauses the current song. """
+        """Pauses the current song."""
         ctx.voice_client.resume()
 
     @play.before_invoke
@@ -335,7 +335,7 @@ class Music(Cog):
 
     @commands.command()
     async def count(self, ctx):
-        """Prints the number of people connected to the voice channel that the bot is connected to. """
+        """Current VC member count (Mostly for debug)."""
         voice_states = ctx.voice_client.channel.voice_states
         await ctx.send("{} people detected as connected to this channel".format(len(voice_states)))
 
