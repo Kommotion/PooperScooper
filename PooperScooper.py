@@ -19,7 +19,8 @@ initial_extensions = [
     'cogs.grammarpolice',
     'cogs.menacesroles',
     'cogs.imagediffusion',
-    'cogs.birthdaytracker'
+    'cogs.birthdaytracker',
+    'cogs.poll'
 ]
 
 # Set up logging

@@ -85,6 +85,14 @@ class General(Cog):
             else:
                 ret += 1
 
+    @commands.is_owner()
+    @commands.guild_only()
+    @commands.command()
+    async def global_sync(self, ctx: commands.Context) -> None:
+        """Owner-only. Remember: Has usage restrictions."""
+        command = await self.bot.tree.sync(guild=None)
+        await ctx.send(f'Successfully synced {len(command)} commands')
+
     @commands.command()
     async def stats(self, ctx):
         """Prints out the stats of the bot."""
