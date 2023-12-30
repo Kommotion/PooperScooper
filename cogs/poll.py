@@ -68,7 +68,7 @@ class PollData:
         self.dump_json()
         log.debug("Poll added")
 
-    async def remove_poll_data(self, guild_id: discord.Guild.id, channel_id: discord.Message.id,
+    async def remove_poll_data(self, guild_id: discord.Guild.id, channel_id: discord.TextChannel.id,
                                message_id: discord.Message.id) -> None:
         log.debug(f"Deleting poll data for message id: {message_id}")
         try:
@@ -154,14 +154,15 @@ class Poll(Cog):
         await self._close_poll(guild_id, channel_id, message_id, user_id, message=message)
         await interaction.response.send_message("**The poll has been closed!**", ephemeral=True)
 
-    async def _close_poll(self, guild_id: discord.Guild.id, channel_id: discord.Message.id,
+    async def _close_poll(self, guild_id: discord.Guild.id, channel_id: discord.TextChannel.id,
                           message_id: discord.Message.id, user_id: discord.User.id,
                           message: discord.Message = None) -> None:
         """Updates the poll message with results and removes from tracked polls. """
         # If no interaction, this was probably from an auto-close, so get the message
-        # TODO
         if not message:
-            pass
+            guild = self.bot.get_guild(guild_id)
+            channel = guild.get_channel(channel_id)
+            message = await channel.fetch_message(message_id)
 
         await self.active_polls.remove_poll_data(guild_id, channel_id, message_id)
 
@@ -215,7 +216,6 @@ class Poll(Cog):
             log.debug("Errored out while trying to clear the reactions")
             pass  # Tried to clear the reactions, but could not
 
-
     @app_commands.command(name="poll")
     async def poll(self, interaction: discord.Interaction, question: str, choice_1: Optional[str] = None,
                    choice_2: Optional[str] = None, choice_3: Optional[str] = None, choice_4: Optional[str] = None,
@@ -263,6 +263,10 @@ class Poll(Cog):
         if not valid_choices:
             # Simple poll with one question
             await self.simple_poll(interaction, question)
+        elif len(valid_choices) == 1:
+            await interaction.response.send_message("**You've only given one choice, please choose 2 or more**",
+                                                    ephemeral=True)
+            return
         else:
             # No longer a simple Poll with just yes/no question
             result = await self.complex_poll(interaction, question, valid_choices)
