@@ -146,9 +146,17 @@ class BirthdayTracker(Cog):
     @app_commands.command(name="birthday-add")
     async def birthday_add(self, interaction: discord.Interaction, month: int, day: int,
                            year: Optional[int] = NO_YEAR) -> None:
-        """Adds your birthday to the birthday tracker. If it's your birthday, the server will be reminded.
+        """Adds your birthday to the birthday tracker. If it's your birthday, the server will be reminded (LIMITED TO
+        ONE SERVER).
 
-        If your birthday has already been added, it'll be replaced. Cannot do this in multiple servers!
+        Parameters
+        -----------
+        month: int
+            The month of your birthday
+        day: int
+            The day of your birthday
+        year: Optional[int]
+            The year of your birthday (optional)
         """
         birthday = datetime.date(year=year, month=month, day=day)
         if birthday.year != NO_YEAR:
