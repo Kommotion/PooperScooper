@@ -208,7 +208,7 @@ class Poll(Cog):
         footer += f"\n{winner}"
         embed = discord.Embed(title=new_title, description=new_description, colour=discord.Colour.blue())
         embed.set_footer(text=footer)
-        await message.edit(embed=embed)
+        await message.edit(embed=embed, content=None)
 
         try:
             await message.clear_reactions()
