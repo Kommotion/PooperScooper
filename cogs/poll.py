@@ -106,7 +106,7 @@ class Poll(Cog):
         for message in self.active_polls.poll_data:
             poll_created_date = int(self.active_polls.poll_data[message][DATE_CREATED])
             if current_date - poll_created_date > SECONDS_IN_DAY:
-                log.debug(f"Poll {message} has been open for more than 24 hours, closing poll")
+                log.info(f"Poll {message} has been open for more than 24 hours, closing poll")
                 user_id = int(self.active_polls.poll_data[message][REQUESTER_ID])
                 guild = int(self.active_polls.poll_data[message][GUILD_ID])
                 channel = int(self.active_polls.poll_data[message][CHANNEL_ID])
