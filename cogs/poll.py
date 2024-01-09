@@ -185,7 +185,7 @@ class Poll(Cog):
             max_index = reaction_results.index(max_value)
             if reaction_results.count(max_value) == 1:
                 clean_up = split_og_description[max_index].split(" ", 1)[1]
-                winner = f"The winner is: {clean_up}"
+                winner = f"The winner is: {clean_up.strip()}"
             else:
                 winner = "It's a tie!"
         else:
