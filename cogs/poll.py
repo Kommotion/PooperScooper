@@ -129,7 +129,7 @@ class Poll(Cog):
         # Replace these with the actual vote counts for each choice
         votes_for_choices = list()
         for reaction in reactions:
-            votes_for_choices.append(reaction.count)
+            votes_for_choices.append(reaction.count - 1)
 
         percentages = calculate_percentage_votes(votes_for_choices)
         return percentages
@@ -175,13 +175,15 @@ class Poll(Cog):
             number_of_votes += (reaction.count - 1)
         footer = f"Number of votes: {number_of_votes}"
 
-        # Complex message vs simple message handling
+        # Complex message
         if message.embeds:
             embed = message.embeds[0]
             new_title = embed.title.replace(f"{OPEN_POLL}", f"{CLOSED_POLL}")
             new_description = ""
             split_og_description = embed.description.split("\n")
             for iterator in range(len(message.reactions)):
+                if not split_og_description[iterator]:
+                    continue
                 new_description += f"{reaction_results[iterator]}% | {split_og_description[iterator]}\n"
 
             # Calculate winner of complex message
