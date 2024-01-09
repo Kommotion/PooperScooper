@@ -166,24 +166,18 @@ class Poll(Cog):
 
         await self.active_polls.remove_poll_data(guild_id, channel_id, message_id)
 
-        # Calculate the reaction results
-        reaction_results = await self._calculate_reaction_results(message.reactions)
-
-        # Number of votes minus the default votes from the bot
-        number_of_votes = 0
-        for reaction in message.reactions:
-            number_of_votes += (reaction.count - 1)
-        footer = f"Number of votes: {number_of_votes}"
-
         # Complex message
         if message.embeds:
             embed = message.embeds[0]
             new_title = embed.title.replace(f"{OPEN_POLL}", f"{CLOSED_POLL}")
             new_description = ""
             split_og_description = embed.description.split("\n")
+
+            # Cleanup Reactions
+            trimmed_reactions = message.reactions[:len(split_og_description)]
+            reaction_results = await self._calculate_reaction_results(trimmed_reactions)
+
             for iterator in range(len(message.reactions)):
-                if iterator >= len(split_og_description):
-                    continue
                 new_description += f"{reaction_results[iterator]}% | {split_og_description[iterator]}\n"
 
             # Calculate winner of complex message
@@ -196,6 +190,8 @@ class Poll(Cog):
                 winner = "It's a tie!"
         else:
             # Simple message
+            trimmed_reactions = message.reactions[:2]
+            reaction_results = await self._calculate_reaction_results(trimmed_reactions)
             new_title = message.content.replace(f"{OPEN_POLL}", f"{CLOSED_POLL}")
             new_description = f"{reaction_results[0]}% | 👍\n{reaction_results[1]}% | 👎"
 
@@ -206,6 +202,12 @@ class Poll(Cog):
                 winner = "The winner is: 👎"
             else:
                 winner = "It's a tie!"
+
+        # Number of votes minus the default votes from the bot
+        number_of_votes = 0
+        for reaction in message.reactions:
+            number_of_votes += (reaction.count - 1)
+        footer = f"Number of votes: {number_of_votes}"
 
         footer += f"\n{winner}"
         embed = discord.Embed(title=new_title, description=new_description, colour=discord.Colour.blue())
