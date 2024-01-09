@@ -182,7 +182,7 @@ class Poll(Cog):
             new_description = ""
             split_og_description = embed.description.split("\n")
             for iterator in range(len(message.reactions)):
-                if not split_og_description[iterator]:
+                if iterator >= len(split_og_description):
                     continue
                 new_description += f"{reaction_results[iterator]}% | {split_og_description[iterator]}\n"
 
