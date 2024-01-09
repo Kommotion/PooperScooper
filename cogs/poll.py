@@ -177,7 +177,7 @@ class Poll(Cog):
             trimmed_reactions = message.reactions[:len(split_og_description)]
             reaction_results = await self._calculate_reaction_results(trimmed_reactions)
 
-            for iterator in range(len(message.reactions)):
+            for iterator in range(len(trimmed_reactions)):
                 new_description += f"{reaction_results[iterator]}% | {split_og_description[iterator]}\n"
 
             # Calculate winner of complex message
