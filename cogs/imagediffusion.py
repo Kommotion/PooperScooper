@@ -13,7 +13,7 @@ from torch import autocast
 
 log = logging.getLogger(__name__)
 WAIFU_DIFFUSION = "hakurei/waifu-diffusion"
-STABLE_DIFFUSION = "stabilityai/stable-diffusion-2"
+STABLE_DIFFUSION = "stabilityai/stable-diffusion-2-1"
 CUDA = 'cuda'
 
 
