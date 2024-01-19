@@ -62,6 +62,8 @@ NOTE: This requires a powerful host platform with at least 4GB+ of VRAM recommen
 Follow the instructions to set up Stable/Waifu Diffusion if your system is powerful enough
 * https://huggingface.co/hakurei/waifu-diffusion
 
+You might need Pytorch installation from: https://pytorch.org/get-started/locally/
+
 ## Running
 Run the following with administrator privileges
 
