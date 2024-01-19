@@ -2,3 +2,11 @@ discord.py[voice]==2.3.0
 spotipy==2.21.0
 language_tool_python
 yt-dlp
+setuptools
+numpy
+scipy
+diffusers
+transformers
+accelerate
+scipy
+safetensors
