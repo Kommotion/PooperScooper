@@ -10,3 +10,4 @@ transformers
 accelerate
 scipy
 safetensors
+xformers
