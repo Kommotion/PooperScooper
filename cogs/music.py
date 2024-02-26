@@ -78,10 +78,35 @@ class Music(Cog):
         auth_manager = SpotifyClientCredentials(client_id=client_id, client_secret=client_secret)
         self.spotipy = spotipy.Spotify(auth_manager=auth_manager)
 
+        # Player Control Variables
+        self.repeat_enabled = False
+        self.repeated_entry = None
+        self.loop_enabled = False
+
+    async def reset_player_controls(self):
+        self.repeat_enabled = False
+        self.repeated_entry = None
+        self.loop_enabled = False
+
+    async def get_entry(self):
+        # If repeat is enabled get the stored repeated entry if there is one
+        if self.repeat_enabled:
+            entry = self.repeated_entry if self.repeated_entry else await self.music_queue.get()
+            if not self.repeated_entry:
+                self.repeated_entry = entry
+        else:
+            entry = await self.music_queue.get()
+        return entry
+
     @tasks.loop(seconds=1)
     async def music_player(self):
         self.next_song.clear()
-        entry = await self.music_queue.get()
+        entry = await self.get_entry()
+
+        # If loop is enabled, put it back into the queue
+        if self.loop_enabled:
+            await self.music_queue.put(entry)
+
         if await self.bot_is_alone(entry.ctx):
             return
 
@@ -90,8 +115,13 @@ class Music(Cog):
             embed = self.now_playing_embed(entry)
             await entry.ctx.send(embed=embed)
             entry.voice_client.play(entry.player, after=self.play_next_entry)
+            # If repeat was enabled, make sure that we store the current entry to the repeated entry
+            if self.repeat_enabled:
+                self.repeated_entry = entry
         except Exception as e:
             await self.error_playing_embed(entry)
+            # If there was an error playing the song for some reason skip to the next song
+            self.repeated_entry = None
             self.play_next_entry(e)
 
         await self.next_song.wait()
@@ -130,8 +160,14 @@ class Music(Cog):
         await entry.ctx.send(embed=embed)
 
     def now_playing_embed(self, entry):
+        title = '▶️ Now Playing 🎵'
+        if self.repeat_enabled:
+            title += ' 🔂'
+        elif self.loop_enabled:
+            title += ' 🔁'
+
         embed = discord.Embed(
-            title='Now Playing 🎵',
+            title=title,
             description=entry.player.title,
             colour=discord.Colour.blue(),
         )
@@ -150,6 +186,14 @@ class Music(Cog):
 
         name = 'Songs in Queue'
         value = str(self.music_queue.qsize())
+        embed.add_field(name=name, value=value, inline=True)
+
+        name = 'Loop'
+        value = 'Enabled' if self.loop_enabled else 'Disabled'
+        embed.add_field(name=name, value=value, inline=True)
+
+        name = 'Repeat'
+        value = 'Enabled' if self.repeat_enabled else 'Disabled'
         embed.add_field(name=name, value=value, inline=True)
 
         name = 'Source'
@@ -222,11 +266,17 @@ class Music(Cog):
     @commands.command()
     async def shuffle(self, ctx):
         """Shuffles the current music queue."""
+        if self.repeat_enabled:
+            await ctx.send("Can't shuffle while repeat is enabled!")
+            return
+
         try:
             random.shuffle(self.music_queue._queue)
         except Exception as e:
             log.warning("Failed to shuffle the music queue: {}".format(e))
             await ctx.send("Error shuffling music queue!")
+            return
+
         await ctx.message.add_reaction('👍')
 
     def get_from_spotify(self, url):
@@ -281,6 +331,10 @@ class Music(Cog):
     @commands.command()
     async def skip(self, ctx):
         """Skip the current song."""
+        if self.repeat_enabled:
+            await ctx.send("Can't skip while Repeat is enabled!")
+            return
+
         if ctx.voice_client.is_playing():
             ctx.voice_client.stop()
 
@@ -301,6 +355,27 @@ class Music(Cog):
         """Pauses the current song."""
         ctx.voice_client.resume()
 
+    @commands.command()
+    async def repeat(self, ctx):
+        """Enable/Disable repeat the current playing song."""
+        self.repeat_enabled = not self.repeat_enabled
+        message = "Current/Next Song Repeat is now {}."
+        if self.repeat_enabled:
+            await ctx.send(message.format("enabled"))
+        else:
+            self.repeated_entry = None
+            await ctx.send(message.format("disabled"))
+
+    @commands.command()
+    async def loop(self, ctx):
+        """Enable/Disable looping the current music queue."""
+        self.loop_enabled = not self.loop_enabled
+        message = "Music Looping is now {}."
+        if self.loop_enabled:
+            await ctx.send(message.format("enabled"))
+        else:
+            await ctx.send(message.format("disabled"))
+
     @play.before_invoke
     @join.before_invoke
     @play_shuffle.before_invoke
@@ -308,12 +383,14 @@ class Music(Cog):
         if ctx.voice_client is None:
             if ctx.author.voice:
                 await ctx.author.voice.channel.connect()
+                await self.reset_player_controls()
             else:
                 await ctx.send("You are not connected to a voice channel.")
                 raise commands.CommandError("Author not connected to a voice channel.")
         elif ctx.author.voice:
             if ctx.author.voice.channel != ctx.voice_client.channel:
                 await ctx.voice_client.move_to(ctx.author.voice.channel)
+                await self.reset_player_controls()
 
     @resume.before_invoke
     @pause.before_invoke
@@ -330,6 +407,8 @@ class Music(Cog):
     @resume.after_invoke
     @pause.after_invoke
     @volume.after_invoke
+    @repeat.after_invoke
+    @loop.after_invoke
     async def thumbs_up(self, ctx):
         await ctx.message.add_reaction('👍')
 
