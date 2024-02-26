@@ -104,7 +104,7 @@ class Music(Cog):
         entry = await self.get_entry()
 
         # If loop is enabled, put it back into the queue
-        if self.loop_enabled:
+        if self.loop_enabled and not self.repeat_enabled:
             await self.music_queue.put(entry)
 
         if await self.bot_is_alone(entry.ctx):
