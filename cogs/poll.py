@@ -110,7 +110,13 @@ class Poll(Cog):
                 user_id = int(self.active_polls.poll_data[message][REQUESTER_ID])
                 guild = int(self.active_polls.poll_data[message][GUILD_ID])
                 channel = int(self.active_polls.poll_data[message][CHANNEL_ID])
-                await self._close_poll(guild, channel, message, user_id)
+                log.info(f"User_id {user_id} Guild {guild} Channel {channel}")
+
+                try:
+                    await self._close_poll(guild, channel, message, user_id)
+                except discord.errors as e:
+                    log.info(f"An error occurred while trying to close the previous poll: {e} Continuing to the next")
+                    continue
 
         log.info("Finished auto closing polls")
 
