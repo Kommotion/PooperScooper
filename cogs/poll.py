@@ -162,7 +162,14 @@ class Poll(Cog):
         if not message:
             guild = self.bot.get_guild(guild_id)
             channel = guild.get_channel(channel_id)
-            message = await channel.fetch_message(message_id)
+
+            # Try to get the message, if it doesn't exist then it was probably deleted and remove from future polling
+            try:
+                message = await channel.fetch_message(message_id)
+            except discord.errors.NotFound:
+                log.info(f"Poll was not found. Removing from poll.json.")
+                await self.active_polls.remove_poll_data(guild_id, channel_id, message_id)
+                return
 
         await self.active_polls.remove_poll_data(guild_id, channel_id, message_id)
 
