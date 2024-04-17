@@ -376,6 +376,19 @@ class Music(Cog):
         else:
             await ctx.send(message.format("disabled"))
 
+    @commands.command()
+    async def reload_music(self, ctx):
+        """Reload the music cog in case of any errors (Experimental)."""
+        while not self.music_queue.empty():
+            self.music_queue.get_nowait()
+        await ctx.voice_client.disconnect()
+
+        try:
+            await self.cog_unload()
+            await self.cog_load()
+        except commands.ExtensionNotLoaded:
+            await ctx.send(f'Unable to reload the Music cog.')
+
     @play.before_invoke
     @join.before_invoke
     @play_shuffle.before_invoke
@@ -409,6 +422,7 @@ class Music(Cog):
     @volume.after_invoke
     @repeat.after_invoke
     @loop.after_invoke
+    @reload_music.after_invoke
     async def thumbs_up(self, ctx):
         await ctx.message.add_reaction('👍')
 
