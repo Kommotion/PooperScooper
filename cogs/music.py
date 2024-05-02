@@ -381,7 +381,11 @@ class Music(Cog):
         """Reload the music cog in case of any errors (Experimental)."""
         while not self.music_queue.empty():
             self.music_queue.get_nowait()
-        await ctx.voice_client.disconnect()
+
+        try:
+            await ctx.voice_client.disconnect()
+        except:
+            pass
 
         try:
             await self.cog_unload()
