@@ -1,6 +1,6 @@
 import typing
 from typing import Literal
-
+import logging
 import discord
 from discord import app_commands
 import os
@@ -9,11 +9,13 @@ from discord.ext.commands import Cog
 from cogs.utils import utils
 from cogs.utils.constants import *
 
+log = logging.getLogger(__name__)
+
 
 class General(Cog):
     """Commands for utilities related to Discord or the Bot itself. """
 
-    def __init__(self, bot):
+    def __init__(self, bot: commands.Bot):
         self.bot = bot
 
     @commands.Cog.listener('on_command')
@@ -33,6 +35,18 @@ class General(Cog):
             fmt = '{h} hours, {m} minutes, and {s} seconds'
 
         return fmt.format(d=days, h=hours, m=minutes, s=seconds)
+
+    @commands.command()
+    async def reload_music(self, ctx):
+        """Reload the music cog in case of any errors."""
+        try:
+            await self.bot.unload_extension("cogs.music")
+            log.info("Music Cog unloaded")
+            await self.bot.load_extension("cogs.music")
+            log.info("Music Cog Reloaded")
+            await ctx.message.add_reaction("👍")
+        except commands.ExtensionFailed:
+            await ctx.send(f'Unable to reload the Music cog.')
 
     @commands.is_owner()
     @commands.command()

@@ -376,22 +376,17 @@ class Music(Cog):
         else:
             await ctx.send(message.format("disabled"))
 
-    @commands.command()
-    async def reload_music(self, ctx):
-        """Reload the music cog in case of any errors (Experimental)."""
+    async def cog_unload(self):
+        """Clear music queue and disconnect from all voice channels when unloading the cog"""
         while not self.music_queue.empty():
             self.music_queue.get_nowait()
 
-        try:
-            await ctx.voice_client.disconnect()
-        except:
-            pass
+        for voice_client in self.bot.voice_clients:
+            try:
+                voice_client.disconnect()
+            except:
+                pass
 
-        try:
-            await self.cog_unload()
-            await self.cog_load()
-        except commands.ExtensionNotLoaded:
-            await ctx.send(f'Unable to reload the Music cog.')
 
     @play.before_invoke
     @join.before_invoke
