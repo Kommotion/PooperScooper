@@ -383,7 +383,7 @@ class Music(Cog):
 
         for voice_client in self.bot.voice_clients:
             try:
-                voice_client.disconnect()
+                await voice_client.disconnect()
             except:
                 pass
 
@@ -421,7 +421,6 @@ class Music(Cog):
     @volume.after_invoke
     @repeat.after_invoke
     @loop.after_invoke
-    @reload_music.after_invoke
     async def thumbs_up(self, ctx):
         await ctx.message.add_reaction('👍')
 
