@@ -51,6 +51,7 @@ class General(Cog):
     @commands.is_owner()
     @commands.command()
     async def reload_cog(self, ctx: commands.Context, cog_name: str):
+        """Owner-only. Reload a specified Cog"""
         try:
             await self.bot.unload_extension(cog_name)
             log.info(f"{cog_name} unloaded")
