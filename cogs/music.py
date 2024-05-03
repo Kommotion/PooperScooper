@@ -37,7 +37,7 @@ DEFAULT_VOLUME = 0.15
 
 
 class MusicEntry:
-    def __init__(self, url, voice_client, ctx, player=None):
+    def __init__(self, url, voice_client: discord.VoiceClient, ctx: commands.Context, player=None):
         self.player = player
         self.voice_client = voice_client
         self.ctx = ctx
@@ -137,6 +137,7 @@ class Music(Cog):
         await self.bot.wait_until_ready()
 
     async def bot_is_alone(self, ctx):
+        """If bot is alone, but we are going to keep playing music, return True to stop playing music."""
         number_of_members = len(ctx.voice_client.channel.voice_states)
         if number_of_members <= ONE_MEMBER:
             while not self.music_queue.empty():
@@ -147,7 +148,6 @@ class Music(Cog):
                 colour=discord.Colour.blue(),
             )
             await ctx.send(embed=embed)
-            await ctx.voice_client.disconnect()
             return True
         return False
 
