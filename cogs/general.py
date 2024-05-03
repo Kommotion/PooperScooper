@@ -46,7 +46,20 @@ class General(Cog):
             log.info("Music Cog Reloaded")
             await ctx.message.add_reaction("👍")
         except commands.ExtensionFailed:
-            await ctx.send(f'Unable to reload the Music cog.')
+            await ctx.send(f"Unable to reload the Music cog.")
+
+    @commands.is_owner()
+    @commands.command()
+    async def reload_cog(self, ctx: commands.Context, cog_name: str):
+        try:
+            await self.bot.unload_extension(cog_name)
+            log.info(f"{cog_name} unloaded")
+            await self.bot.load_extension(cog_name)
+            log.info(f"{cog_name} Reloaded")
+            await ctx.message.add_reaction("👍")
+        except commands.ExtensionFailed:
+            await ctx.send(f"Unable to reload {cog_name}")
+
 
     @commands.is_owner()
     @commands.command()
