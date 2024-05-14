@@ -20,7 +20,8 @@ initial_extensions = [
     'cogs.menacesroles',
     'cogs.imagediffusion',
     'cogs.birthdaytracker',
-    'cogs.poll'
+    'cogs.poll',
+    'cogs.palworld'
 ]
 
 # Set up logging

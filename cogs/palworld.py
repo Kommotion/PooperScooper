@@ -1,0 +1,176 @@
+from discord.ext import tasks
+from discord.ext.commands import Cog
+import logging
+import os
+import asyncio
+import psutil
+import subprocess
+from enum import Enum
+from cogs.utils.checks import *
+from cogs.utils.utils import load_credentials
+
+log = logging.getLogger(__name__)
+
+PALWORLD_UTIL_PATH = "palworld_util_path"
+SERVER_WATCHER_IDENTIFIER = "palworld"
+
+
+class State(Enum):
+    OFF = 0
+    ON = 1
+
+
+class PalWorldUtil:
+    """Interface to send palworld utility commands. """
+    def __int__(self, util_path: str):
+        self.path = util_path
+        self.rcon_file_with_path = os.path.join(util_path, "palworld_rcon", "source_rcon.py")
+        self.server_watcher_file_with_path = os.path.join(util_path, "server_watcher.py")
+        self.pid = self.find_watcher_pid()
+        self.state = self.refresh_server_state()
+
+    @staticmethod
+    def find_watcher_pid():
+        """Attempts to find the server watcher PID by finding python.exe with palworld identifier in cmd line. """
+        for process in psutil.process_iter(['pid', 'name', 'cmdline']):
+            try:
+                if process.info['name'] == 'python.exe' and SERVER_WATCHER_IDENTIFIER in process.info['cmdline']:
+                    return process.pid
+            except psutil.AccessDenied as e:
+                logging.error(e)
+                raise e
+
+        logging.warning("No server_watcher process was found!")
+        return None
+
+    def refresh_server_state(self):
+        self.pid = self.find_watcher_pid()
+        self.state = State.ON if self.pid else State.OFF
+        return self.state
+
+    async def is_server_empty(self) -> bool:
+        """Returns True if server is empty else False. """
+        response = await self._send_rcon_command("-cmd ShowPlayers")
+        lines = response.split("\n")
+        # If there are more than 1 lines, that means that there are players in the server
+        return False if len(lines) > 1 else True
+
+    async def is_server_on(self) -> bool:
+        """Returns True if server is still on and off if the server is off. """
+        self.refresh_server_state()
+        return self.state == State.ON
+
+    async def start_server(self) -> None:
+        """Attempts to start the server_watcher if it is not already on. """
+        if await self.is_server_on():
+            logging.debug("The state was already ON when attempting to start it")
+            return
+
+        # Run the server_watcher.py which in turn should start the Palworld server
+        command = f"python {self.server_watcher_file_with_path} {SERVER_WATCHER_IDENTIFIER}"
+        subprocess.run(command)
+
+    async def stop_server(self) -> None:
+        """Stops the server and kills the Server Watcher PID. """
+        if not await self.is_server_on():
+            logging.debug("The state was already OFF when attemping to stop it")
+            return
+
+        # Kill the server_watcher PID and update the State
+        subprocess.run(["taskkill", "/F", "/PID", self.pid])
+        self.state = State.OFF
+
+        # Shut down the Palworld Server
+        await self._send_rcon_command("-cmd Save")
+        await asyncio.sleep(2)
+        await self._send_rcon_command("-cmd Shutdown")
+        await asyncio.sleep(2)
+
+    async def _send_rcon_command(self, args: str) -> str:
+        command_line = f"python {self.rcon_file_with_path} {args}"
+        try:
+            process = subprocess.run(command_line)
+            return str(process.stdout)
+        except subprocess.CalledProcessError as e:
+            logging.error(e)
+            raise e
+
+
+class PalWorld(Cog):
+    """PalWorld Server commands for MTS Server. """
+
+    def __init__(self, bot: commands.AutoShardedBot):
+        self.bot = bot
+        credentials = load_credentials()
+
+        try:
+            self.palworld_util_path = credentials[PALWORLD_UTIL_PATH]
+        except KeyError as e:
+            logging.error(f"Palworld Util in config is not detected. Ensure that {PALWORLD_UTIL_PATH} is defined in "
+                          f"config")
+            raise e
+
+        self.palworld = PalWorldUtil()
+        self.auto_shutdown_server_if_idle.start()
+
+    @tasks.loop(hours=8)
+    async def auto_shutdown_server_if_idle(self) -> None:
+        """Automatically shuts down the server if the server is idle. """
+        if not await self.palworld.is_server_on():
+            logging.debug("Palworld Watcher State is OFF. Skipping Idle Check")
+            return
+
+        if not await self.palworld.is_server_empty():
+            logging.info("Palworld server is not empty. Finishing auto shutdown check")
+            return
+
+        await self.palworld.stop_server()
+        logging.info("Finished Palworld server stop")
+
+    @auto_shutdown_server_if_idle.before_loop
+    async def before_poll_check(self) -> None:
+        await self.bot.wait_until_ready()
+
+    @commands.group()
+    @is_pooper_support_guild()
+    async def palworld(self, ctx: commands.Context) -> None:
+        """Do "!help palworld" for subcommands. """
+        await ctx.send('Do "!help palworld" for subcommands.')
+
+    @palworld.command(name="start")
+    @is_pooper_support_guild()
+    async def palworld_start(self, ctx: commands.Context):
+        """Starts the Palworld server if it is off. """
+        await self.palworld.start_server()
+
+    @palworld.command(name="stop")
+    @is_pooper_support_guild()
+    async def palworld_stop(self, ctx: commands.Context):
+        """Stops the Palworld server if it is on. """
+        await self.palworld.stop_server()
+
+    @palworld.command(name="restart")
+    @is_pooper_support_guild()
+    async def palworld_restart(self, ctx: commands.Context):
+        """TBD """
+        await ctx.send("To be implemented")
+
+    @palworld.command(name="players")
+    @is_pooper_support_guild()
+    async def palworld_players(self, ctx: commands.Context):
+        """TBD """
+        await ctx.send("To be implemented")
+
+    @palworld.command(name="uptime")
+    @is_pooper_support_guild()
+    async def palworld_uptime(self, ctx: commands.Context):
+        """TBD """
+        await ctx.send("To be implemented. ")
+
+    @palworld.after_invoke
+    async def thumbs_up(self, ctx):
+        await ctx.message.add_reaction(THUMBS_UP_EMOJI)
+
+
+async def setup(bot) -> None:
+    await bot.add_cog(PalWorld(bot))
