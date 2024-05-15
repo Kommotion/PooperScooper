@@ -40,7 +40,7 @@ class PalWorldUtil:
                 logging.error(e)
                 raise e
 
-        logging.warning("No server_watcher process was found!")
+        logging.debug("No server_watcher process was found!")
         return None
 
     def refresh_server_state(self):
@@ -50,13 +50,15 @@ class PalWorldUtil:
 
     async def is_server_empty(self) -> bool:
         """Returns True if server is empty else False. """
-        response = await self.show_players()
+        response = await self._send_rcon_command("-cmd ShowPlayers")
         lines = response.split("\n")
         # If there are more than 1 lines, that means that there are players in the server
         return False if len(lines) > 1 else True
 
     async def show_players(self) -> str:
         """Returns the output of the ShowPlayers RCON command. """
+        if not await self.is_server_on():
+            return "Server is off"
         return await self._send_rcon_command("-cmd ShowPlayers")
 
     async def is_server_on(self) -> bool:
@@ -72,7 +74,11 @@ class PalWorldUtil:
 
         # Run the server_watcher.py which in turn should start the Palworld server
         command = f"python {self.server_watcher_file_with_path} {SERVER_WATCHER_IDENTIFIER}"
-        subprocess.run(command)
+        logging.debug(command)
+        proc = subprocess.Popen(command, cwd=self.path)
+        logging.debug(proc.stdout)
+        logging.debug(proc.stderr)
+        await asyncio.sleep(2)
 
     async def stop_server(self) -> None:
         """Stops the server and kills the Server Watcher PID. """
@@ -81,15 +87,19 @@ class PalWorldUtil:
             return
 
         # Kill the server_watcher PID and update the State
-        subprocess.run(["taskkill", "/F", "/PID", self.pid])
+        subprocess.run(["taskkill", "/F", "/PID", str(self.pid)])
         self.state = State.OFF
 
         # Shut down the Palworld Server
-        await self.save()
+        await self._send_rcon_command("-cmd Save")
         await self._send_rcon_command("-cmd Shutdown")
+        await asyncio.sleep(30)
 
-    async def save(self) -> None:
-        await self._send_rcon_command("-Cmd Save")
+    async def save(self) -> bool:
+        if not await self.is_server_on():
+            return False
+        await self._send_rcon_command("-cmd Save")
+        return True
 
     async def _send_rcon_command(self, args: str) -> str:
         command_line = f"python {self.rcon_file_with_path} {args}"
@@ -121,6 +131,8 @@ class PalWorld(Cog):
     @tasks.loop(hours=8)
     async def auto_shutdown_server_if_idle(self) -> None:
         """Automatically shuts down the server if the server is idle. """
+        logging.info("Checking if Palworld server is idle to stop it")
+
         if not await self.palworld.is_server_on():
             logging.debug("Palworld Watcher State is OFF. Skipping Idle Check")
             return
@@ -142,14 +154,14 @@ class PalWorld(Cog):
         """Do "!help palworld" for subcommands. """
         await ctx.send('Do "!help palworld" for subcommands.')
 
-    @palworld.command(name="start")
+    @palworld.command(name="start_server")
     @is_pooper_support_guild()
     async def palworld_start(self, ctx: commands.Context):
         """Starts the Palworld server if it is off. """
         await self.palworld.start_server()
         await ctx.message.add_reaction(THUMBS_UP_EMOJI)
 
-    @palworld.command(name="stop")
+    @palworld.command(name="stop_server")
     @is_pooper_support_guild()
     async def palworld_stop(self, ctx: commands.Context):
         """Stops the Palworld server if it is on. """
@@ -161,7 +173,7 @@ class PalWorld(Cog):
     async def palworld_restart(self, ctx: commands.Context):
         """Restarts the Palworld Server. """
         await self.palworld.stop_server()
-        await asyncio.sleep(60)
+        await asyncio.sleep(15)
         await self.palworld.start_server()
         await ctx.message.add_reaction(THUMBS_UP_EMOJI)
 
@@ -178,15 +190,18 @@ class PalWorld(Cog):
         """Shows if the Palworld server is currently on or off. """
         state = await self.palworld.is_server_on()
         if state:
-            await ctx.send("The server is currently on")
+            await ctx.send("The server is currently on.")
         else:
-            await ctx.send("The server is currently off")
+            await ctx.send("The server is currently off.")
 
-    @palworld.command(name="save")
+    @palworld.command(name="save_server")
     @is_pooper_support_guild()
     async def palworld_save(self, ctx: commands.Context):
         """Saves the current state of the server. """
-        await self.palworld.save()
+        response = await self.palworld.save()
+        if not response:
+            await ctx.send("Server is not on, cannot save.")
+            return
         await ctx.message.add_reaction(THUMBS_UP_EMOJI)
 
 
