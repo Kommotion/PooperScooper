@@ -22,11 +22,11 @@ class State(Enum):
 
 class PalWorldUtil:
     """Interface to send palworld utility commands. """
-    def __int__(self, util_path: str):
+    def __init__(self, util_path: str):
         self.path = util_path
         self.rcon_file_with_path = os.path.join(util_path, "palworld_rcon", "source_rcon.py")
         self.server_watcher_file_with_path = os.path.join(util_path, "server_watcher.py")
-        self.pid = self.find_watcher_pid()
+        self.pid = None
         self.state = self.refresh_server_state()
 
     @staticmethod
@@ -50,10 +50,14 @@ class PalWorldUtil:
 
     async def is_server_empty(self) -> bool:
         """Returns True if server is empty else False. """
-        response = await self._send_rcon_command("-cmd ShowPlayers")
+        response = await self.show_players()
         lines = response.split("\n")
         # If there are more than 1 lines, that means that there are players in the server
         return False if len(lines) > 1 else True
+
+    async def show_players(self) -> str:
+        """Returns the output of the ShowPlayers RCON command. """
+        return await self._send_rcon_command("-cmd ShowPlayers")
 
     async def is_server_on(self) -> bool:
         """Returns True if server is still on and off if the server is off. """
@@ -73,7 +77,7 @@ class PalWorldUtil:
     async def stop_server(self) -> None:
         """Stops the server and kills the Server Watcher PID. """
         if not await self.is_server_on():
-            logging.debug("The state was already OFF when attemping to stop it")
+            logging.debug("The state was already OFF when attempting to stop it")
             return
 
         # Kill the server_watcher PID and update the State
@@ -81,10 +85,11 @@ class PalWorldUtil:
         self.state = State.OFF
 
         # Shut down the Palworld Server
-        await self._send_rcon_command("-cmd Save")
-        await asyncio.sleep(2)
+        await self.save()
         await self._send_rcon_command("-cmd Shutdown")
-        await asyncio.sleep(2)
+
+    async def save(self) -> None:
+        await self._send_rcon_command("-Cmd Save")
 
     async def _send_rcon_command(self, args: str) -> str:
         command_line = f"python {self.rcon_file_with_path} {args}"
@@ -101,16 +106,16 @@ class PalWorld(Cog):
 
     def __init__(self, bot: commands.AutoShardedBot):
         self.bot = bot
-        credentials = load_credentials()
 
         try:
-            self.palworld_util_path = credentials[PALWORLD_UTIL_PATH]
+            credentials = load_credentials()
+            palworld_util_path = credentials[PALWORLD_UTIL_PATH]
         except KeyError as e:
             logging.error(f"Palworld Util in config is not detected. Ensure that {PALWORLD_UTIL_PATH} is defined in "
                           f"config")
             raise e
 
-        self.palworld = PalWorldUtil()
+        self.palworld = PalWorldUtil(palworld_util_path)
         self.auto_shutdown_server_if_idle.start()
 
     @tasks.loop(hours=8)
@@ -131,7 +136,7 @@ class PalWorld(Cog):
     async def before_poll_check(self) -> None:
         await self.bot.wait_until_ready()
 
-    @commands.group()
+    @commands.group(invoke_without_command=True)
     @is_pooper_support_guild()
     async def palworld(self, ctx: commands.Context) -> None:
         """Do "!help palworld" for subcommands. """
@@ -142,33 +147,36 @@ class PalWorld(Cog):
     async def palworld_start(self, ctx: commands.Context):
         """Starts the Palworld server if it is off. """
         await self.palworld.start_server()
+        await ctx.message.add_reaction(THUMBS_UP_EMOJI)
 
     @palworld.command(name="stop")
     @is_pooper_support_guild()
     async def palworld_stop(self, ctx: commands.Context):
         """Stops the Palworld server if it is on. """
         await self.palworld.stop_server()
+        await ctx.message.add_reaction(THUMBS_UP_EMOJI)
 
     @palworld.command(name="restart")
     @is_pooper_support_guild()
     async def palworld_restart(self, ctx: commands.Context):
-        """TBD """
-        await ctx.send("To be implemented")
+        """Restarts the Palworld Server. """
+        await self.palworld.stop_server()
+        await asyncio.sleep(60)
+        await self.palworld.start_server()
+        await ctx.message.add_reaction(THUMBS_UP_EMOJI)
 
     @palworld.command(name="players")
     @is_pooper_support_guild()
     async def palworld_players(self, ctx: commands.Context):
-        """TBD """
-        await ctx.send("To be implemented")
+        """Shows the output of the players connected to the server. """
+        msg = await self.palworld.show_players()
+        await ctx.send(msg)
 
-    @palworld.command(name="uptime")
+    @palworld.command(name="save")
     @is_pooper_support_guild()
-    async def palworld_uptime(self, ctx: commands.Context):
-        """TBD """
-        await ctx.send("To be implemented. ")
-
-    @palworld.after_invoke
-    async def thumbs_up(self, ctx):
+    async def save(self, ctx: commands.Context):
+        """Saves the current state of the server. """
+        await self.palworld.save()
         await ctx.message.add_reaction(THUMBS_UP_EMOJI)
 
 
