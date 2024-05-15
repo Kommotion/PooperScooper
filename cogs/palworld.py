@@ -149,27 +149,27 @@ class PalWorld(Cog):
         await self.bot.wait_until_ready()
 
     @commands.group(invoke_without_command=True)
-    @is_pooper_support_guild()
+    @is_menace_guild()
     async def palworld(self, ctx: commands.Context) -> None:
         """Do "!help palworld" for subcommands. """
         await ctx.send('Do "!help palworld" for subcommands.')
 
     @palworld.command(name="start_server")
-    @is_pooper_support_guild()
+    @is_menace_guild()
     async def palworld_start(self, ctx: commands.Context):
         """Starts the Palworld server if it is off. """
         await self.palworld.start_server()
         await ctx.message.add_reaction(THUMBS_UP_EMOJI)
 
     @palworld.command(name="stop_server")
-    @is_pooper_support_guild()
+    @is_menace_guild()
     async def palworld_stop(self, ctx: commands.Context):
         """Stops the Palworld server if it is on. """
         await self.palworld.stop_server()
         await ctx.message.add_reaction(THUMBS_UP_EMOJI)
 
     @palworld.command(name="restart")
-    @is_pooper_support_guild()
+    @is_menace_guild()
     async def palworld_restart(self, ctx: commands.Context):
         """Restarts the Palworld Server. """
         await self.palworld.stop_server()
@@ -178,14 +178,14 @@ class PalWorld(Cog):
         await ctx.message.add_reaction(THUMBS_UP_EMOJI)
 
     @palworld.command(name="players")
-    @is_pooper_support_guild()
+    @is_menace_guild()
     async def palworld_players(self, ctx: commands.Context):
         """Shows the output of the players connected to the server. """
         msg = await self.palworld.show_players()
         await ctx.send(msg)
 
     @palworld.command(name="state")
-    @is_pooper_support_guild()
+    @is_menace_guild()
     async def palworld_state(self, ctx: commands.Context):
         """Shows if the Palworld server is currently on or off. """
         state = await self.palworld.is_server_on()
@@ -195,7 +195,7 @@ class PalWorld(Cog):
             await ctx.send("The server is currently off.")
 
     @palworld.command(name="save_server")
-    @is_pooper_support_guild()
+    @is_menace_guild()
     async def palworld_save(self, ctx: commands.Context):
         """Saves the current state of the server. """
         response = await self.palworld.save()
