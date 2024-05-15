@@ -172,9 +172,19 @@ class PalWorld(Cog):
         msg = await self.palworld.show_players()
         await ctx.send(msg)
 
+    @palworld.command(name="state")
+    @is_pooper_support_guild()
+    async def palworld_state(self, ctx: commands.Context):
+        """Shows if the Palworld server is currently on or off. """
+        state = await self.palworld.is_server_on()
+        if state:
+            await ctx.send("The server is currently on")
+        else:
+            await ctx.send("The server is currently off")
+
     @palworld.command(name="save")
     @is_pooper_support_guild()
-    async def save(self, ctx: commands.Context):
+    async def palworld_save(self, ctx: commands.Context):
         """Saves the current state of the server. """
         await self.palworld.save()
         await ctx.message.add_reaction(THUMBS_UP_EMOJI)
