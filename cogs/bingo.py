@@ -55,18 +55,18 @@ class BingoData:
 
     async def get_bingo_list(self, guild_id: discord.Guild.id) -> list | None:
         try:
-            return self.bingo_data[guild_id]
+            return self.bingo_data[str(guild_id)]
         except KeyError:
             return None
 
     async def add_bingo_data(self, guild_id: discord.Guild.id, prompt: str) -> bool:
-        new_bingo = {
-            guild_id: [prompt.strip()]
-        }
-
+        guild_id = str(guild_id)
         try:
-            self.bingo_data[guild_id].extend(new_bingo[guild_id])
+            self.bingo_data[guild_id].append(prompt.strip())
         except KeyError:
+            new_bingo = {
+                guild_id: [prompt.strip()]
+            }
             self.bingo_data.update(new_bingo)
         except Exception as e:
             log.debug(f"Unable to add bingo card because: {e}")
@@ -77,6 +77,7 @@ class BingoData:
         return True
 
     async def remove_bingo_data(self, guild_id: discord.Guild.id, prompt: str) -> bool:
+        guild_id = str(guild_id)
         prompt = prompt.strip()
         log.debug(f"Deleting bingo data for prompt: {prompt}")
 
@@ -128,20 +129,11 @@ class Bingo(Cog):
 
         log.debug(f'Prompts from {interaction.guild_id}: {bingo_list}')
 
-        current_message = "Here are the prompts for your Bingo Card:\n"
-        for line in bingo_list:
-            # Check if adding the new line would exceed the 2000-character limit
-            if len(current_message) + len(line) + 1 > 2000:  # +1 for the newline character
-                # Send the current accumulated message and start a new one
-                await interaction.followup.send(current_message, ephemeral=True)
-                current_message = ""
+        prompts = "Here are the prompts for your Bingo Card:\n"
+        for prompt in bingo_list:
+            prompts += f'{prompt}\n'
 
-            # Add the current line to the message
-            current_message += line + "\n"
-
-        # Send any remaining text that hasn't been sent yet
-        if current_message:
-            await interaction.followup.send(current_message, ephemeral=True)
+        await interaction.response.send_message(prompts, ephemeral=True)
 
     @app_commands.command(name="bingo-remove")
     async def remove_bingo(self, interaction: discord.Interaction, prompt: str) -> None:
@@ -155,9 +147,9 @@ class Bingo(Cog):
         log.debug(f"Removing bingo from {interaction.user.name} from {interaction.guild.name}")
         result = await self.bingo_data.remove_bingo_data(interaction.guild_id, prompt)
         if result:
-            message = f"Removed your prompt from the bingo list: \n{prompt}"
+            message = f"**Removed your prompt from the bingo list: \n{prompt}**"
         else:
-            message = "Unable to remove your prompt. Use my /list_bingo command to see if it even exists."
+            message = "**Unable to remove your prompt. Use my /list_bingo command to see if it even exists.**"
         await interaction.response.send_message(f"**{message}**")
 
     @app_commands.command(name="bingo-generate")
@@ -177,7 +169,7 @@ class Bingo(Cog):
 
         # Print the Bingo card as a table
         bingo_card_name = await self.save_bingo_card_as_image(bingo_card)
-        await interaction.response.send_message(file=bingo_card_name, ephemeral=True)
+        await interaction.response.send_message(file=discord.File(bingo_card_name), ephemeral=True)
 
     async def _generate_bingo_card(self, full_bingo_list: list) -> list:
         # Ensure we have enough items to fill the Bingo card (24 spaces)
