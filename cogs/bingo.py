@@ -114,10 +114,19 @@ class Bingo(Cog):
         log.debug(f"Adding bingo from {interaction.user.name} from {interaction.guild.name}")
         result = await self.bingo_data.add_bingo_data(interaction.guild_id, prompt)
         if result:
-            message = f'Added your prompt to the bingo list: \n{prompt}'
+            title = 'Added your prompt to the bingo list'
+            message = prompt
         else:
-            message = 'ERROR: Unable to add your prompt to the list for some unknown reason'
-        await interaction.response.send_message(f'**{message}**')
+            title = 'ERROR'
+            message = 'Unable to add your prompt to the list for some unknown reason'
+
+        embed = discord.Embed(
+            title=title,
+            description=message,
+            colour=discord.Colour.blue()
+        )
+
+        await interaction.response.send_message(embed=embed)
 
     @app_commands.command(name="bingo-list")
     async def list_bingo(self, interaction: discord.Interaction) -> None:
@@ -129,11 +138,17 @@ class Bingo(Cog):
 
         log.debug(f'Prompts from {interaction.guild_id}: {bingo_list}')
 
-        prompts = "Here are the prompts for your Bingo Card:\n"
+        prompts = ""
         for prompt in bingo_list:
             prompts += f'{prompt}\n'
 
-        await interaction.response.send_message(prompts, ephemeral=True)
+        embed = discord.Embed(
+            title='Prompts for your server\'s Bingo Card',
+            description=prompts,
+            colour=discord.Colour.blue()
+        )
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="bingo-remove")
     async def remove_bingo(self, interaction: discord.Interaction, prompt: str) -> None:
@@ -147,10 +162,19 @@ class Bingo(Cog):
         log.debug(f"Removing bingo from {interaction.user.name} from {interaction.guild.name}")
         result = await self.bingo_data.remove_bingo_data(interaction.guild_id, prompt)
         if result:
-            message = f"**Removed your prompt from the bingo list: \n{prompt}**"
+            title = "Removed your prompt from the bingo list"
+            message = prompt
         else:
-            message = "**Unable to remove your prompt. Use my /list_bingo command to see if it even exists.**"
-        await interaction.response.send_message(f"**{message}**")
+            title = "Unable to remove your prompt"
+            message = "Use my /list_bingo command to see if it even exists."
+
+        embed = discord.Embed(
+            title=title,
+            description=message,
+            colour=discord.Colour.blue()
+        )
+
+        await interaction.response.send_message(embed=embed)
 
     @app_commands.command(name="bingo-generate")
     async def generate_bingo_card(self, interaction: discord.Interaction) -> None:
