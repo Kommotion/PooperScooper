@@ -1,4 +1,4 @@
-discord.py[voice]==2.3.2
+discord.py[voice]==2.4.0
 spotipy==2.21.0
 language_tool_python
 yt-dlp
@@ -11,3 +11,5 @@ accelerate
 scipy
 safetensors
 xformers
+pandas
+matplotlib
