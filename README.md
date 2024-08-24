@@ -4,8 +4,8 @@ Personal Discord bot using the discord.py library by Rapptz (https://github.com/
 This bot was intended to be a single server bot and was not developed to be in multiple servers.
 Feel free to use this as a reference for your own bot.
 
-Note: Some stuff will be hardcoded to particular servers such as menacesroles and grammarpolice cogs.
-I was too lazy to write something dynamic.
+Note: Some stuff will be hardcoded to particular servers such as menacesroles and grammarpolice cogs. Change these if
+your intention is to use this in your own server.
 
 ## Key Features
 1. Music
@@ -15,6 +15,7 @@ I was too lazy to write something dynamic.
 5. Role Selection by Emoji
 6. Birthday Tracking (Opt in)
 7. Poll
+8. Bingo Card Generation
 
 ## Installing
 
