@@ -21,7 +21,8 @@ initial_extensions = [
     'cogs.imagediffusion',
     'cogs.birthdaytracker',
     'cogs.poll',
-    'cogs.palworld'
+    'cogs.palworld',
+    'cogs.bingo'
 ]
 
 # Set up logging
