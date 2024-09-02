@@ -137,18 +137,33 @@ class Bingo(Cog):
             return
 
         log.debug(f'Prompts from {interaction.guild_id}: {bingo_list}')
+        MAX_CHARS = 4096
+        embed_title = 'Prompts for your server\'s Bingo Card'
+        embed_color = discord.Color.blue()
+        embeds = []
+        current_description = ""
 
-        prompts = ""
         for prompt in bingo_list:
-            prompts += f'{prompt}\n'
+            new_description = f'{current_description}{prompt}\n'
 
-        embed = discord.Embed(
-            title='Prompts for your server\'s Bingo Card',
-            description=prompts,
-            colour=discord.Colour.blue()
-        )
+            if len(new_description) > MAX_CHARS:
+                embed = discord.Embed(title=embed_title, description=current_description, color=embed_color)
+                embeds.append(embed)
+                current_description = f'{prompt}\n'
+            else:
+                current_description = new_description
 
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        # create a new embed with the remaining description (if any)
+        if current_description:
+            embed = discord.Embed(title=embed_title, description=current_description, color=embed_color)
+            embeds.append(embed)
+
+        # reply to the interaction with the first embed
+        await interaction.response.send_message(embed=embeds[0])
+
+        # send the remaining embeds as followups
+        for embed in embeds[1:]:
+            await interaction.followup.send(embed=embed)
 
     @app_commands.command(name="bingo-remove")
     async def remove_bingo(self, interaction: discord.Interaction, prompt: str) -> None:
@@ -227,7 +242,6 @@ class Bingo(Cog):
         # Use a color palette for the cells
         background_color = '#f0f8ff'  # Alice Blue
         header_color = '#ff4500'  # Orange Red
-        free_space_color = '#ffd700'  # Gold
         edge_color = '#696969'  # Dim Gray
         text_color = '#000000'  # Black
 
@@ -238,9 +252,6 @@ class Bingo(Cog):
                 cell.set_text_props(fontsize=16, color=text_color, weight='bold')
                 cell.set_facecolor(background_color)
                 cell.set_edgecolor(edge_color)
-
-        # Highlight the "Free" space
-        # table[3, 2].set_facecolor(free_space_color)
 
         # Color header
         for j in range(len(df.columns)):
