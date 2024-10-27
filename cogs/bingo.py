@@ -59,30 +59,45 @@ class BingoData:
         except KeyError:
             return None
 
-    async def add_bingo_data(self, guild_id: discord.Guild.id, prompt: str) -> bool:
+    async def add_bingo_data(self, guild_id: discord.Guild.id, prompt: str) -> (bool, str):
         guild_id = str(guild_id)
+        prompt = prompt.strip()
+        lowercase_prompt = prompt.lower()
+        reason = ''
+
         try:
-            self.bingo_data[guild_id].append(prompt.strip())
+            bingo_data_lowercase = [string.lower() for string in self.bingo_data[guild_id]]
+            # If prompt already exists, don't add it
+            if lowercase_prompt in bingo_data_lowercase:
+                reason = "Prompt already exists."
+                return False, reason
+            self.bingo_data[guild_id].append(prompt)
         except KeyError:
+            # This is the first time that a prompt has been added to the guild
+            # Therefore we don't need to check for duplicates
             new_bingo = {
-                guild_id: [prompt.strip()]
+                guild_id: [prompt]
             }
             self.bingo_data.update(new_bingo)
         except Exception as e:
             log.debug(f"Unable to add bingo card because: {e}")
-            return False
+            reason = "An unknown error occurred."
+            return False, reason
 
         self.dump_json()
         log.debug("bingo added")
-        return True
+        return True, reason
 
     async def remove_bingo_data(self, guild_id: discord.Guild.id, prompt: str) -> bool:
         guild_id = str(guild_id)
         prompt = prompt.strip()
+        lowercase_prompt = prompt.lower()
         log.debug(f"Deleting bingo data for prompt: {prompt}")
 
         try:
-            self.bingo_data[guild_id].remove(prompt)
+            bingo_data_lowercase = [string.lower() for string in self.bingo_data[guild_id]]
+            prompt_index = bingo_data_lowercase.index(lowercase_prompt)
+            del self.bingo_data[guild_id][prompt_index]
         except KeyError:
             log.warning(f"guild_id is not currently in bingo data: {guild_id}")
             return False
@@ -112,13 +127,13 @@ class Bingo(Cog):
             The Bingo prompt to add to the list of bingo prompts. Example: Angel in a Queen Avi
         """
         log.debug(f"Adding bingo from {interaction.user.name} from {interaction.guild.name}")
-        result = await self.bingo_data.add_bingo_data(interaction.guild_id, prompt)
+        result, reason = await self.bingo_data.add_bingo_data(interaction.guild_id, prompt)
         if result:
             title = 'Added your prompt to the bingo list'
             message = prompt
         else:
             title = 'ERROR'
-            message = 'Unable to add your prompt to the list for some unknown reason'
+            message = f'Unable to add your prompt to the list because: {reason}'
 
         embed = discord.Embed(
             title=title,
@@ -211,8 +226,8 @@ class Bingo(Cog):
         await interaction.response.send_message(file=discord.File(bingo_card_name), ephemeral=True)
 
     async def _generate_bingo_card(self, full_bingo_list: list) -> list:
-        # Ensure we have enough items to fill the Bingo card (24 spaces)
-
+        # Ensure that there are no duplicates in the full bingo list by converting to set
+        full_bingo_list = set(full_bingo_list)
 
         # Randomly select 25 items from the list
         selected_items = random.sample(full_bingo_list, 25)
