@@ -226,9 +226,6 @@ class Bingo(Cog):
         await interaction.response.send_message(file=discord.File(bingo_card_name), ephemeral=True)
 
     async def _generate_bingo_card(self, full_bingo_list: list) -> list:
-        # Ensure that there are no duplicates in the full bingo list by converting to set
-        full_bingo_list = set(full_bingo_list)
-
         # Randomly select 25 items from the list
         selected_items = random.sample(full_bingo_list, 25)
 
