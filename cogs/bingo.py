@@ -158,7 +158,9 @@ class Bingo(Cog):
         embeds = []
         current_description = ""
 
-        for prompt in bingo_list:
+        sorted_bingo_list = sorted(bingo_list, key=str.lower)
+
+        for prompt in sorted_bingo_list:
             new_description = f'{current_description}{prompt}\n'
 
             if len(new_description) > MAX_CHARS:
