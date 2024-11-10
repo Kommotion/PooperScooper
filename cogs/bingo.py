@@ -6,15 +6,18 @@ import matplotlib.pyplot as plt
 import discord
 from discord.ext import commands, tasks
 from discord.ext.commands import Cog
+
 from cogs.utils.utils import create_json
 from discord import app_commands
 import logging
 import os
 import json
 from pprint import pprint
+from difflib import SequenceMatcher
 
 log = logging.getLogger(__name__)
 BINGO_JSON = 'bingo.json'
+SIMILARITY_THRESHOLD = 0.85
 
 
 def wrap_text(text, max_line_length):
@@ -59,7 +62,19 @@ class BingoData:
         except KeyError:
             return None
 
-    async def add_bingo_data(self, guild_id: discord.Guild.id, prompt: str) -> (bool, str):
+    async def _prompt_already_exists(self, bingo_data_lowercase: list, new_prompt: str) -> (bool, str):
+        """
+        :param bingo_data_lowercase: The bingo data in lowercase
+        :param new_prompt: The prompt that is going to be added
+        :return: True if already exists else False, Prompt that matches if True else None
+        """
+        for existing_prompt in bingo_data_lowercase:
+            similarity_ratio = SequenceMatcher(None, existing_prompt, new_prompt).ratio()
+            if similarity_ratio >= SIMILARITY_THRESHOLD:
+                return True, existing_prompt
+        return False, None
+
+    async def add_bingo_data(self, guild_id: discord.Guild.id, prompt: str) -> (bool, str|None):
         guild_id = str(guild_id)
         prompt = prompt.strip()
         lowercase_prompt = prompt.lower()
@@ -68,8 +83,9 @@ class BingoData:
         try:
             bingo_data_lowercase = [string.lower() for string in self.bingo_data[guild_id]]
             # If prompt already exists, don't add it
-            if lowercase_prompt in bingo_data_lowercase:
-                reason = "Prompt already exists."
+            already_exists, matching_prompt = await self._prompt_already_exists(bingo_data_lowercase, lowercase_prompt)
+            if already_exists:
+                reason = f"A matching prompt already exists:\n{matching_prompt}"
                 return False, reason
             self.bingo_data[guild_id].append(prompt)
         except KeyError:
@@ -133,7 +149,7 @@ class Bingo(Cog):
             message = prompt
         else:
             title = 'ERROR'
-            message = f'Unable to add your prompt to the list because: {reason}'
+            message = f'Unable to add your prompt to the list because:\n{reason}'
 
         embed = discord.Embed(
             title=title,
