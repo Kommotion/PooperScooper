@@ -104,8 +104,8 @@ class PalWorldUtil:
     async def _send_rcon_command(self, args: str) -> str:
         command_line = f"python {self.rcon_file_with_path} {args}"
         try:
-            process = subprocess.run(command_line)
-            return str(process.stdout)
+            process = subprocess.run(command_line, capture_output=True, text=True)
+            return process.stdout
         except subprocess.CalledProcessError as e:
             logging.error(e)
             raise e
