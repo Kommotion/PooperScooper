@@ -40,7 +40,7 @@ class PalWorldUtil:
                 logging.error(e)
                 raise e
 
-        logging.debug("No server_watcher process was found!")
+        logging.info("No server_watcher process was found!")
         return None
 
     def refresh_server_state(self):
@@ -73,7 +73,7 @@ class PalWorldUtil:
             return
 
         # Run the server_watcher.py which in turn should start the Palworld server
-        command = f"python {self.server_watcher_file_with_path} {SERVER_WATCHER_IDENTIFIER}"
+        command = ["python", f"{self.server_watcher_file_with_path}", f"{SERVER_WATCHER_IDENTIFIER}"]
         logging.debug(command)
         proc = subprocess.Popen(command, cwd=self.path)
         logging.debug(proc.stdout)
