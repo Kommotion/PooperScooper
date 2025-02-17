@@ -26,12 +26,16 @@ class PalWorldUtil:
         self.path = util_path
         self.rcon_file_with_path = os.path.join(util_path, "palworld_rcon", "source_rcon.py")
         self.server_watcher_file_with_path = os.path.join(util_path, "server_watcher.py")
-        self.pid = None
+        self.watcher_proc: subprocess.Popen = None
         self.state = self.refresh_server_state()
 
     @staticmethod
     def find_watcher_pid():
-        """Attempts to find the server watcher PID by finding python.exe with palworld identifier in cmd line. """
+        """Attempts to find the server watcher PID by finding python.exe with palworld identifier in cmd line.
+
+        For some reason, psutil no longer gets the full cmdline. Probably some Windows update. No need to find the
+        pid since we already have it when we launched the server watcher. Leaving this here just in case.
+        """
         for process in psutil.process_iter(['pid', 'name', 'cmdline']):
             try:
                 if process.info['name'] == 'python.exe' and SERVER_WATCHER_IDENTIFIER in process.info['cmdline']:
@@ -43,9 +47,14 @@ class PalWorldUtil:
         logging.info("No server_watcher process was found!")
         return None
 
+    def is_server_watcher_still_active(self) -> bool:
+        """Attempts to find if the server watcher PID is still active or not."""
+        status = self.watcher_proc.poll()
+        return True if status else False
+
     def refresh_server_state(self):
-        self.pid = self.find_watcher_pid()
-        self.state = State.ON if self.pid else State.OFF
+        server_status = self.is_server_watcher_still_active()
+        self.state = State.ON if server_status else State.OFF
         return self.state
 
     async def is_server_empty(self) -> bool:
@@ -64,6 +73,7 @@ class PalWorldUtil:
     async def is_server_on(self) -> bool:
         """Returns True if server is still on and off if the server is off. """
         self.refresh_server_state()
+        logging.debug(f"Server state: {self.state}")
         return self.state == State.ON
 
     async def start_server(self) -> None:
@@ -75,10 +85,17 @@ class PalWorldUtil:
         # Run the server_watcher.py which in turn should start the Palworld server
         command = ["python", f"{self.server_watcher_file_with_path}", f"{SERVER_WATCHER_IDENTIFIER}"]
         logging.debug(command)
-        proc = subprocess.Popen(command, cwd=self.path)
-        logging.debug(proc.stdout)
-        logging.debug(proc.stderr)
+        self.watcher_proc = subprocess.Popen(command, cwd=self.path, preexec_fn=os.setsid)
+        logging.debug(f"Server watcher stdout: {self.watcher_proc.stdout}")
+        logging.debug(f"Server watcher stderr: {self.watcher_proc.stderr}")
         await asyncio.sleep(2)
+
+    async def terminate_watcher(self) -> None:
+        self.watcher_proc.terminate()
+        self.watcher_proc.wait(timeout=5)  # Wait for it to exit
+        # If it refuses to exit, force kill it
+        if self.watcher_proc.poll() is None:
+            self.watcher_proc.kill()  # Forceful kill (SIGKILL)
 
     async def stop_server(self) -> None:
         """Stops the server and kills the Server Watcher PID. """
@@ -87,11 +104,12 @@ class PalWorldUtil:
             return
 
         # Kill the server_watcher PID and update the State
-        subprocess.run(["taskkill", "/F", "/PID", str(self.pid)])
+        await self.terminate_watcher()
         self.state = State.OFF
 
         # Shut down the Palworld Server
         await self._send_rcon_command("-cmd Save")
+        await asyncio.sleep(1)
         await self._send_rcon_command("-cmd Shutdown")
         await asyncio.sleep(30)
 
