@@ -49,8 +49,11 @@ class PalWorldUtil:
 
     def is_server_watcher_still_active(self) -> bool:
         """Attempts to find if the server watcher PID is still active or not."""
-        status = self.watcher_proc.poll()
-        return True if status else False
+        if self.watcher_proc is None:
+            return False    # There is no server watcher process
+        else:
+            status = self.watcher_proc.poll()
+            return True if status is None else False
 
     def refresh_server_state(self):
         server_status = self.is_server_watcher_still_active()
