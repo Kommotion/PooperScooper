@@ -1,5 +1,7 @@
 import os
 import json
+import time
+from cogs.utils.constants import *
 
 
 def get_pics_path():
@@ -25,3 +27,7 @@ def dump_json(file_name, data):
 
 def create_json(file_name):
     dump_json(file_name, dict())
+
+
+def calculate_hours_elapsed(last_time):
+    return (time.time() - last_time) / SECONDS_IN_HOUR
