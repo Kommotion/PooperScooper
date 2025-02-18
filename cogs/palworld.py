@@ -33,12 +33,14 @@ BACKUP_EVERY_X_HOURS = 4  # -1 if you don't want to backup on a timer.
 ROTATE_AFTER_X_BACKUPS = 20  # -1 if you don't want to rotate backups.
 ROTATE_LOGS_EVERY_X_RUNS = 10  # -1 if you don't want to log to file.
 LOG_LEVEL = "INFO"
-LOGS_DIR = os.path.join(__file__, "utils", "pal_world_utils", "logs")
+base_dir = os.path.dirname(os.path.abspath(__file__))
+LOGS_DIR = os.path.join(base_dir, "utils", "palworld_utils", "logs")
 OPERATING_SYSTEM = "windows"  # Change to "linux" if needed.
 SECONDS_IN_HOUR = 3600
 LOOP_SLEEP = 30
 
-SERVER_TIMES_FILENAME = os.path.join(__file__, 'server_times.json')
+base_dir = os.path.dirname(os.path.abspath(__file__))
+SERVER_TIMES_FILENAME = os.path.join(PALWORLD_UTIL_PATH, 'server_times.json')
 PALWORLD_JSON_WITH_PATH = os.path.join(PALWORLD_UTIL_PATH, PALWORLD_JSON)
 LAST_RESTART = 'last_restart'
 LAST_BACKUP = 'last_backup'
@@ -126,8 +128,6 @@ class PalWorld(Cog):
         except KeyError as e:
             logging.error(f"Palworld JSON config is not detected!. Requirements within: ")
             raise e
-
-
 
         if ROTATE_LOGS_EVERY_X_RUNS > 0:
             logs_path = Path(LOGS_DIR)
@@ -271,9 +271,10 @@ class PalWorld(Cog):
     @is_menace_guild()
     async def palworld_restart(self, ctx: commands.Context):
         """Restarts the Palworld Server. """
-        await self.stop_server()
-        await asyncio.sleep(15)
-        await self.start_server()
+        if self.get_server_state() == State.OFF:
+            await self.start_server()
+        else:
+            await self.pal.restart_server()
         await ctx.message.add_reaction(THUMBS_UP_EMOJI)
 
     @palworld.command(name="players")
@@ -293,7 +294,7 @@ class PalWorld(Cog):
         else:
             await ctx.send("The server is currently off.")
 
-    @palworld.command(name="save_server")
+    @palworld.command(name="save")
     @is_menace_guild()
     async def palworld_save(self, ctx: commands.Context):
         """Saves the current state of the server. """
@@ -315,7 +316,10 @@ class PalWorld(Cog):
         if not await self.is_server_on():
             return "Server is off"
 
-        return await self.pal.rcon.send_command("ShowPlayers", [])
+        response = "```\n"
+        response += await self.pal.rcon.send_command("ShowPlayers", [])
+        response += "\n```"
+        return response
 
     async def is_server_on(self) -> bool:
         """Returns True if server is still on and off if the server is off. """
@@ -343,17 +347,16 @@ class PalWorld(Cog):
             return
 
         # Shut down the Palworld Server
-        await self.pal.rcon.send_command("Save" , [])
+        await self.pal.save_server_state()
         await asyncio.sleep(1)
-        await self.pal.rcon.send_command("Shutdown", [])
+        await self.pal.rcon.send_command("Shutdown")
         await asyncio.sleep(30)
         await self.get_server_state()  # Refresh the server state
 
     async def save(self) -> bool:
         if not await self.is_server_on():
             return False
-        await self.pal.rcon.send_command("Save", [])
-        return True
+        return await self.pal.save_server_state()
 
 
 async def setup(bot) -> None:

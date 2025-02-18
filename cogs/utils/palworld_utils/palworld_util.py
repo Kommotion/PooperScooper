@@ -140,7 +140,7 @@ class PalworldUtil:
         SAVE_FINISHED_RESPONSE = "Complete Save"
 
         await self.log_and_broadcast("Saving game state.")
-        response = self.rcon.send_command("Save")
+        response = await self.rcon.send_command("Save")
         if response.strip() == SAVE_FINISHED_RESPONSE:
             await self.log_and_broadcast("Save game state finished.")
             return True
@@ -175,13 +175,20 @@ class PalworldUtil:
             logger.info("Skipping game server updates.")
 
         logger.info(f"Launching {self.palserver_executable} : {self.server_launch_args}...")
-        subprocess.Popen(
-            self.server_launch_args,
+        await asyncio.create_subprocess_exec(
+            *self.server_launch_args,
             cwd=self.palworld_server_dir,
             start_new_session=self.start_new_session,
-            shell=not self.start_new_session,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
         )
-        time.sleep(15)
+        # subprocess.Popen(
+        #     self.server_launch_args,
+        #     cwd=self.palworld_server_dir,
+        #     start_new_session=self.start_new_session,
+        #     shell=not self.start_new_session,
+        # )
+        await asyncio.sleep(15)
 
     async def take_server_backup(self, timestamp_format: str = "%Y%m%d_%H%M%S"):
         timestamp = datetime.datetime.now().strftime(timestamp_format)
@@ -217,7 +224,7 @@ class PalworldUtil:
         # Sleep before starting server restart process.
         restart_warning_msg = f"Waiting {self.wait_before_restart_seconds} seconds before starting restart process."
         await self.log_and_broadcast(restart_warning_msg)
-        time.sleep(self.wait_before_restart_seconds)
+        await asyncio.sleep(self.wait_before_restart_seconds)
 
         await self.log_and_broadcast("Server restart process started.")
 
