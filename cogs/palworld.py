@@ -172,10 +172,6 @@ class PalWorld(Cog):
 
     @tasks.loop(seconds=THIRTY_SECONDS)
     async def palworld_server_watcher_loop(self) -> None:
-        # If we do not know the desired server state, then we will set it to whatever it currently is, on or off
-        if self.desired_server_state == State.UNKNOWN:
-            self.desired_server_state = await self.get_server_state()
-
         # Get the current server state
         server_state = await self.get_server_state()
 
@@ -244,8 +240,12 @@ class PalWorld(Cog):
         return State.ON
 
     @palworld_server_watcher_loop.before_loop
-    async def before_poll_check(self) -> None:
+    async def before_server_watcher(self) -> None:
         await self.bot.wait_until_ready()
+        # We don't know the desired server state, so let's see if it's on or off and
+        # set that as the desired server state
+        self.desired_server_state = await self.get_server_state()
+        logging.info(f"Current Palworld Server State: {self.desired_server_state}")
 
     @commands.group(invoke_without_command=True)
     @is_menace_guild()
