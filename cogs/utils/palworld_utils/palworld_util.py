@@ -151,19 +151,15 @@ class PalworldUtil:
     async def update_game_server(self):
         """Calls steamcmd process on steam_app_id to get game / server updates."""
         logger.info("Checking for game server updates...")
-        subprocess.call(
-            [
-                self.steamcmd_executable,
-                "+login",
-                "anonymous",
-                "+app_update",
-                self.steam_app_id,
-                "validate",
-                "+quit",
-            ],
+        await asyncio.create_subprocess_exec(
+            self.steamcmd_executable,
+            "+login", "anonymous",
+            "+app_update", self.steam_app_id,
+            "validate", "+quit",
             cwd=self.steamcmd_dir,
             start_new_session=self.start_new_session,
-            shell=not self.start_new_session,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
         )
 
     async def launch_server(self, update_server: bool = True):
@@ -182,13 +178,7 @@ class PalworldUtil:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
-        # subprocess.Popen(
-        #     self.server_launch_args,
-        #     cwd=self.palworld_server_dir,
-        #     start_new_session=self.start_new_session,
-        #     shell=not self.start_new_session,
-        # )
-        await asyncio.sleep(15)
+        await asyncio.sleep(5)
 
     async def take_server_backup(self, timestamp_format: str = "%Y%m%d_%H%M%S"):
         timestamp = datetime.datetime.now().strftime(timestamp_format)
