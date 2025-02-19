@@ -120,7 +120,7 @@ class PalWorld(Cog):
 
         try:
             palworld_credentials = self.get_json()
-            streamcmd_dir = palworld_credentials["STEAMCMD_DIR"]
+            steamcmd_dir = palworld_credentials["STEAMCMD_DIR"]
             server_name = palworld_credentials["SERVER_NAME"]
             server_ip = palworld_credentials["SERVER_IP"]
             rcon_password = palworld_credentials["RCON_PASSWORD"]
@@ -146,7 +146,7 @@ class PalWorld(Cog):
 
         # Create PalworldUtil instance with required vars only.
         self.pal = PalworldUtil(
-            streamcmd_dir,
+            steamcmd_dir,
             server_name,
             server_ip,
             rcon_port,
@@ -257,24 +257,49 @@ class PalWorld(Cog):
     @is_menace_guild()
     async def palworld_start(self, ctx: commands.Context):
         """Starts the Palworld server if it is off. """
-        await self.start_server()
-        await ctx.message.add_reaction(THUMBS_UP_EMOJI)
+        await ctx.send('Attempting to start Palworld server... this might take a minute.')
+
+        try:
+            await self.start_server()
+        except:
+            await ctx.send('An error occurred while starting the Palworld server... sorry!')
+            return
+
+        if await self.is_server_on():
+            await ctx.send('Palworld server is on!')
+            await ctx.message.add_reaction(THUMBS_UP_EMOJI)
+        else:
+            await ctx.send('Palworld server start process executed successfully, but server did not start... uhhh...')
+
 
     @palworld.command(name="stop")
     @is_menace_guild()
     async def palworld_stop(self, ctx: commands.Context):
         """Stops the Palworld server if it is on. """
-        await self.stop_server()
-        await ctx.message.add_reaction(THUMBS_UP_EMOJI)
+        await ctx.send('Attempting to stop Palworld server... this might take a minute.')
+
+        try:
+            await self.stop_server()
+        except:
+            await ctx.send('An error occurred while stopping the Palworld server... sorry!')
+            return
+
+        if await self.is_server_on():
+            await ctx.send('The Palworld server is somehow still running... uhhhhh...')
+        else:
+            await ctx.send('The Palworld server is off!')
+            await ctx.message.add_reaction(THUMBS_UP_EMOJI)
 
     @palworld.command(name="restart")
     @is_menace_guild()
     async def palworld_restart(self, ctx: commands.Context):
         """Restarts the Palworld Server. """
+        await ctx.send("Initiating server restart process... this might take a minute.")
         if self.get_server_state() == State.OFF:
             await self.start_server()
         else:
             await self.pal.restart_server()
+        await ctx.send("Server restart process completed.")
         await ctx.message.add_reaction(THUMBS_UP_EMOJI)
 
     @palworld.command(name="players")
@@ -314,7 +339,7 @@ class PalWorld(Cog):
     async def show_players(self) -> str:
         """Returns the output of the ShowPlayers RCON command. """
         if not await self.is_server_on():
-            return "Server is off"
+            return "The Server is off."
 
         response = "```\n"
         response += await self.pal.rcon.send_command("ShowPlayers", [])
@@ -328,18 +353,18 @@ class PalWorld(Cog):
         return self.server_state == State.ON
 
     async def start_server(self) -> None:
-        """Attempts to start the server_watcher if it is not already on. """
-        self.desired_server_state = State.ON
-
+        """Attempts to start the server if it is not already on. """
         if await self.is_server_on():
             logging.debug("The state was already ON when attempting to start it")
             return
 
         await self.pal.launch_server()
+        self.desired_server_state = State.ON
         await self.server_times.update_last_restart()
+        logging.info("Palworld Server Started")
 
     async def stop_server(self) -> None:
-        """Stops the server and kills the Server Watcher PID. """
+        """Stops the server. """
         self.desired_server_state = State.OFF
 
         if not await self.is_server_on():
@@ -347,13 +372,20 @@ class PalWorld(Cog):
             return
 
         # Shut down the Palworld Server
+        wait_time = 60
+        shutdown_warning_msg = f"SERVER SHUTDOWN INCOMING. Waiting {wait_time} seconds before starting shutdown process."
+        await self.pal.log_and_broadcast(shutdown_warning_msg)
+        await asyncio.sleep(wait_time)
+        await self.pal.log_and_broadcast("Starting server shutdown process.")
         await self.pal.save_server_state()
         await asyncio.sleep(1)
         await self.pal.rcon.send_command("Shutdown")
-        await asyncio.sleep(30)
+        await asyncio.sleep(60)
         await self.get_server_state()  # Refresh the server state
+        logging.info("Palworld Server Stopped")
 
     async def save(self) -> bool:
+        """"Saves the server state. """
         if not await self.is_server_on():
             return False
         return await self.pal.save_server_state()
