@@ -23,7 +23,7 @@ class PalworldUtil:
         rcon_password: str,  # your server rcon password.
         palword_server_dir: str = None,  # Path to Palworld server root directory. Tries to find based on operating_system if not provided.
         palworld_server_proc_name: str = "PalServer-Win64-Shipping-Cmd.exe",  # Name of the palworld dedicated server process. Used for monitoring, restarting, etc.
-        wait_before_restart_seconds: int = 30,  # Seconds to wait after warning the server before starting the server restart process.
+        wait_before_restart_seconds: int = 300,  # Seconds to wait after warning the server before starting the server restart process.
         steam_app_id: str = "2394010",  # Palworld dedicated server.
         server_port: int = 8211,  # Port to host the server on.
         max_players: int = 32,  # 32 players is max.
@@ -60,6 +60,7 @@ class PalworldUtil:
             self.start_new_session = False
             # os specific server launch options
             self.server_launch_args.append("start")
+            # self.server_launch_args.append(Path(os.path.join(self.palworld_server_dir, self.palserver_executable)))
             self.server_launch_args.append(self.palserver_executable)
             self.server_launch_args.append(f"-ServerName={self.server_name}")
             self.server_launch_args.append(f"-port={self.server_port}")
@@ -101,7 +102,7 @@ class PalworldUtil:
 
         # Create and use "$script_root/backups" dir if backups_dir isn't provided.
         if backup_dir is None:
-            self.backups_dir = Path(os.getcwd()) / "backups"
+            self.backups_dir = Path(os.getcwd()) / "palworld_backups"
             if not os.path.exists(self.backups_dir):
                 self.backups_dir.mkdir(parents=True, exist_ok=True)
         else:
@@ -151,16 +152,19 @@ class PalworldUtil:
     async def update_game_server(self):
         """Calls steamcmd process on steam_app_id to get game / server updates."""
         logger.info("Checking for game server updates...")
-        await asyncio.create_subprocess_exec(
-            self.steamcmd_executable,
+        logger.info(f"SteamCMD directory: {self.steamcmd_dir}, Exists: {os.path.exists(self.steamcmd_dir)}")
+        steam_cmd_with_path = os.path.join(self.steamcmd_dir, self.steamcmd_executable)
+        process = await asyncio.create_subprocess_exec(
+            steam_cmd_with_path,
             "+login", "anonymous",
             "+app_update", self.steam_app_id,
             "validate", "+quit",
-            cwd=self.steamcmd_dir,
+            cwd=self.steamcmd_dir,  # This is probably not valid for asyncio, keeping here for now
             start_new_session=self.start_new_session,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
+        await process.communicate()
 
     async def launch_server(self, update_server: bool = True):
         """Launches Palserver with specified parameters."""
@@ -170,15 +174,29 @@ class PalworldUtil:
         else:
             logger.info("Skipping game server updates.")
 
+        logger.info(
+            f"PalworldServer directory: {self.palworld_server_dir}, Exists: {os.path.exists(self.palworld_server_dir)}")
         logger.info(f"Launching {self.palserver_executable} : {self.server_launch_args}...")
-        await asyncio.create_subprocess_exec(
-            *self.server_launch_args,
+
+        # command = f'start "" "{Path(os.path.join(self.palworld_server_dir, self.palserver_executable))}" ' \
+        #           + " ".join(map(str, self.server_launch_args[1:]))  # Exclude "start" from args
+        # logger.info(f"Executing command: {command}")  # Debugging: Print command to check
+        #
+        # await asyncio.create_subprocess_shell(
+        #     command,
+        #     cwd=self.palworld_server_dir,   # This is probably not valid for asyncio, keeping here for now
+        #     start_new_session=self.start_new_session,
+        #     stdout=asyncio.subprocess.PIPE,
+        #     stderr=asyncio.subprocess.PIPE
+        # )
+
+        subprocess.Popen(
+            self.server_launch_args,
             cwd=self.palworld_server_dir,
             start_new_session=self.start_new_session,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+            shell=not self.start_new_session,
         )
-        await asyncio.sleep(5)
+        await asyncio.sleep(10)
 
     async def take_server_backup(self, timestamp_format: str = "%Y%m%d_%H%M%S"):
         timestamp = datetime.datetime.now().strftime(timestamp_format)
