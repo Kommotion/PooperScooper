@@ -294,7 +294,7 @@ class PalWorld(Cog):
     async def palworld_restart(self, ctx: commands.Context):
         """Restarts the Palworld Server. """
         await ctx.send("Initiating server restart process... this might take a minute.")
-        if self.get_server_state() == State.OFF:
+        if await self.get_server_state() == State.OFF:
             await self.start_server()
         else:
             await self.pal.restart_server()
