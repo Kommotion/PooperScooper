@@ -26,7 +26,7 @@ SERVER_WATCHER_IDENTIFIER = "palworld"
 
 # User variables
 AUTOMATIC_RESTART = True  # Automatically restart the server if the process isn't found.
-WAIT_BEFORE_RESTART_SECONDS = 300  # Seconds to wait/warn before restart process.
+WAIT_BEFORE_RESTART_SECONDS = 60  # Seconds to wait/warn before restart process.
 AUTOMATIC_RESTART_EVERY_X_HOURS = 6  # -1 if you don't want to restart on a timer.
 BACKUP_ON_RESTART = False  # Save a backup when the server restarts.
 BACKUP_EVERY_X_HOURS = 4  # -1 if you don't want to backup on a timer.
