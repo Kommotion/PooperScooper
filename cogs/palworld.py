@@ -348,12 +348,18 @@ class PalWorld(Cog):
     async def show_players(self) -> str:
         """Returns the output of the ShowPlayers RCON command. """
         if not await self.is_server_on():
-            return "The Server is off."
+            return "The Server is off so there are no players online."
 
-        response = "```\n"
-        response += await self.pal.rcon.send_command("ShowPlayers", [])
-        response += "\n```"
-        return response
+        response = await self.pal.rcon.send_command("ShowPlayers", [])
+        lines = response.strip().split("\n")
+
+        if len(lines) <= 1:  # If only the header exists, no players are online
+            return "No players are currently online."
+
+        players = [line.split(",")[0] for line in lines[1:]]
+        player_count = len(players)
+        player_list = ", ".join(players)
+        return f"```Players online: {player_count}\n{player_list}\n```"
 
     async def is_server_on(self) -> bool:
         """Returns True if server is still on and off if the server is off. """
