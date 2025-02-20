@@ -328,12 +328,22 @@ class PalWorld(Cog):
             return
         await ctx.message.add_reaction(THUMBS_UP_EMOJI)
 
+    @palworld.command(name="is_empty")
+    @commands.is_owner()
+    async def palworld_empty(self, ctx: commands.Context):
+        """Is the server empty? Debug command, owner only. """
+        response = await self.pal.rcon.send_command("ShowPlayers", [])
+        logging.info(response)
+        lines = response.strip().split("\n")
+        logging.info(lines)
+        logging.info(True if len(lines) <= 1 else False)
+
     async def is_server_empty(self) -> bool:
         """Returns True if server is empty else False. """
         response = await self.pal.rcon.send_command("ShowPlayers", [])
-        lines = response.split("\n")
+        lines = response.strip().split("\n")
         # If there are more than 1 lines, that means that there are players in the server
-        return False if len(lines) > 1 else True
+        return True if len(lines) <= 1 else False
 
     async def show_players(self) -> str:
         """Returns the output of the ShowPlayers RCON command. """
