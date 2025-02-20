@@ -208,14 +208,13 @@ class PalWorld(Cog):
         # Stop the server if the server is idle (And it has been 8 hours). The function already checks if the
         # Server is on or not before doing anything
         time_now = time.time()
-        if self.last_idle_check - time_now > EIGHT_HOURS_IN_SECONDS:
+        if time_now - self.last_idle_check > ONE_HOUR_IN_SECONDS:
             await self.auto_shutdown_server_if_idle()
             self.last_idle_check = time.time()
 
     def get_json(self):
         with open(PALWORLD_JSON_WITH_PATH, "r") as f:
             return json.load(f)
-
     async def auto_shutdown_server_if_idle(self) -> None:
         """Automatically shuts down the server if the server is idle. """
         logging.info("Checking if Palworld server is idle to stop it")
