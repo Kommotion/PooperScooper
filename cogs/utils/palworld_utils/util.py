@@ -4,9 +4,11 @@ import asyncio
 
 async def check_for_process(process_name: str) -> bool:
     """Returns True if process is open, otherwise returns False"""
-    return process_name in (p.name() for p in psutil.process_iter())
-
-
+    try:
+        return process_name in (p.name() for p in psutil.process_iter())
+    except psutil.NoSuchProcess:
+        # Handle the case where the process no longer exists
+        return False
 def get_proc_count(process_name: str) -> int:
     """Returns the amount of Roblox proccess open"""
     client_count = 0
