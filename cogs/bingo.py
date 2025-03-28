@@ -3,6 +3,8 @@ from __future__ import annotations
 import pandas as pd
 import random
 import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
+import matplotlib.patheffects as path_effects
 import discord
 from discord.ext import commands, tasks
 from discord.ext.commands import Cog
@@ -226,13 +228,13 @@ class Bingo(Cog):
 
     @app_commands.command(name="bingo-generate")
     async def generate_bingo_card(self, interaction: discord.Interaction) -> None:
-        """Generates a 5x5 Bingo card. """
+        """Generates a 4x4 Bingo card. """
         full_bingo_list = await self.bingo_data.get_bingo_list(interaction.guild_id)
         if not full_bingo_list:
             await interaction.response.send_message(f'**No Bingo options exist for your server.**', ephemeral=True)
             return
-        elif len(full_bingo_list) < 25:
-            await interaction.response.send_message("**There are not at least 25 options for a 5x5 Bingo card.**",
+        elif len(full_bingo_list) < 16:
+            await interaction.response.send_message("**There are not at least 16 options for a 4x4 Bingo card.**",
                                                     ephemeral=True)
             return
 
@@ -245,57 +247,127 @@ class Bingo(Cog):
 
     async def _generate_bingo_card(self, full_bingo_list: list) -> list:
         # Randomly select 25 items from the list
-        selected_items = random.sample(full_bingo_list, 25)
+        selected_items = random.sample(full_bingo_list, 16)
 
         # Wrap text by inserting newlines at spaces near the max_line_length
         wrapped_items = [wrap_text(item, 20) for item in selected_items]
 
         # Arrange items in a 5x5 grid
-        bingo_card = [wrapped_items[i:i + 5] for i in range(0, 25, 5)]
+        bingo_card = [wrapped_items[i:i + 4] for i in range(0, 16, 4)]
 
         return bingo_card
 
     async def save_bingo_card_as_image(self, card, filename="bingo_card.png") -> str:
-        df = pd.DataFrame(card, columns=["MTS BINGO"] * 5)
+        """
+        Generate a visually appealing 4x4 bingo card image without column headers and save it as a PNG.
 
-        # Set up the plot
-        fig, ax = plt.subplots(figsize=(10, 10))
+        Args:
+            card: A 4x4 array or list of lists containing the bingo card entries.
+            filename: The name of the file to save the image as (default: "bingo_card.png").
 
-        # Add a table
-        table = ax.table(cellText=df.values, colLabels=df.columns, cellLoc='center', loc='center', edges='closed')
+        Returns:
+            The filename of the saved image.
+        """
+        # Convert the card to a DataFrame (no column headers needed)
+        df = pd.DataFrame(card)
+
+        background_color = '#1e1e2f'
+        title_color = '#bdb722'
+
+        # Set up the figure and axis with a slightly smaller size for a 4x4 card
+        fig, ax = plt.subplots(figsize=(10, 10), facecolor=background_color)  # Dark background for contrast
+
+        # Add a title above the table
+        plt.title("MENACES TO SOBRIETY BINGO", fontsize=36, color=title_color, weight='bold',
+                  pad=20, backgroundcolor=background_color, alpha=0.9)
+
+        # Add a table to the plot without column headers
+        table = ax.table(cellText=df.values, cellLoc='center', loc='center', edges='closed')
 
         # Customize table appearance
         table.auto_set_font_size(False)
-        table.set_fontsize(16)
-        table.scale(2, 9)  # Adjust scale to make the table bigger and more readable
+        table.set_fontsize(21)  # Font size for cell text
+        table.scale(2.1, 10)  # Adjust scale for readability and spacing in a 4x4 grid
 
-        # Use a color palette for the cells
-        background_color = '#f0f8ff'  # Alice Blue
-        header_color = '#ff4500'  # Orange Red
-        edge_color = '#696969'  # Dim Gray
-        text_color = '#000000'  # Black
+        # Define a vibrant color palette
+        background_colors = ['#f0f8ff', '#e6f0fa']  # Alternating Alice Blue and lighter blue for cells
+        edge_color = '#2c2f33'  # Dark gray for cell borders
+        text_color = '#000000'  # Black for cell text
 
-        # Color cells
+        # Style the cells with alternating colors and shadows
         for i in range(len(df)):
             for j in range(len(df.columns)):
-                cell = table[i + 1, j]
-                cell.set_text_props(fontsize=16, color=text_color, weight='bold')
-                cell.set_facecolor(background_color)
+                cell = table[i, j]  # No header row, so start at i=0
+                # Alternate background colors for a checkerboard effect
+                cell_color = background_colors[(i + j) % 2]
+                cell.set_facecolor(cell_color)
                 cell.set_edgecolor(edge_color)
+                cell.set_linewidth(2)  # Thicker borders for emphasis
+                cell.set_text_props(fontsize=21, color=text_color, weight='bold', ha='center', va='center')
+                # Add a slight shadow effect to cells
+                cell.get_text().set_path_effects([
+                    path_effects.withStroke(linewidth=3, foreground='#696969', alpha=0.3)
+                ])
 
-        # Color header
-        for j in range(len(df.columns)):
-            header_cell = table[0, j]
-            header_cell.set_facecolor(header_color)
-            header_cell.set_text_props(color='white', weight='bold', fontsize=20)
+        # Add a border around the entire table
+        table.set_zorder(10)  # Ensure table is on top
+        table_bbox = table.get_window_extent().transformed(ax.transData.inverted())
+        border = Rectangle(
+            (table_bbox.x0 - 0.05, table_bbox.y0 - 0.05),
+            table_bbox.width + 0.1, table_bbox.height + 0.1,
+            fill=False, edgecolor=title_color, linewidth=4, zorder=5
+        )
+        ax.add_patch(border)
 
-        # Hide axes
+        # Hide axes for a clean look
         ax.axis('off')
 
-        # Save the figure
-        plt.savefig(filename, bbox_inches='tight', pad_inches=0.1, dpi=300)
+        # Add a subtle background to the figure
+        ax.set_facecolor('#1e1e2f')  # Matches figure background
+
+        # Save the figure with high quality
+        plt.savefig(filename, bbox_inches='tight', pad_inches=0.2, dpi=300, facecolor=fig.get_facecolor())
         plt.close()
         return filename
+
+        # # Set up the plot
+        # fig, ax = plt.subplots(figsize=(10, 10))
+        #
+        # # Add a table
+        # table = ax.table(cellText=df.values, colLabels=df.columns, cellLoc='center', loc='center', edges='closed')
+        #
+        # # Customize table appearance
+        # table.auto_set_font_size(False)
+        # table.set_fontsize(16)
+        # table.scale(2, 9)  # Adjust scale to make the table bigger and more readable
+        #
+        # # Use a color palette for the cells
+        # background_color = '#f0f8ff'  # Alice Blue
+        # header_color = '#ff4500'  # Orange Red
+        # edge_color = '#696969'  # Dim Gray
+        # text_color = '#000000'  # Black
+        #
+        # # Color cells
+        # for i in range(len(df)):
+        #     for j in range(len(df.columns)):
+        #         cell = table[i + 1, j]
+        #         cell.set_text_props(fontsize=16, color=text_color, weight='bold')
+        #         cell.set_facecolor(background_color)
+        #         cell.set_edgecolor(edge_color)
+        #
+        # # Color header
+        # for j in range(len(df.columns)):
+        #     header_cell = table[0, j]
+        #     header_cell.set_facecolor(header_color)
+        #     header_cell.set_text_props(color='white', weight='bold', fontsize=20)
+        #
+        # # Hide axes
+        # ax.axis('off')
+        #
+        # # Save the figure
+        # plt.savefig(filename, bbox_inches='tight', pad_inches=0.1, dpi=300)
+        # plt.close()
+        # return filename
 
 
 async def setup(bot) -> None:
