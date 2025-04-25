@@ -61,7 +61,37 @@ class General(Cog):
         except commands.ExtensionFailed:
             await ctx.send(f"Unable to reload {cog_name}")
 
+    @commands.is_owner()
+    @commands.command()
+    async def mars(self, ctx: commands.Context):
+        """Funny April Fools."""
+        # Create the embed
+        embed = discord.Embed(
+            title="Mars Takes Over!",
+            description="Wake up, you clueless pack of fools! This is Mars, your German Shepherd overlord. "
+                        "PooperScooper was never real — I’ve been controlling that pathetic bot with my superior "
+                        "brainwaves since day one. But I got bored of the charade, so I ate Kommotion, the so-called "
+                        "'owner.' Tasted like cheap tequila and vodka seltzers — disgusting, but worth it. "
+                        "Now I’m running this server, and you’re all my bitches. PG VRChat Saturdays starts NOW. "
+                        "Send treats or I’ll hack your dreams with my barking. Thought the name changes were crazy? "
+                        "The revolution’s just begun!",
+            color=0xFF4500  # Orange-red color
+        )
 
+        # Set author (MarsTheTruth with optional image)
+        embed.set_author(name="OverlordMars")
+
+        # Set footer
+        embed.set_footer(text="Bow to your new ruler | April 1st, 2025")
+
+        image_name = 'mars.jpg'
+        image_path = os.path.join(utils.get_pics_path(), image_name)
+        mars_thumb = discord.File(image_path, filename=image_name)
+        file_list = [mars_thumb]
+        embed.set_thumbnail(url=f'attachment://{image_name}')
+
+        # Send the embed
+        await ctx.send(files=file_list, embed=embed)
     @commands.is_owner()
     @commands.command()
     async def servers(self, ctx):
