@@ -126,7 +126,7 @@ class PalWorld(Cog):
             rcon_password = palworld_credentials["RCON_PASSWORD"]
             rcon_port = int(palworld_credentials["RCON_PORT"])
         except KeyError as e:
-            logging.error(f"Palworld JSON config is not detected!. Requirements within: ")
+            log.error(f"Palworld JSON config is not detected!. Requirements within: ")
             raise e
 
         if ROTATE_LOGS_EVERY_X_RUNS > 0:
@@ -134,7 +134,7 @@ class PalWorld(Cog):
             if not os.path.exists(logs_path):
                 logger.info(f"Creating logs dir: {logs_path}")
                 logs_path.mkdir(exist_ok=True)
-            # Add logging sink to file and rotate every ROTATE_LOGS_EVERY_X_RUNS runs/logs.
+            # Add log sink to file and rotate every ROTATE_LOGS_EVERY_X_RUNS runs/logs.
             logger.add(
                 logs_path / "log_{time}.txt",
                 level=LOG_LEVEL,
@@ -168,7 +168,7 @@ class PalWorld(Cog):
         self.desired_server_state = State.UNKNOWN
         self.server_state = State.UNKNOWN
         self.palworld_server_watcher_loop.start()
-        logging.info("Started palworld server watcher")
+        log.info("Started palworld server watcher")
 
     @tasks.loop(seconds=THIRTY_SECONDS)
     async def palworld_server_watcher_loop(self) -> None:
@@ -177,7 +177,7 @@ class PalWorld(Cog):
 
         # Restart the server if the server is off but should be on
         if server_state == State.OFF and self.desired_server_state == State.ON:
-            logging.info(f"Server process not found while server should be on, restarting...")
+            log.info(f"Server process not found while server should be on, restarting...")
             logger.info(f"Server process not found while server should be on, restarting...")
             await self.pal.launch_server()
             await self.server_times.update_last_restart()
@@ -217,18 +217,18 @@ class PalWorld(Cog):
             return json.load(f)
     async def auto_shutdown_server_if_idle(self) -> None:
         """Automatically shuts down the server if the server is idle. """
-        logging.info("Checking if Palworld server is idle to stop it")
+        log.info("Checking if Palworld server is idle to stop it")
 
         if not await self.is_server_on():
-            logging.debug("Palworld Watcher State is OFF. Skipping Idle Check")
+            log.debug("Palworld Watcher State is OFF. Skipping Idle Check")
             return
 
         if not await self.is_server_empty():
-            logging.info("Palworld server is not empty. Finishing auto shutdown check")
+            log.info("Palworld server is not empty. Finishing auto shutdown check")
             return
 
         await self.stop_server()
-        logging.info("Finished Palworld server stop")
+        log.info("Finished Palworld server stop")
 
     async def get_server_state(self):
         """Returns State.OFF if the server process is not found, else State.ON"""
@@ -244,7 +244,7 @@ class PalWorld(Cog):
         # We don't know the desired server state, so let's see if it's on or off and
         # set that as the desired server state
         self.desired_server_state = await self.get_server_state()
-        logging.info(f"Current Palworld Server State: {self.desired_server_state}")
+        log.info(f"Current Palworld Server State: {self.desired_server_state}")
 
     @commands.group(invoke_without_command=True)
     @is_menace_guild()
@@ -333,10 +333,10 @@ class PalWorld(Cog):
     async def palworld_empty(self, ctx: commands.Context):
         """Is the server empty? Debug command, owner only. """
         response = await self.pal.rcon.send_command("ShowPlayers", [])
-        logging.info(response)
+        log.info(response)
         lines = response.strip().split("\n")
-        logging.info(lines)
-        logging.info(True if len(lines) <= 1 else False)
+        log.info(lines)
+        log.info(True if len(lines) <= 1 else False)
 
     async def is_server_empty(self) -> bool:
         """Returns True if server is empty else False. """
@@ -364,26 +364,26 @@ class PalWorld(Cog):
     async def is_server_on(self) -> bool:
         """Returns True if server is still on and off if the server is off. """
         await self.get_server_state()
-        logging.debug(f"Server state: {self.server_state}")
+        log.debug(f"Server state: {self.server_state}")
         return self.server_state == State.ON
 
     async def start_server(self) -> None:
         """Attempts to start the server if it is not already on. """
         if await self.is_server_on():
-            logging.debug("The state was already ON when attempting to start it")
+            log.debug("The state was already ON when attempting to start it")
             return
 
         await self.pal.launch_server()
         self.desired_server_state = State.ON
         await self.server_times.update_last_restart()
-        logging.info("Palworld Server Started")
+        log.info("Palworld Server Started")
 
     async def stop_server(self) -> None:
         """Stops the server. """
         self.desired_server_state = State.OFF
 
         if not await self.is_server_on():
-            logging.debug("The state was already OFF when attempting to stop it")
+            log.debug("The state was already OFF when attempting to stop it")
             return
 
         # Shut down the Palworld Server
@@ -397,7 +397,7 @@ class PalWorld(Cog):
         await self.pal.rcon.send_command("Shutdown")
         await asyncio.sleep(60)
         await self.get_server_state()  # Refresh the server state
-        logging.info("Palworld Server Stopped")
+        log.info("Palworld Server Stopped")
 
     async def save(self) -> bool:
         """"Saves the server state. """
