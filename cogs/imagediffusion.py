@@ -15,7 +15,6 @@ from discord.ext import commands, tasks
 from discord.ext.commands import Cog
 
 log = logging.getLogger(__name__)
-SD35_MEDIUM = "./models/sd3.5-medium"
 WAIFU_DIFFUSION = "./models/wd-1-5-beta3"
 WAIFU_VAE = "./models/vae/kl-f8-anime2_clean.ckpt"
 ANYTHING_V5 = "./models/anything-v5/AnythingXL_v50.safetensors"
@@ -35,6 +34,7 @@ WAIFU_NEGATIVE_PROMPT = "lowres, ((bad anatomy)), ((bad hands)), missing finger,
 STABLE_NEGATIVE_PROMPT = "(ugly, disfigured, deformed, blurry, low quality, poorly drawn, poorly lit, out of focus," \
                           " overexposed, underexposed, malformed, uncoherent, low resolution, bad anatomy," \
                           " bad proportions, poorly rendered, unrealistic, text, watermark, signature, over-saturated)"
+
 
 def to_thread(func: typing.Callable) -> typing.Coroutine:
     @functools.wraps(func)
@@ -61,9 +61,8 @@ class ImageDiffusion(Cog):
     async def load_pipelines(self):
         """Preload all models into memory."""
         log.info("Loading all pipelines...")
-        # self.pipelines[WAIFU_DIFFUSION] = await self.load_pipeline(WAIFU_DIFFUSION)
+        self.pipelines[WAIFU_DIFFUSION] = await self.load_pipeline(WAIFU_DIFFUSION)
         self.pipelines[ANYTHING_V5] = await self.load_pipeline(ANYTHING_V5)
-        # self.pipelines[SD35_MEDIUM] = await self.load_pipeline(SD35_MEDIUM)
         log.info("All pipelines loaded successfully.")
 
     async def load_pipeline(self, model_path):
@@ -90,17 +89,6 @@ class ImageDiffusion(Cog):
             ).to(CUDA)
             pipe.scheduler = EulerDiscreteScheduler.from_config(pipe.scheduler.config)
 
-        else:  # SD3.5 medium
-            pipe = StableDiffusion3Pipeline.from_pretrained(
-                model_path,
-                torch_dtype=torch.bfloat16,
-                use_safetensors=True,
-                load_safety_checker=None,
-            ).to(CUDA)
-            pipe.scheduler = FlowMatchEulerDiscreteScheduler.from_config(pipe.scheduler.config)
-            pipe.enable_model_cpu_offload()
-            pipe.enable_attention_slicing()
-
         # VRAM optimizations
         pipe.enable_xformers_memory_efficient_attention()
 
@@ -108,18 +96,21 @@ class ImageDiffusion(Cog):
 
     @commands.group(invoke_without_command=True)
     async def waifu(self, ctx: commands.Context, *, prompt: str) -> None:
-        """Queue image using Waifu Diffusion v1.5 Beta 3."""
+        """Queue image using Waifu Diffusion v1.5 Beta 3.
+
+        Parameters:
+        - prompt (str): The prompt for the image generation.
+        """
         await self.schedule_generation(ctx, prompt, WAIFU_DIFFUSION)
 
     @commands.group(invoke_without_command=True)
     async def anime(self, ctx: commands.Context, *, prompt: str) -> None:
-        """Queue image using Anything V5.0 anime model."""
-        await self.schedule_generation(ctx, prompt, ANYTHING_V5)
+        """Queue image using Anything V5.0 anime model.
 
-    @commands.group(invoke_without_command=True)
-    async def stable(self, ctx: commands.Context, *, prompt: str) -> None:
-        """Queue image using Stable Diffusion 3.5 Medium."""
-        await self.schedule_generation(ctx, prompt, SD35_MEDIUM)
+        Parameters:
+        - prompt (str): The prompt for the image generation.
+        """
+        await self.schedule_generation(ctx, prompt, ANYTHING_V5)
 
     async def schedule_generation(self, ctx, prompt, model) -> None:
         if self.image_queue.full():
@@ -144,9 +135,6 @@ class ImageDiffusion(Cog):
 
         if image.model == WAIFU_DIFFUSION:
             image_gen = self.generate_image_waifu
-            timeout = 600
-        elif image.model == SD35_MEDIUM:
-            image_gen = self.generate_image_stable
             timeout = 600
         elif image.model == ANYTHING_V5:
             image_gen = self.generate_image_anything
