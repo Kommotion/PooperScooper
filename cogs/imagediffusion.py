@@ -56,11 +56,13 @@ def to_thread(func: typing.Callable) -> typing.Coroutine:
         return await asyncio.to_thread(func, *args, **kwargs)
     return wrapper
 
+
 class ImageCreation:
     def __init__(self, ctx, prompt, model):
-        self.ctx = ctx
-        self.prompt = prompt
-        self.model = model
+        self.ctx: commands.Context = ctx
+        self.prompt: str = prompt
+        self.model: str = model
+
 
 class ImageDiffusion(Cog):
     """Optimized Commands for image diffusion."""
@@ -172,7 +174,7 @@ class ImageDiffusion(Cog):
         if self.image_queue.empty():
             return
 
-        log.info("Processing next queued image...")
+        log.debug("Processing next queued image...")
         self.next_image.clear()
         image = await self.image_queue.get()
         ctx = image.ctx
@@ -197,6 +199,8 @@ class ImageDiffusion(Cog):
         except asyncio.TimeoutError:
             log.error("Image generation timed out")
             return await ctx.reply("Image generation timed out. Try again with a simpler prompt.")
+        except discord.HTTPException:
+            await ctx.send("Error generating prompt: {prompt}.")
         except Exception as e:
             log.error(f"Generation failed: {str(e)}")
             return await ctx.reply(f"Image generation failed: {str(e)}")
@@ -207,8 +211,15 @@ class ImageDiffusion(Cog):
         buffer.seek(0)
         file = discord.File(buffer, filename="generated.png")
 
-        await ctx.reply(file=file)
-        log.info("Image sent to Discord")
+        try:
+            await ctx.reply(file=file)
+        except discord.HTTPException:
+            log.warning("Hit case where was unable to do ctx.reply in image generation.")
+            await ctx.send(file=file)
+        except Exception as e:
+            logging.error(f"Error: {e}")
+            await ctx.send(f"Some error occurred while image generation from {ctx.author.name}")
+        log.debug("Image sent to Discord")
         self.bot.loop.call_soon_threadsafe(self.next_image.set)
         await self.next_image.wait()
 
