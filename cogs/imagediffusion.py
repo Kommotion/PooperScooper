@@ -225,7 +225,7 @@ class ImageDiffusion(Cog):
         if pipe is None:
             raise ValueError(f"No pipeline loaded for model {model_path}")
 
-        log.info(f"Starting ani pony generation for prompt: {prompt}")
+        log.debug(f"Starting ani pony generation for prompt: {prompt}")
         gen_start = time.time()
         prompt = f"{prompt}, {PONY_REALISM_POSITIVE_PROMPT}"
         with torch.autocast(CUDA, dtype=torch.float16):
@@ -247,7 +247,7 @@ class ImageDiffusion(Cog):
         if pipe is None:
             raise ValueError(f"No pipeline loaded for model {model_path}")
 
-        log.info(f"Starting pony generation for prompt: {prompt}")
+        log.debug(f"Starting pony generation for prompt: {prompt}")
         gen_start = time.time()
         prompt = f"{prompt}, {PONY_REALISM_POSITIVE_PROMPT}"
         with torch.autocast(CUDA, dtype=torch.float16):
@@ -269,7 +269,7 @@ class ImageDiffusion(Cog):
         if pipe is None:
             raise ValueError(f"No pipeline loaded for model {model_path}")
 
-        log.info(f"Starting wai illustrious generation for prompt: {prompt}")
+        log.debug(f"Starting wai illustrious generation for prompt: {prompt}")
         gen_start = time.time()
         prompt = f"{prompt}, {WAI_ILLUSTRIOUS_POSITIVE_PROMPT}"
         with torch.autocast(CUDA, dtype=torch.float16):
