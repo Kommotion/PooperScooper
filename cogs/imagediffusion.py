@@ -40,7 +40,10 @@ def to_thread(func: typing.Callable) -> typing.Coroutine:
 
 
 def in_allowed_channels():
-    async def predicate(ctx):
+    def predicate(ctx: commands.Context) -> bool:
+        guild = ctx.guild
+        if guild is None:
+            return False
         return ctx.channel.id in [1365847564196249620, 1045149015756521493]
     return commands.check(predicate)
 
