@@ -18,7 +18,7 @@ CUDA = "cuda"
 
 
 ANI_PONY = r'.\models\ani-pony\waiANINSFWPONYXL_v130.safetensors'
-WAI_ILLUSTRIOUS = r".\models\wai_illustrious\waiNSFWIllustrious_v130.safetensors"
+WAI_ILLUSTRIOUS = r".\models\wai_illustrious\waiNSFWIllustrious_v140.safetensors"
 PONY_REALISM = r'.\models\pony-realism\ponyRealism_V22.safetensors'
 
 ANI_PONY_POSITIVE_PROMPT = "score_9, score_8_up, score_7_up, source_anime"
@@ -134,7 +134,7 @@ class ImageDiffusion(Cog):
     @commands.group(invoke_without_command=True)
     @in_allowed_channels()
     async def anime(self, ctx: commands.Context, *, prompt: str) -> None:
-        """Queue image using WAI Illustrious v12.
+        """Queue image using WAI Illustrious v14.
 
         Arguments:
         - prompt (str): The prompt for the image generation.
