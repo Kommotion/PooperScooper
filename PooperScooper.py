@@ -55,7 +55,8 @@ class PooperScooper(commands.AutoShardedBot):
             pm_help=None,
             intents=intents,
             allowed_mentions=allowed_mentions,
-            help_attrs=dict(hidden=True)
+            help_attrs=dict(hidden=True),
+            help_command=commands.DefaultHelpCommand(show_parameter_descriptions=False)
         )
 
         self.client_id: str = credentials['client_id']
