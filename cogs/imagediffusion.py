@@ -9,45 +9,27 @@ import os
 import discord
 import torch
 import logging
-from diffusers import (StableDiffusionPipeline, StableDiffusion3Pipeline, EulerDiscreteScheduler,
-                       FlowMatchEulerDiscreteScheduler, EulerAncestralDiscreteScheduler, StableDiffusionXLPipeline)
-from diffusers.models import AutoencoderKL
+from diffusers import EulerAncestralDiscreteScheduler, StableDiffusionXLPipeline
 from discord.ext import commands, tasks
 from discord.ext.commands import Cog
 
 log = logging.getLogger(__name__)
-WAIFU_DIFFUSION = "./models/wd-1-5-beta3"
-WAIFU_VAE = "./models/vae/kl-f8-anime2_clean.ckpt"
-ANYTHING_V5 = "./models/anything-v5/AnythingXL_v50.safetensors"
-ANYTHING_V5_VAE = "./models/anything-v5/vae/Anything-V3.0.vae.safetensors"
-ANYTHING_V5_PATH = "./models/anything-v5/"
-ANI_PONY = r'.\models\ani-pony\waiANINSFWPONYXL_v130.safetensors'
-PONY_REALISM = r'.\models\pony-realism\ponyRealism_V22.safetensors'
 CUDA = "cuda"
 
-WAIFU_POSITIVE_PROMPT = "(exceptional, best aesthetic, new, newest, best quality, masterpiece, extremely detailed, " \
-                         "anime, waifu:1.2)"
-WAIFU_NEGATIVE_PROMPT = "lowres, ((bad anatomy)), ((bad hands)), missing finger, extra digits, fewer digits, blurry, " \
-                         "((mutated hands and fingers)), (poorly drawn face), ((mutation)), ((deformed face)), (ugly), " \
-                         "((bad proportions)), ((extra limbs)), extra face, (double head), (extra head), ((extra feet))," \
-                         " monster, logo, cropped, worst quality, jpeg, humpbacked, long body, long neck," \
-                         " ((jpeg artifacts)), deleted, old, oldest, ((censored)), ((bad aesthetic))," \
-                         " (mosaic censoring, bar censor, blur censor)"
 
+ANI_PONY = r'.\models\ani-pony\waiANINSFWPONYXL_v130.safetensors'
+WAI_ILLUSTRIOUS = r".\models\wai_illustrious\waiNSFWIllustrious_v130.safetensors"
+PONY_REALISM = r'.\models\pony-realism\ponyRealism_V22.safetensors'
+
+ANI_PONY_POSITIVE_PROMPT = "score_9, score_8_up, score_7_up, source_anime"
 ANI_PONY_NEGATIVE_PROMPT = "worst quality, bad quality, jpeg artifacts, source_cartoon, \
                             3d, (censor), monochrome, blurry, lowres,watermark,"
-ANI_PONY_POSITIVE_PROMPT = "(score_9, score_8_up, score_7_up, source_anime)"
 
-STABLE_NEGATIVE_PROMPT = "(ugly, disfigured, deformed, blurry, low quality, poorly drawn, poorly lit, out of focus," \
-                          " overexposed, underexposed, malformed, uncoherent, low resolution, bad anatomy," \
-                          " bad proportions, poorly rendered, unrealistic, text, watermark, signature, over-saturated)"
-# PONY_REALISM_POSITIVE_PROMPT = "score_9, score_8_up, score_7_up, realistic, photorealistic, detailed background, " \
-#                                 "vivid colors, masterpiece:1.2"
-PONY_REALISM_POSITIVE_PROMPT = "(score_9, score_8_up, score_7_up, BREAK)"
+WAI_ILLUSTRIOUS_POSITIVE_PROMPT = "masterpiece,best quality,amazing quality,"
+WAI_ILLUSTRIOUS_NEGATIVE_PROMPT = "bad quality,worst quality,worst detail,sketch,censor"
+
+PONY_REALISM_POSITIVE_PROMPT = "score_9, score_8_up, score_7_up, BREAK"
 PONY_REALISM_NEGATIVE_PROMPT = "score_4, score_5, score_6"
-# PONY_REALISM_NEGATIVE_PROMPT = "score_6, score_5, score_4, lowres, bad anatomy, bad hands, text, error," \
-#                                 " missing fingers, extra digit, fewer digits, cropped, worst quality, low quality," \
-#                                 " jpeg artifacts, signature, watermark, blurry"
 
 
 def to_thread(func: typing.Callable) -> typing.Coroutine:
@@ -55,6 +37,12 @@ def to_thread(func: typing.Callable) -> typing.Coroutine:
     async def wrapper(*args, **kwargs):
         return await asyncio.to_thread(func, *args, **kwargs)
     return wrapper
+
+
+def in_allowed_channels():
+    async def predicate(ctx):
+        return ctx.channel.id in [1365847564196249620, 1045149015756521493]
+    return commands.check(predicate)
 
 
 class ImageCreation:
@@ -71,94 +59,104 @@ class ImageDiffusion(Cog):
         self.image_queue = asyncio.Queue(maxsize=5)
         self.next_image = asyncio.Event()
         self.pipelines = {}
+        self.models_to_load = [
+            WAI_ILLUSTRIOUS,
+            PONY_REALISM,
+            ANI_PONY
+        ]
+
+        self.model_gen_method = {
+            WAI_ILLUSTRIOUS: self.generate_image_wai_illustrious,
+            PONY_REALISM: self.generate_image_pony,
+            ANI_PONY: self.generate_image_ani_pony
+        }
+
         self.bot.loop.create_task(self.load_pipelines())
         self.image_generation.start()
 
     async def load_pipelines(self):
         """Preload all models into memory."""
         log.info("Loading all pipelines...")
-        # self.pipelines[WAIFU_DIFFUSION] = await self.load_pipeline(WAIFU_DIFFUSION)
-        # self.pipelines[ANYTHING_V5] = await self.load_pipeline(ANYTHING_V5)
-        self.pipelines[ANI_PONY] = await self.load_pipeline(ANI_PONY)
-        self.pipelines[PONY_REALISM] = await self.load_pipeline(PONY_REALISM)
+        for model in self.models_to_load:
+            self.pipelines[model] = await self.load_pipeline(model)
         log.info("All pipelines loaded successfully.")
 
-    async def load_pipeline(self, model_path):
+    async def load_single_pipeline(self, model: str):
+        log.info(f"Loading specific model: {model}")
+        self.pipelines[model] = await self.load_pipeline(model)
+        log.info("Model loaded successfully.")
+
+    async def load_pipeline(self, model: str):
         """Helper to load one model."""
-        if model_path == WAIFU_DIFFUSION:
-            pipe = StableDiffusionPipeline.from_single_file(
-                os.path.join(model_path, 'wd-illusion-fp16.safetensors'),
-                torch_dtype=torch.float16,
-                use_safetensors=True,
-                load_safety_checker=None,
-                vae=AutoencoderKL.from_single_file(WAIFU_VAE, use_safetensors=False, torch_dtype=torch.float16).to("cuda")
-            ).to(CUDA)
-            pipe.scheduler = EulerDiscreteScheduler.from_config(pipe.scheduler.config)
-            pipe.enable_xformers_memory_efficient_attention()
+        if model == PONY_REALISM:
+                pipe = StableDiffusionXLPipeline.from_single_file(
+                    PONY_REALISM,
+                    torch_dtype=torch.float16,
+                    use_safetensors=True,
+                    load_safety_checker=None,
+                ).to(CUDA)
+                pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
+                pipe.enable_xformers_memory_efficient_attention()
+                pipe.enable_model_cpu_offload()
 
-        elif model_path == ANYTHING_V5:
-            vae = AutoencoderKL.from_single_file(ANYTHING_V5_VAE, torch_dtype=torch.float16)
-            pipe = StableDiffusionPipeline.from_single_file(
-                model_path,
-                torch_dtype=torch.float16,
-                use_safetensors=True,
-                vae=vae,
-                load_safety_checker=None,
-                original_config_file=f"{ANYTHING_V5_PATH}/config/v1-inference.yaml"
-            ).to(CUDA)
-            pipe.scheduler = EulerDiscreteScheduler.from_config(pipe.scheduler.config)
-            pipe.enable_xformers_memory_efficient_attention()
+        elif model == ANI_PONY:
+                pipe = StableDiffusionXLPipeline.from_single_file(
+                    ANI_PONY,
+                    torch_dtype=torch.float16,
+                    use_safetensors=True,
+                    load_safety_checker=None,
+                )
+                pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
+                pipe.enable_xformers_memory_efficient_attention()
+                pipe.enable_model_cpu_offload()
 
-        elif model_path == PONY_REALISM:
-            pipe = StableDiffusionXLPipeline.from_single_file(
-                PONY_REALISM,
-                torch_dtype=torch.float16,
-                use_safetensors=True,
-                load_safety_checker=None,
-            ).to(CUDA)
-            pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
-            pipe.enable_xformers_memory_efficient_attention()
-            pipe.enable_model_cpu_offload()
+        elif model == WAI_ILLUSTRIOUS:
+                pipe = StableDiffusionXLPipeline.from_single_file(
+                    WAI_ILLUSTRIOUS,
+                    torch_dtype=torch.float16,
+                    use_safetensors=True,
+                    load_safety_checker=None,
+                )
+                pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
+                pipe.enable_xformers_memory_efficient_attention()
+                pipe.enable_model_cpu_offload()
 
-        elif model_path == ANI_PONY:
-            pipe = StableDiffusionXLPipeline.from_single_file(
-                ANI_PONY,
-                torch_dtype=torch.float16,
-                use_safetensors=True,
-                load_safety_checker=None,
-            )
-            pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
-            pipe.enable_xformers_memory_efficient_attention()
-            pipe.enable_model_cpu_offload()
+        else:
+            log.error(f"Tried to load an unsupported model: {model}")
+            raise ValueError(f"Unsupported model: {model}")
 
         return pipe
 
-    @commands.group(invoke_without_command=True)
-    async def waifu(self, ctx: commands.Context, *, prompt: str) -> None:
-        """Queue image using Waifu Diffusion v1.5 Beta 3.
-
-        Parameters:
-        - prompt (str): The prompt for the image generation.
-        """
-        await self.schedule_generation(ctx, prompt, WAIFU_DIFFUSION)
 
     @commands.group(invoke_without_command=True)
+    @in_allowed_channels()
     async def anime(self, ctx: commands.Context, *, prompt: str) -> None:
-        """Queue image using Anything V5.0 anime model.
+        """Queue image using WAI Illustrious v12.
 
-        Parameters:
+        Arguments:
         - prompt (str): The prompt for the image generation.
         """
-        await self.schedule_generation(ctx, prompt, ANI_PONY)
+        await self.schedule_generation(ctx, prompt, WAI_ILLUSTRIOUS)
 
     @commands.group(invoke_without_command=True)
+    @in_allowed_channels()
     async def pony(self, ctx: commands.Context, *, prompt: str) -> None:
         """Queue image using Pony Realism V2.2.
 
-        Parameters:
+        Arguments:
         - prompt (str): The prompt for the image generation.
         """
         await self.schedule_generation(ctx, prompt, PONY_REALISM)
+
+    @commands.group(invoke_without_command=True)
+    @in_allowed_channels()
+    async def anipony(self, ctx: commands.Context, *, prompt: str) -> None:
+        """Queue image using WAI Pony.
+
+        Arguments:
+        - prompt (str): The prompt for the image generation.
+        """
+        await self.schedule_generation(ctx, prompt, ANI_PONY)
 
     async def schedule_generation(self, ctx, prompt, model) -> None:
         if self.image_queue.full():
@@ -167,7 +165,7 @@ class ImageDiffusion(Cog):
         entry = ImageCreation(ctx, prompt, model)
         await self.image_queue.put(entry)
         await ctx.message.add_reaction("👍")
-        log.info(f"Added prompt to queue: {prompt}")
+        log.info(f"Added prompt to queue: {prompt} for model: {model}")
 
     @tasks.loop(seconds=1)
     async def image_generation(self) -> None:
@@ -177,33 +175,27 @@ class ImageDiffusion(Cog):
         log.debug("Processing next queued image...")
         self.next_image.clear()
         image = await self.image_queue.get()
-        ctx = image.ctx
-        prompt = image.prompt
-        model_path = image.model
         timeout = 600
 
-        if image.model == WAIFU_DIFFUSION:
-            image_gen = self.generate_image_waifu
-        elif image.model == ANYTHING_V5:
-            image_gen = self.generate_image_anything
-        elif image.model == PONY_REALISM:
-            image_gen = self.generate_image_pony
-        elif image.model == ANI_PONY:
-            image_gen = self.generate_image_ani_pony
-        else:
+        try:
+            image_gen = self.model_gen_method[image.model]
+        except KeyError:
             log.warning("There was somehow a model queued up that does not exist.")
+            self.bot.loop.call_soon_threadsafe(self.next_image.set)
+            await self.next_image.wait()
             return
 
         try:
-            output = await asyncio.wait_for(image_gen(model_path, prompt), timeout=timeout)
+            output = await asyncio.wait_for(image_gen(image.model, image.prompt), timeout=timeout)
         except asyncio.TimeoutError:
             log.error("Image generation timed out")
-            return await ctx.reply("Image generation timed out. Try again with a simpler prompt.")
+            return await image.ctx.reply("Image generation timed out. Try again with a simpler prompt.")
         except discord.HTTPException:
-            await ctx.send("Error generating prompt: {prompt}.")
+            await image.ctx.send("Error generating prompt: {prompt}.")
         except Exception as e:
             log.error(f"Generation failed: {str(e)}")
-            return await ctx.reply(f"Image generation failed: {str(e)}")
+            torch.cuda.empty_cache()
+            return await image.ctx.reply(f"Image generation failed: {str(e)}")
 
         img = output.images[0]
         buffer = BytesIO()
@@ -212,13 +204,13 @@ class ImageDiffusion(Cog):
         file = discord.File(buffer, filename="generated.png")
 
         try:
-            await ctx.reply(file=file)
+            await image.ctx.reply(file=file)
         except discord.HTTPException:
             log.warning("Hit case where was unable to do ctx.reply in image generation.")
-            await ctx.send(file=file)
+            await image.ctx.send(file=file)
         except Exception as e:
             logging.error(f"Error: {e}")
-            await ctx.send(f"Some error occurred while image generation from {ctx.author.name}")
+            await image.ctx.send(f"Some error occurred while image generation from {image.ctx.author.name}")
         log.debug("Image sent to Discord")
         self.bot.loop.call_soon_threadsafe(self.next_image.set)
         await self.next_image.wait()
@@ -232,60 +224,15 @@ class ImageDiffusion(Cog):
 
         log.info(f"Starting ani pony generation for prompt: {prompt}")
         gen_start = time.time()
-        prompt = f"{prompt}, {ANI_PONY_POSITIVE_PROMPT}"
+        prompt = f"{prompt}, {PONY_REALISM_POSITIVE_PROMPT}"
         with torch.autocast(CUDA, dtype=torch.float16):
             result = pipe(
                 prompt,
-                num_inference_steps=30,
-                guidance_scale=7.5,
-                height=768,
-                width=768,
-                negative_prompt=ANI_PONY_NEGATIVE_PROMPT
-            )
-        gen_time = time.time() - gen_start
-        log.info(f"Generation completed for prompt: {prompt} in {gen_time:.2f} seconds")
-        return result
-
-    @to_thread
-    def generate_image_anything(self, model_path, prompt):
-        """Generate an image given a model path and a prompt."""
-        pipe = self.pipelines.get(model_path)
-        if pipe is None:
-            raise ValueError(f"No pipeline loaded for model {model_path}")
-
-        log.info(f"Starting generation for prompt: {prompt}")
-        gen_start = time.time()
-        prompt = f"{prompt}, (exceptional, best aesthetic, new, newest, best quality, masterpiece, extremely detailed)"
-        with torch.autocast(CUDA, dtype=torch.float16):
-            result = pipe(
-                prompt,
-                num_inference_steps=28,
-                guidance_scale=7.5,
-                height=768,
-                width=768,
-                negative_prompt=WAIFU_NEGATIVE_PROMPT
-            )
-        gen_time = time.time() - gen_start
-        log.info(f"Generation completed for prompt: {prompt} in {gen_time:.2f} seconds")
-        return result
-
-    @to_thread
-    def generate_image_waifu(self, model_path, prompt):
-        pipe = self.pipelines.get(model_path)
-        if pipe is None:
-            raise ValueError(f"No pipeline loaded for model {model_path}")
-
-        log.info(f"Starting waifu generation for prompt: {prompt}")
-        gen_start = time.time()
-        prompt = f"{prompt}, {WAIFU_POSITIVE_PROMPT}"
-        with torch.autocast(CUDA, dtype=torch.float16):
-            result = pipe(
-                prompt,
-                num_inference_steps=28,
-                guidance_scale=7.5,
-                height=768,
-                width=768,
-                negative_prompt=WAIFU_NEGATIVE_PROMPT
+                num_inference_steps=25,
+                guidance_scale=8,
+                height=1024,
+                width=1024,
+                negative_prompt=PONY_REALISM_NEGATIVE_PROMPT
             )
         gen_time = time.time() - gen_start
         log.info(f"Generation completed for prompt: {prompt} in {gen_time:.2f} seconds")
@@ -303,11 +250,33 @@ class ImageDiffusion(Cog):
         with torch.autocast(CUDA, dtype=torch.float16):
             result = pipe(
                 prompt,
-                num_inference_steps=30,
-                guidance_scale=7.5,
-                height=768,
-                width=768,
+                num_inference_steps=25,
+                guidance_scale=8,
+                height=1024,
+                width=1024,
                 negative_prompt=PONY_REALISM_NEGATIVE_PROMPT
+            )
+        gen_time = time.time() - gen_start
+        log.info(f"Generation completed for prompt: {prompt} in {gen_time:.2f} seconds")
+        return result
+
+    @to_thread
+    def generate_image_wai_illustrious(self, model_path, prompt):
+        pipe = self.pipelines.get(model_path)
+        if pipe is None:
+            raise ValueError(f"No pipeline loaded for model {model_path}")
+
+        log.info(f"Starting wai illustrious generation for prompt: {prompt}")
+        gen_start = time.time()
+        prompt = f"{prompt}, {WAI_ILLUSTRIOUS_POSITIVE_PROMPT}"
+        with torch.autocast(CUDA, dtype=torch.float16):
+            result = pipe(
+                prompt,
+                num_inference_steps=20,
+                guidance_scale=7,
+                height=1024,
+                width=1024,
+                negative_prompt=WAI_ILLUSTRIOUS_NEGATIVE_PROMPT
             )
         gen_time = time.time() - gen_start
         log.info(f"Generation completed for prompt: {prompt} in {gen_time:.2f} seconds")
@@ -315,6 +284,7 @@ class ImageDiffusion(Cog):
 
     def cog_unload(self):
         self.image_generation.cancel()
+        gc.collect()
         torch.cuda.empty_cache()
 
 
