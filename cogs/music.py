@@ -174,14 +174,6 @@ class Music(Cog):
             colour=discord.Colour.blue(),
         )
 
-        name = 'Artist'
-        value = self._get_value(entry, 'artist')
-        embed.add_field(name=name, value=value, inline=True)
-
-        name = 'Album'
-        value = self._get_value(entry, 'album')
-        embed.add_field(name=name, value=value, inline=True)
-
         name = 'Requester'
         value = entry.ctx.message.author
         embed.add_field(name=name, value=value, inline=True)
