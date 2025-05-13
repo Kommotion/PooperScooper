@@ -367,6 +367,10 @@ class Music(Cog):
         """Stops what's playing."""
         while not self.music_queue.empty():
             self.music_queue.get_nowait()
+
+        if ctx.voice_client and (ctx.voice_client.is_playing() or ctx.voice_client.is_paused()):
+            ctx.voice_client.stop()
+
         await ctx.voice_client.disconnect()
 
     @commands.command()
