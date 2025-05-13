@@ -23,11 +23,12 @@ ytdl_format_options = {
     'quiet': True,
     'no_warnings': True,
     'default_search': 'auto',
-    'source_address': '0.0.0.0'  # bind to ipv4 since ipv6 addresses cause issues sometimes
+    'source_address': '0.0.0.0',  # bind to ipv4 since ipv6 addresses cause issues sometimes
+    'force_generic_extractor': True,  # Handle tricky URLs
 }
 ffmpeg_options = {
     'options': '-vn',
-    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5'
+    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 10 -reconnect_on_network_error 1'
 }
 
 ytdl = youtube_dl.YoutubeDL(ytdl_format_options)
@@ -119,6 +120,7 @@ class Music(Cog):
             if self.repeat_enabled:
                 self.repeated_entry = entry
         except Exception as e:
+            log.error(f"Unexpected error while playing {entry.url}: {e}")
             await self.error_playing_embed(entry)
             # If there was an error playing the song for some reason skip to the next song
             self.repeated_entry = None
@@ -236,10 +238,40 @@ class Music(Cog):
         """Plays a youtube url or spotify album/playlist and shuffles before playing."""
         await self._play(ctx, url, shuffle=True)
 
+    @play.command(name="playlist")
+    async def play_playlist(self, ctx, *, url):
+        """Plays a YouTube playlist or Spotify playlist/album."""
+        await self._play(ctx, url)
+
+    def get_from_youtube_playlist(self, url):
+        """Extracts a list of video URLs from a YouTube playlist."""
+        try:
+            # Configure yt_dlp to extract only info without downloading
+            playlist_info = ytdl.extract_info(url, download=False)
+            if 'entries' not in playlist_info:
+                raise Exception("Not a valid YouTube playlist")
+
+            # Extract video URLs from playlist entries
+            return_list = [entry['webpage_url'] for entry in playlist_info['entries'] if entry]
+            return return_list
+        except Exception as e:
+            log.warning(f"Failed to parse YouTube playlist: {e}")
+            return []
+
     async def _play(self, ctx, url, shuffle=False):
         async with ctx.typing():
             if 'spotify' in url:
                 music_list = self.get_from_spotify(url)
+            elif 'youtube.com/playlist' in url or 'list=' in url:
+                music_list = self.get_from_youtube_playlist(url)
+                if not music_list:
+                    embed = discord.Embed(
+                        title='Error',
+                        description='Failed to parse YouTube playlist. It may be private, unavailable, or not a valid playlist.',
+                        colour=discord.Colour.red()
+                    )
+                    await ctx.send(embed=embed)
+                    return
             else:
                 # Single item in music list
                 music_list = list()
