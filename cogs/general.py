@@ -107,14 +107,41 @@ class General(Cog):
                 embed.add_field(name=server.name, value=msg, inline=False)
         await ctx.send(embed=embed)
 
-    @app_commands.command(name="command-1")
-    async def my_command(self, interaction: discord.Interaction) -> None:
-        await interaction.response.send_message("Hello from command 1!", ephemeral=True)
+    @commands.is_owner()
+    @commands.guild_only()
+    @commands.command()
+    async def clear_commands(self, ctx: commands.Context, guild_id: typing.Optional[int] = None,
+                             command_name: typing.Optional[str] = None) -> None:
+        """Owner-only. Clears all or specific commands."""
+        try:
+            if guild_id:
+                guild = discord.Object(id=guild_id)
+                if command_name:
+                    self.bot.tree.remove_command(command_name, guild=guild)
+                    await ctx.send(f"Removed command /{command_name} from guild {guild_id}!")
+                else:
+                    self.bot.tree.clear_commands(guild=guild)
+                    await ctx.send(f"Cleared all commands from guild {guild_id}!")
+                await self.bot.tree.sync(guild=guild)
+            else:
+                if command_name:
+                    self.bot.tree.remove_command(command_name, guild=None)
+                    await ctx.send(f"Removed global command /{command_name}!")
+                else:
+                    self.bot.tree.clear_commands(guild=None)
+                    await ctx.send("Cleared all global commands!")
+                await self.bot.tree.sync()
+        except discord.errors.Forbidden:
+            await ctx.send("Failed to clear commands: Bot lacks manage permissions!")
+            log.error("Forbidden error during command clearing")
+        except Exception as e:
+            await ctx.send(f"Error during clear: {str(e)}")
+            log.error(f"Clear failed: {str(e)}")
 
     @commands.is_owner()
     @commands.guild_only()
     @commands.command()
-    async def sync(self, ctx: commands.Context, guilds: commands.Greedy[discord.Object], spec: typing.Optional[Literal["~", "*", "^"]] = None) -> None:
+    async def sync_commands(self, ctx: commands.Context, guilds: commands.Greedy[discord.Object], spec: typing.Optional[Literal["~", "*", "^"]] = None) -> None:
         """Owner-only. Remember: Has usage restrictions."""
         if not guilds:
             if spec == "~":
@@ -142,14 +169,6 @@ class General(Cog):
                 pass
             else:
                 ret += 1
-
-    @commands.is_owner()
-    @commands.guild_only()
-    @commands.command()
-    async def global_sync(self, ctx: commands.Context) -> None:
-        """Owner-only. Remember: Has usage restrictions."""
-        command = await self.bot.tree.sync(guild=None)
-        await ctx.send(f'Successfully synced {len(command)} commands')
 
     @commands.command()
     async def stats(self, ctx):
