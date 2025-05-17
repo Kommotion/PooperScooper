@@ -244,7 +244,7 @@ class ImageDiffusion(Cog):
             elif prompt_type == PromptType.NEGATIVE:
                 default_prompt = WAI_ILLUSTRIOUS_NEGATIVE_PROMPT
         else:
-            await interaction.response.send_message("You did not specify a correct model.")
+            await interaction.response.send_message("You did not specify a correct model.", ephemeral=True)
             return
 
         await interaction.response.send_message(f"The default {prompt_type.value} prompt for {model.value} is:\n{default_prompt}")
@@ -254,8 +254,8 @@ class ImageDiffusion(Cog):
         model=f'Choose one of these models: {ANIME_DESCRIPTION}, {PONY_DESCRIPTION}, {ANIPONY_DESCRIPTION}',
         prompt='Prompt to generate the image.',
         negative_prompt="Avoid these elements in the image.",
-        add_default_negative="Whether to include the default negative prompt (default: Yes). Use /default_prompt to find what they are.",
-        add_default_positive="Whether to include the default positive prompt (default: Yes). Use /default_prompt to find what they are."
+        add_default_negative="Whether to include the default negative prompt (default: Yes).",
+        add_default_positive="Whether to include the default positive prompt (default: Yes)."
     )
     @app_commands.guilds(MENACES_TO_SOBRIETY_SERVER_ID, POOPER_SCOOPER_SUPPORT_SERVER_ID)
     async def generate(self, interaction: discord.Interaction,
