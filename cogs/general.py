@@ -156,17 +156,17 @@ class General(Cog):
             else:
                 synced = await ctx.bot.tree.sync()
 
-            await ctx.send(
-                f"Synced {len(synced)} commands {'globally' if spec is None else 'to the current guild.'}"
-            )
+            await ctx.send(f"Synced {len(synced)} commands {'globally' if spec is None else 'to the current guild.'}")
             return
 
         ret = 0
         for guild in guilds:
             try:
-                await ctx.bot.tree.sync(guild=guild)
-            except discord.HTTPException:
-                pass
+                ctx.bot.tree.copy_global_to(guild=guild)
+                synced = await ctx.bot.tree.sync(guild=guild)
+                await ctx.send(f"Synced {len(synced)} commands to guild id: {guild}")
+            except discord.HTTPException as e:
+                await ctx.send(f"Some error occurred: {e}")
             else:
                 ret += 1
 
