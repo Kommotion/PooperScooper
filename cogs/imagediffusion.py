@@ -1,35 +1,85 @@
 import asyncio
 import typing
 import functools
+from ftplib import error_perm
 from io import BytesIO
 import gc
 import time
 import os
-
+import typing
+from typing import Literal, Optional
 import discord
 import torch
 import logging
+from enum import Enum, StrEnum
 from diffusers import EulerAncestralDiscreteScheduler, StableDiffusionXLPipeline
 from discord.ext import commands, tasks
 from discord.ext.commands import Cog
+from discord import app_commands
+
+
+from cogs.utils.constants import MENACES_TO_SOBRIETY_SERVER_ID, POOPER_SCOOPER_SUPPORT_SERVER_ID
 
 log = logging.getLogger(__name__)
 CUDA = "cuda"
 
 
-ANI_PONY = r'.\models\ani-pony\waiANINSFWPONYXL_v130.safetensors'
+ANI_PONY = r'.\models\ani-pony\waiANINSFWPONYXL_v140.safetensors'
 WAI_ILLUSTRIOUS = r".\models\wai_illustrious\waiNSFWIllustrious_v140.safetensors"
-PONY_REALISM = r'.\models\pony-realism\ponyRealism_V22.safetensors'
+PONY_REALISM = r'.\models\pony-realism\ponyRealism_V23.safetensors'
 
 ANI_PONY_POSITIVE_PROMPT = "score_9, score_8_up, score_7_up, source_anime"
 ANI_PONY_NEGATIVE_PROMPT = "worst quality, bad quality, jpeg artifacts, source_cartoon, \
-                            3d, (censor), monochrome, blurry, lowres,watermark,"
+3d, (censor), monochrome, blurry, lowres,watermark,"
 
 WAI_ILLUSTRIOUS_POSITIVE_PROMPT = "masterpiece,best quality,amazing quality,"
-WAI_ILLUSTRIOUS_NEGATIVE_PROMPT = "bad quality,worst quality,worst detail,sketch,censor"
+WAI_ILLUSTRIOUS_NEGATIVE_PROMPT = "worst quality,bad quality,jpeg artifacts, source_cartoon, \
+3d, (censor),monochrome,blurry, lowres,watermark,"
 
 PONY_REALISM_POSITIVE_PROMPT = "score_9, score_8_up, score_7_up, BREAK"
 PONY_REALISM_NEGATIVE_PROMPT = "score_4, score_5, score_6"
+
+NSFW_IMAGE_DIFFUSION_CHANNEL = 1373140173067653120
+IMAGE_DIFFUSION_CHANNEL = 1365847564196249620
+TEST_CHANNEL = 1045149015756521493
+ALlOWED_CHANNELS = [NSFW_IMAGE_DIFFUSION_CHANNEL, TEST_CHANNEL, IMAGE_DIFFUSION_CHANNEL]
+
+ANIME_DESCRIPTION = 'Anime (WAI-NSFW-illustrious-SDXL v14)'
+ANIPONY_DESCRIPTION = 'Anipony (WAI-ANI-PONYXL v14.0.)'
+PONY_DESCRIPTION = 'Pony (Pony Realism v23)'
+
+
+class Models(StrEnum):
+    ANIME = "anime"
+    ANIPONY = "anipony"
+    PONY = "pony"
+
+    @classmethod
+    def _missing_(cls, value):
+        # Check against name (case-insensitive)
+        for member in cls:
+            if member.name.lower() == value.lower():
+                return member
+        raise ValueError(f"{value} is not a valid {cls.__name__}")
+
+class PromptType(StrEnum):
+    POSITIVE = 'positive'
+    NEGATIVE = 'negative'
+
+    @classmethod
+    def _missing_(cls, value):
+        # Check against name (case-insensitive)
+        for member in cls:
+            if member.name.lower() == value.lower():
+                return member
+        raise ValueError(f"{value} is not a valid {cls.__name__}")
+
+class DefaultChoice(StrEnum):
+    YES = 'yes'
+    NO = 'No'
+
+YES = 'yes'
+NO = 'No'
 
 
 def to_thread(func: typing.Callable) -> typing.Coroutine:
@@ -44,7 +94,7 @@ def in_allowed_channels():
         guild = ctx.guild
         if guild is None:
             return False
-        return ctx.channel.id in [1365847564196249620, 1045149015756521493]
+        return ctx.channel.id in ALlOWED_CHANNELS
     return commands.check(predicate)
 
 
@@ -97,7 +147,7 @@ class ImageDiffusion(Cog):
                     torch_dtype=torch.float16,
                     use_safetensors=True,
                     load_safety_checker=None,
-                ).to(CUDA)
+                )
                 pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
                 pipe.enable_xformers_memory_efficient_attention()
                 pipe.enable_model_cpu_offload()
@@ -134,7 +184,7 @@ class ImageDiffusion(Cog):
     @commands.group(invoke_without_command=True)
     @in_allowed_channels()
     async def anime(self, ctx: commands.Context, *, prompt: str) -> None:
-        """Queue image using WAI Illustrious v14.
+        """Generate text to image using Anime (WAI-NSFW-illustrious-SDXL v14).
 
         Arguments:
         - prompt (str): The prompt for the image generation.
@@ -144,7 +194,7 @@ class ImageDiffusion(Cog):
     @commands.group(invoke_without_command=True)
     @in_allowed_channels()
     async def pony(self, ctx: commands.Context, *, prompt: str) -> None:
-        """Queue image using Pony Realism V2.2.
+        """Generate text to image using Pony (Pony Realism v23).
 
         Arguments:
         - prompt (str): The prompt for the image generation.
@@ -154,12 +204,72 @@ class ImageDiffusion(Cog):
     @commands.group(invoke_without_command=True)
     @in_allowed_channels()
     async def anipony(self, ctx: commands.Context, *, prompt: str) -> None:
-        """Queue image using WAI Pony.
+        """Queue image using Anipony (WAI-ANI-PONYXL v14.0.).
 
         Arguments:
         - prompt (str): The prompt for the image generation.
         """
         await self.schedule_generation(ctx, prompt, ANI_PONY)
+
+    @app_commands.command(name="show_default_prompts", description='Print the default negative or positive prompts for the given model.')
+    @app_commands.describe(
+        model=f'The model you want to see the default prompt of.',
+        prompt_type='Whether you want to see the default positive or negative prompt.'
+    )
+    @app_commands.guilds(MENACES_TO_SOBRIETY_SERVER_ID, POOPER_SCOOPER_SUPPORT_SERVER_ID)
+    async def default_prompt(self, interaction: discord.Interaction,
+                             model: Models,
+                             prompt_type: PromptType
+        ) -> None:
+
+        if interaction.channel_id not in ALlOWED_CHANNELS:
+            await interaction.response.send_message("This command is not allowed in this channel!", ephemeral=True)
+            return
+
+        default_prompt = None
+
+        if model == Models.ANIPONY:
+            if prompt_type == PromptType.POSITIVE:
+                default_prompt = ANI_PONY_POSITIVE_PROMPT
+            elif prompt_type == PromptType.NEGATIVE:
+                default_prompt = ANI_PONY_NEGATIVE_PROMPT
+        elif model == Models.PONY:
+            if prompt_type == PromptType.POSITIVE:
+                default_prompt = PONY_REALISM_POSITIVE_PROMPT
+            elif prompt_type == PromptType.NEGATIVE:
+                default_prompt = PONY_REALISM_NEGATIVE_PROMPT
+        elif model == Models.ANIME:
+            if prompt_type == PromptType.POSITIVE:
+                default_prompt = WAI_ILLUSTRIOUS_POSITIVE_PROMPT
+            elif prompt_type == PromptType.NEGATIVE:
+                default_prompt = WAI_ILLUSTRIOUS_NEGATIVE_PROMPT
+        else:
+            await interaction.response.send_message("You did not specify a correct model.")
+            return
+
+        await interaction.response.send_message(f"The default {prompt_type.value} prompt for {model.value} is:\n{default_prompt}")
+
+    @app_commands.command(name="generate_image", description='Generate an image using text to image model.')
+    @app_commands.describe(
+        model=f'Choose one of these models: {ANIME_DESCRIPTION}, {PONY_DESCRIPTION}, {ANIPONY_DESCRIPTION}',
+        prompt='Prompt to generate the image.',
+        negative_prompt="Avoid these elements in the image.",
+        add_default_negative="Whether to include the default negative prompt (default: Yes). Use /default_prompt to find what they are.",
+        add_default_positive="Whether to include the default positive prompt (default: Yes). Use /default_prompt to find what they are."
+    )
+    @app_commands.guilds(MENACES_TO_SOBRIETY_SERVER_ID, POOPER_SCOOPER_SUPPORT_SERVER_ID)
+    async def generate(self, interaction: discord.Interaction,
+                       model: Models,
+                       prompt: str,
+                       negative_prompt: Optional[str] = None,
+                       add_default_negative: Optional[DefaultChoice] = DefaultChoice.YES,
+                       add_default_positive: Optional[DefaultChoice] = DefaultChoice.YES
+                       ) -> None:
+        if interaction.channel_id not in ALlOWED_CHANNELS:
+            await interaction.response.send_message("This command is not allowed in this channel!", ephemeral=True)
+            return
+
+        await interaction.response.send_message('To be implemented...', ephemeral=True)
 
     async def schedule_generation(self, ctx, prompt, model) -> None:
         if self.image_queue.full():
