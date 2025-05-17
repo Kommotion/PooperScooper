@@ -164,7 +164,7 @@ class General(Cog):
             try:
                 ctx.bot.tree.copy_global_to(guild=guild)
                 synced = await ctx.bot.tree.sync(guild=guild)
-                await ctx.send(f"Synced {len(synced)} commands to guild id: {guild}")
+                await ctx.send(f"Synced {len(synced)} commands to guild id: {guild.id}")
             except discord.HTTPException as e:
                 await ctx.send(f"Some error occurred: {e}")
             else:
