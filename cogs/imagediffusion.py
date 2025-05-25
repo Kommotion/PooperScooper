@@ -15,8 +15,7 @@ from enum import Enum, StrEnum
 from diffusers import EulerAncestralDiscreteScheduler, StableDiffusionXLPipeline
 from discord.ext import commands, tasks
 from discord.ext.commands import Cog
-from discord import app_commands, ui
-
+from discord import app_commands, ui, NSFWLevel
 
 from cogs.utils.constants import MENACES_TO_SOBRIETY_SERVER_ID, POOPER_SCOOPER_SUPPORT_SERVER_ID
 
@@ -41,7 +40,8 @@ PONY_REALISM_NEGATIVE_PROMPT = "score_4, score_5, score_6"
 NSFW_IMAGE_DIFFUSION_CHANNEL = 1373140173067653120
 IMAGE_DIFFUSION_CHANNEL = 1365847564196249620
 TEST_CHANNEL = 1045149015756521493
-ALlOWED_CHANNELS = [NSFW_IMAGE_DIFFUSION_CHANNEL, TEST_CHANNEL, IMAGE_DIFFUSION_CHANNEL]
+SHEPHERD_CHANNEL = 1061073360999698483
+ALlOWED_CHANNELS = [NSFW_IMAGE_DIFFUSION_CHANNEL, TEST_CHANNEL, IMAGE_DIFFUSION_CHANNEL, SHEPHERD_CHANNEL]
 
 ANIME_DESCRIPTION = 'Anime (WAI-NSFW-illustrious-SDXL v14)'
 ANIPONY_DESCRIPTION = 'Anipony (WAI-ANI-PONYXL v14.0.)'
@@ -80,8 +80,8 @@ class DefaultChoice(StrEnum):
 class NsfwLevel(StrEnum):
     GENERAL = 'general'
     SENSITIVE = 'sensitive'
-    EXPLICIT = 'explicit'
     NSFW = 'nsfw'
+    EXPLICIT = 'explicit'
     NOT_SPECIFIED = 'not_specified'
 
     @classmethod
@@ -94,8 +94,6 @@ class NsfwLevel(StrEnum):
 
 YES = 'yes'
 NO = 'No'
-
-
 
 
 class ImageGenPrefView(ui.View):
@@ -144,8 +142,8 @@ class ImageGenPrefView(ui.View):
             options=[
                 discord.SelectOption(label="General", value=NsfwLevel.GENERAL, description="Safe for all audiences"),
                 discord.SelectOption(label="Sensitive", value=NsfwLevel.SENSITIVE, description="Potentially sensitive content"),
-                discord.SelectOption(label="Explicit", value=NsfwLevel.EXPLICIT, description="Explicit mature content"),
                 discord.SelectOption(label="NSFW", value=NsfwLevel.NSFW, description="General NSFW content"),
+                discord.SelectOption(label="Explicit", value=NsfwLevel.EXPLICIT, description="Explicit mature content"),
                 discord.SelectOption(label="Not Specified", value=NsfwLevel.NOT_SPECIFIED, description="No specific NSFW level", default=True)
             ]
         )
@@ -495,6 +493,12 @@ class ImageDiffusion(Cog):
                 await interaction.response.send_message("Queue is full! Please wait and try again.")
             return
 
+        # Non-nsfw channels will default to less nsfw and explicit things
+        channel_id = ctx.channel.id if ctx else interaction.channel.id
+        if channel_id in [IMAGE_DIFFUSION_CHANNEL, SHEPHERD_CHANNEL] and nsfw == NsfwLevel.NOT_SPECIFIED:
+            negative_prompt += 'nsfw, explicit' if not negative_prompt else ', nsfw, explicit'
+            prompt += ', general'
+
         image_entry = ImageCreation(prompt, model, ctx=ctx, interaction=interaction, negative_prompt=negative_prompt,
                               use_default_negative=use_default_negative, use_default_positive=use_default_positive,
                               nsfw=nsfw)
@@ -545,9 +549,18 @@ class ImageDiffusion(Cog):
             return
         except discord.HTTPException:
             await image.ctx.send(f"Error generating prompt: {image.prompt}.")
+        except RuntimeError as e:
+            log.error(f"RuntimeError during generation: {e}")
+            if "CUDNN_STATUS_INTERNAL_ERROR" in str(e) or "allocation failed" in str(e).lower():
+                log.error("Trying gc.collect and stuff")
+                gc.collect()
+                torch.cuda.ipc_collect()
+                torch.cuda.empty_cache()
+            await image.ctx.reply(content=f"Image generation failed: {str(e)}",
+                                                 allowed_mentions=discord.AllowedMentions(users=True))
+            return
         except Exception as e:
             log.error(f"Generation failed: {str(e)}")
-            torch.cuda.empty_cache()
             await image.ctx.reply(f"Image generation failed: {str(e)}")
             return
 
@@ -563,7 +576,7 @@ class ImageDiffusion(Cog):
             prompt_details.message = await image.ctx.reply(content=f"**{image.prompt} - {image.model} model**", file=file, view=prompt_details)
         except discord.HTTPException:
             log.warning("Hit case where was unable to do ctx.reply in image generation.")
-            await image.ctx.send(file=file)
+            await image.ctx.channel.send(content=f"**{image.prompt} - {image.model} model {image.ctx.author.mention}**", file=file)
         except Exception as e:
             log.error(f"Error: {e}")
             await image.ctx.send(f"Some error occurred while image generation from {image.ctx.author.name}")
@@ -577,7 +590,7 @@ class ImageDiffusion(Cog):
             image_gen = self.model_gen_method[image.model]
         except KeyError:
             log.warning("There was somehow a model queued up that does not exist.")
-            await image.interaction.followup.send(content="You somehow queued up a model that did not exist. Naughty you!",
+            await image.interaction.channel.send(content="You somehow queued up a model that did not exist. Naughty you!",
                                                   allowed_mentions=discord.AllowedMentions(users=True))
             return
 
@@ -585,17 +598,26 @@ class ImageDiffusion(Cog):
             output, positive, negative, gen_time = await asyncio.wait_for(image_gen(image), timeout=timeout)
         except asyncio.TimeoutError:
             log.error("Image generation timed out")
-            await image.interaction.followup.send(content="Image generation timed out. Try again with a simpler prompt.",
+            await image.interaction.channel.send(content="Image generation timed out. Try again with a simpler prompt.",
                                                   allowed_mentions=discord.AllowedMentions(users=True))
             return
         except discord.HTTPException:
-            await image.interaction.followup.send(content=f"Error generating prompt: {image.prompt}.",
+            await image.interaction.channel.send(content=f"Error generating prompt: {image.prompt}.",
                                                   allowed_mentions=discord.AllowedMentions(users=True))
+            return
+        except RuntimeError as e:
+            log.error(f"RuntimeError during generation: {e}")
+            if "CUDNN_STATUS_INTERNAL_ERROR" in str(e) or "allocation failed" in str(e).lower():
+                log.error("Trying gc.collect and stuff")
+                gc.collect()
+                torch.cuda.ipc_collect()
+                torch.cuda.empty_cache()
+            await image.interaction.channel.send(content=f"Image generation failed: {str(e)}",
+                                                 allowed_mentions=discord.AllowedMentions(users=True))
             return
         except Exception as e:
             log.error(f"Generation failed: {str(e)}")
-            torch.cuda.empty_cache()
-            await image.interaction.followup.send(content=f"Image generation failed: {str(e)}",
+            await image.interaction.channel.send(content=f"Image generation failed: {str(e)}",
                                                   allowed_mentions=discord.AllowedMentions(users=True))
             return
 
@@ -613,12 +635,10 @@ class ImageDiffusion(Cog):
                 file=file,
                 view=prompt_details,
                 allowed_mentions=discord.AllowedMentions(users=True, replied_user=True)
-                # reference= (await image.interaction.original_response()).to_reference()
             )
         except Exception as e:
             log.error(f"Error: {e}")
-            await image.interaction.followup.send(content=f"Some error occurred while image generation:\n{e}",
-                                                  ephemeral=True,
+            await image.interaction.channel.send(content=f"Some error occurred while image generation:\n{e}",
                                                   allowed_mentions=discord.AllowedMentions(users=True))
 
         log.debug("Image sent to Discord")
