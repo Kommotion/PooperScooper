@@ -496,8 +496,11 @@ class ImageDiffusion(Cog):
         # Non-nsfw channels will default to less nsfw and explicit things
         channel_id = ctx.channel.id if ctx else interaction.channel.id
         if channel_id in [IMAGE_DIFFUSION_CHANNEL, SHEPHERD_CHANNEL] and nsfw == NsfwLevel.NOT_SPECIFIED:
-            negative_prompt += 'nsfw, explicit' if not negative_prompt else ', nsfw, explicit'
-            prompt += ', general'
+            if negative_prompt:
+                negative_prompt += ', '
+            negative_prompt += 'nsfw, nude, nudity, naked, lingerie, underwear, cleavage, erotic, lewd, sexual,'\
+                                ' exposed, suggestive, inappropriate, skimpy, pornographic, uncensored'
+            # prompt += ', general, sensitive'
 
         image_entry = ImageCreation(prompt, model, ctx=ctx, interaction=interaction, negative_prompt=negative_prompt,
                               use_default_negative=use_default_negative, use_default_positive=use_default_positive,
