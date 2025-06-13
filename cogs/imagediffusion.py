@@ -97,54 +97,69 @@ NO = 'No'
 
 
 class ImageGenPrefView(ui.View):
-    def __init__(self, cog: 'ImageDiffusion'):
+    def __init__(self, cog: 'ImageDiffusion',
+                 default_model: Optional[Models] = None,
+                 default_pos: DefaultChoice = DefaultChoice.YES,
+                 default_neg: DefaultChoice = DefaultChoice.YES,
+                 nsfw_level: NsfwLevel = NsfwLevel.NOT_SPECIFIED,
+                 initial_prompt: str = "",
+                 initial_negative_prompt: str = ""):
         super().__init__(timeout=300)
         self.cog = cog
 
-        self.model = None
-        self.default_pos = DefaultChoice.YES
-        self.default_neg = DefaultChoice.YES
-        self.nsfw = NsfwLevel.NOT_SPECIFIED
+        self.model = default_model
+        self.default_pos = default_pos
+        self.default_neg = default_neg
+        self.nsfw = nsfw_level
+        self.initial_prompt = initial_prompt
+        self.initial_negative_prompt = initial_negative_prompt
 
         self.model_select = ui.Select(
             placeholder="Select a model (required)",
             options=[
-                discord.SelectOption(label="Anime", value=Models.ANIME, description="WAI Illustrious anime-style images"),
-                discord.SelectOption(label="Anipony", value=Models.ANIPONY, description="ANI Pony anime-style pony characters"),
-                discord.SelectOption(label="Pony", value=Models.PONY, description="Pony Realism realistic pony images"),
+                discord.SelectOption(label="Anime", value=Models.ANIME, description="WAI Illustrious anime-style images",
+                                     default=(default_model == Models.ANIME)),
+                discord.SelectOption(label="Anipony", value=Models.ANIPONY, description="ANI Pony anime-style pony characters",
+                                     default=(default_model == Models.ANIPONY)),
+                discord.SelectOption(label="Pony", value=Models.PONY, description="Pony Realism realistic pony images",
+                                     default=(default_model == Models.PONY)),
             ]
         )
         self.model_select.callback = self.model_callback
         self.add_item(self.model_select)
 
         self.default_pos_select = ui.Select(
-            placeholder="Include default positive prompt? (default: Yes)",
+            placeholder="Include default positive prompt?",
             options=[
-                discord.SelectOption(label="Yes", value=DefaultChoice.YES, description="Include model's default positive prompt", default=True),
-                discord.SelectOption(label="No", value=DefaultChoice.NO, description="Exclude model's default positive prompt")
+                discord.SelectOption(label="Yes", value=DefaultChoice.YES,
+                                     description="Include model's default positive prompt", default=(default_pos == DefaultChoice.YES)),
+                discord.SelectOption(label="No", value=DefaultChoice.NO,
+                                     description="Exclude model's default positive prompt", default=(default_pos == DefaultChoice.NO))
             ]
         )
         self.default_pos_select.callback = self.default_pos_callback
         self.add_item(self.default_pos_select)
 
         self.default_neg_select = ui.Select(
-            placeholder="Include default negative prompt? (default: Yes)",
+            placeholder="Include default negative prompt?",
             options=[
-                discord.SelectOption(label="Yes", value=DefaultChoice.YES, description="Include model's default negative prompt", default=True),
-                discord.SelectOption(label="No", value=DefaultChoice.NO, description="Exclude model's default negative prompt")
+                discord.SelectOption(label="Yes", value=DefaultChoice.YES,
+                                     description="Include model's default negative prompt", default=(default_neg == DefaultChoice.YES)),
+                discord.SelectOption(label="No", value=DefaultChoice.NO,
+                                     description="Exclude model's default negative prompt", default=(default_neg == DefaultChoice.NO))
             ]
         )
         self.default_neg_select.callback = self.default_neg_callback
         self.add_item(self.default_neg_select)
 
         self.nsfw_select = ui.Select(
-            placeholder="Select NSFW level (default: Not Specified)",
+            placeholder="Select NSFW level",
             options=[
-                discord.SelectOption(label="General", value=NsfwLevel.GENERAL, description="Safe for all audiences"),
-                discord.SelectOption(label="Sensitive", value=NsfwLevel.SENSITIVE, description="Potentially sensitive content"),
-                discord.SelectOption(label="NSFW", value=NsfwLevel.NSFW, description="General NSFW content"),
-                discord.SelectOption(label="Explicit", value=NsfwLevel.EXPLICIT, description="Explicit mature content"),
-                discord.SelectOption(label="Not Specified", value=NsfwLevel.NOT_SPECIFIED, description="No specific NSFW level", default=True)
+                discord.SelectOption(label="General", value=NsfwLevel.GENERAL, default=(nsfw_level == NsfwLevel.GENERAL)),
+                discord.SelectOption(label="Sensitive", value=NsfwLevel.SENSITIVE, default=(nsfw_level == NsfwLevel.SENSITIVE)),
+                discord.SelectOption(label="NSFW", value=NsfwLevel.NSFW, default=(nsfw_level == NsfwLevel.NSFW)),
+                discord.SelectOption(label="Explicit", value=NsfwLevel.EXPLICIT, default=(nsfw_level == NsfwLevel.EXPLICIT)),
+                discord.SelectOption(label="Not Specified", value=NsfwLevel.NOT_SPECIFIED, default=(nsfw_level == NsfwLevel.NOT_SPECIFIED))
             ]
         )
         self.nsfw_select.callback = self.nsfw_callback
@@ -171,36 +186,54 @@ class ImageGenPrefView(ui.View):
         if not self.model:
             await interaction.response.send_message("Please select a model before continuing.", ephemeral=True)
             return
-        await interaction.response.send_modal(ImageGenPromptModal(
+        image_gen_modal = ImageGenPromptModal(
             cog=self.cog,
             model=self.model,
             add_default_positive=self.default_pos,
             add_default_negative=self.default_neg,
-            nsfw_level=self.nsfw
-        ))
+            nsfw_level=self.nsfw,
+            initial_prompt=self.initial_prompt,
+            initial_negative_prompt=self.initial_negative_prompt,
+        )
+        await interaction.response.send_modal(image_gen_modal)
+        await image_gen_modal.wait()
+        # Disable all buttons in the view
+        for child in self.children:
+            if isinstance(child, ui.Button):
+                child.disabled = True
+            if isinstance(child, ui.Select):
+                child.disabled = True
+        await interaction.edit_original_response(view=self)
 
 class ImageGenPromptModal(ui.Modal, title="🖼️ Enter Prompt for Image Generation"):
-    def __init__(self, cog: 'ImageDiffusion', model: Models, add_default_positive: DefaultChoice, add_default_negative: DefaultChoice, nsfw_level: NsfwLevel):
+    def __init__(self, cog: 'ImageDiffusion', model: Models, add_default_positive: DefaultChoice,
+                 add_default_negative: DefaultChoice, nsfw_level: NsfwLevel,
+                 initial_prompt: str = "", initial_negative_prompt: str = "", view: ui.View=None,
+                 original_response = None):
         super().__init__()
         self.cog = cog
         self.model = model
         self.add_default_positive = add_default_positive
         self.add_default_negative = add_default_negative
         self.nsfw_level = nsfw_level
+        self.view = view
+        self.ephemeral_message = original_response
 
         self.prompt = ui.TextInput(
             label="Prompt",
             placeholder="e.g., A futuristic cyberpunk city at night",
             required=True,
             max_length=500,
-            style=discord.TextStyle.paragraph
+            style=discord.TextStyle.paragraph,
+            default=initial_prompt
         )
+
         self.negative_prompt = ui.TextInput(
             label="Negative Prompt (Optional)",
             placeholder="e.g., blurry, out of focus",
             required=False,
             max_length=300,
-            default=''
+            default=initial_negative_prompt
         )
         self.add_item(self.prompt)
         self.add_item(self.negative_prompt)
@@ -247,18 +280,24 @@ class ImageCreation:
 
 
 class PromptDetailButton(ui.View):
-    def __init__(self, positive: str, negative: str, image: ImageCreation, author_id: int, gen_time: int):
+    def __init__(self, user_prompt: str, user_negative: str, positive: str, negative: str,
+                 image: ImageCreation, author_id: int, gen_time: float):
         super().__init__(timeout=900)
-        self.model = image.model
+
+        self.user_prompt = user_prompt
+        self.user_negative = user_negative
         self.positive = positive
         self.negative = negative
+
+        self.model = image.model
         self.use_default_positive = image.use_default_positive
         self.use_default_negative = image.use_default_negative
         self.nsfw_level = image.nsfw
-        self.already_clicked_prompt_details = set()
-        self.moderator_role_id = 1083514560155222086
         self.author_id = author_id
         self.gen_time = gen_time
+        self.already_clicked_prompt_details = set()
+        self._cooldown = {}
+        self._cooldown_seconds = 30
 
     async def on_timeout(self) -> None:
         for item in self.children:
@@ -287,6 +326,33 @@ class PromptDetailButton(ui.View):
         embed.add_field(name="Generation time", value=f"{self.gen_time:.2f} seconds", inline=False)
         self.already_clicked_prompt_details.add(interaction.user.id)
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @ui.button(label="Resubmit", style=discord.ButtonStyle.green)
+    async def resubmit_button(self, interaction: discord.Interaction, button: ui.Button):
+        now = time.time()
+        last_used = self._cooldown.get(interaction.user.id, 0)
+        if now - last_used < self._cooldown_seconds:
+            await interaction.response.send_message(
+                f"You're using this too quickly! Try again in {int(self._cooldown_seconds - (now - last_used))}s.",
+                ephemeral=True
+            )
+            return
+
+        self._cooldown[interaction.user.id] = now
+
+        view = ImageGenPrefView(
+            cog=interaction.client.get_cog("ImageDiffusion"),
+            default_model=self.model,
+            default_pos=DefaultChoice.YES if self.use_default_positive else DefaultChoice.NO,
+            default_neg=DefaultChoice.YES if self.use_default_negative else DefaultChoice.NO,
+            nsfw_level=self.nsfw_level,
+            initial_prompt=self.user_prompt,
+            initial_negative_prompt=self.user_negative
+        )
+
+        await interaction.response.send_message(
+            "Edit your options before resubmitting:", view=view, ephemeral=True
+        )
 
     @ui.button(label="Delete", style=discord.ButtonStyle.red)
     async def delete_button(self, interaction: discord.Interaction, button: ui.Button):
@@ -411,7 +477,7 @@ class ImageDiffusion(Cog):
         model=f'The model you want to see the default prompt of.',
         prompt_type='Whether you want to see the default positive or negative prompt.'
     )
-    @app_commands.guilds(MENACES_TO_SOBRIETY_SERVER_ID, POOPER_SCOOPER_SUPPORT_SERVER_ID)
+    @app_commands.guild_only()
     async def default_prompt(self, interaction: discord.Interaction,
                              model: Models,
                              prompt_type: PromptType
@@ -445,7 +511,7 @@ class ImageDiffusion(Cog):
         await interaction.response.send_message(f"The default {prompt_type.value} prompt for {model.value} is:\n{default_prompt}")
 
     @app_commands.command(name="imagegen_form", description='Open a form to generate an image with prompt options.')
-    @app_commands.guilds(MENACES_TO_SOBRIETY_SERVER_ID, POOPER_SCOOPER_SUPPORT_SERVER_ID)
+    @app_commands.guild_only()
     async def generate_modal(self, interaction: discord.Interaction) -> None:
         if interaction.channel_id not in ALlOWED_CHANNELS:
             await interaction.response.send_message("This command is not allowed in this channel!", ephemeral=True)
@@ -462,7 +528,7 @@ class ImageDiffusion(Cog):
         add_default_positive="(Optional) Whether to include the default positive prompt (default: Yes).",
         nsfw_level='(Optional) General, sensitive, explicit, nsfw, or Not Specified (default: Not Specified).'
     )
-    @app_commands.guilds(MENACES_TO_SOBRIETY_SERVER_ID, POOPER_SCOOPER_SUPPORT_SERVER_ID)
+    @app_commands.guild_only()
     async def generate(self, interaction: discord.Interaction,
                        model: Models,
                        prompt: str,
@@ -510,7 +576,6 @@ class ImageDiffusion(Cog):
         if ctx:
             await ctx.message.add_reaction("👍")
         elif interaction:
-            # await interaction.response.defer(thinking=True)
             await interaction.response.send_message("Added your prompt to the generation queue")
 
         log.info(f"Added prompt to queue: {prompt} for model: {model}")
@@ -572,8 +637,17 @@ class ImageDiffusion(Cog):
         img.save(buffer, format="PNG")
         buffer.seek(0)
         file = discord.File(buffer, filename="generated.png")
+        author_id = image.ctx.author.id
 
-        prompt_details = PromptDetailButton(positive, negative, image, image.ctx.author.id, gen_time)
+        prompt_details = PromptDetailButton(
+            user_prompt=image.prompt,
+            user_negative=image.negative_prompt,
+            positive=positive,
+            negative=negative,
+            image=image,
+            author_id=author_id,
+            gen_time=gen_time
+        )
 
         try:
             prompt_details.message = await image.ctx.reply(content=f"**{image.prompt} - {image.model} model**", file=file, view=prompt_details)
@@ -629,8 +703,17 @@ class ImageDiffusion(Cog):
         img.save(buffer, format="PNG")
         buffer.seek(0)
         file = discord.File(buffer, filename="generated.png")
+        author_id = image.interaction.user.id
 
-        prompt_details = PromptDetailButton(positive, negative, image, image.interaction.user.id, gen_time)
+        prompt_details = PromptDetailButton(
+            user_prompt=image.prompt,
+            user_negative=image.negative_prompt,
+            positive=positive,
+            negative=negative,
+            image=image,
+            author_id=author_id,
+            gen_time=gen_time
+        )
 
         try:
             prompt_details.message = await image.interaction.channel.send(
