@@ -298,6 +298,7 @@ class PromptDetailButton(ui.View):
         self.already_clicked_prompt_details = set()
         self._cooldown = {}
         self._cooldown_seconds = 30
+        self.moderator_role_id = 1083514560155222086
 
     async def on_timeout(self) -> None:
         for item in self.children:
