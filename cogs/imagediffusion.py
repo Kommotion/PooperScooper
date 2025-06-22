@@ -16,7 +16,6 @@ from diffusers import EulerAncestralDiscreteScheduler, StableDiffusionXLPipeline
 from discord.ext import commands, tasks
 from discord.ext.commands import Cog
 from discord import app_commands, ui, NSFWLevel
-
 from cogs.utils.constants import MENACES_TO_SOBRIETY_SERVER_ID, POOPER_SCOOPER_SUPPORT_SERVER_ID
 
 log = logging.getLogger(__name__)
@@ -26,6 +25,7 @@ CUDA = "cuda"
 ANI_PONY = r'.\models\ani-pony\waiANINSFWPONYXL_v140.safetensors'
 WAI_ILLUSTRIOUS = r".\models\wai_illustrious\waiNSFWIllustrious_v140.safetensors"
 PONY_REALISM = r'.\models\pony-realism\ponyRealism_V23.safetensors'
+CYBER_PONY = r".\models\cyber-pony\cyberrealisticPony_v120.safetensors"
 
 ANI_PONY_POSITIVE_PROMPT = "score_9, score_8_up, score_7_up, source_anime"
 ANI_PONY_NEGATIVE_PROMPT = "worst quality, bad quality, jpeg artifacts, source_cartoon, \
@@ -36,6 +36,11 @@ WAI_ILLUSTRIOUS_NEGATIVE_PROMPT = "bad quality,worst quality,worst detail,sketch
 
 PONY_REALISM_POSITIVE_PROMPT = "score_9, score_8_up, score_7_up, BREAK"
 PONY_REALISM_NEGATIVE_PROMPT = "score_4, score_5, score_6"
+
+CYBER_PONY_POSITIVE_PROMPT = "score_9, score_8_up, score_7_up, (SUBJECT), "
+CYBER_PONY_NEGATIVE_PROMPT = "score_6, score_5, score_4, (worst quality:1.2), (low quality:1.2), (normal quality:1.2)," \
+                              " lowres, bad anatomy, bad hands, signature, watermarks, ugly, imperfect eyes, \
+                              skewed eyes,\ unnatural face, unnatural body, error, extra limb, missing limbs"
 
 NSFW_IMAGE_DIFFUSION_CHANNEL = 1373140173067653120
 IMAGE_DIFFUSION_CHANNEL = 1365847564196249620
@@ -257,19 +262,9 @@ def to_thread(func: typing.Callable) -> typing.Coroutine:
     return wrapper
 
 
-def in_allowed_channels():
-    def predicate(ctx: commands.Context) -> bool:
-        guild = ctx.guild
-        if guild is None:
-            return False
-        return ctx.channel.id in ALlOWED_CHANNELS
-    return commands.check(predicate)
-
-
 class ImageCreation:
-    def __init__(self, prompt: Models, model, ctx=None, interaction=None, negative_prompt='', use_default_negative=True,
+    def __init__(self, prompt: Models, model, interaction=None, negative_prompt='', use_default_negative=True,
                  use_default_positive=True, nsfw: NsfwLevel=NsfwLevel.NOT_SPECIFIED):
-        self.ctx: commands.Context = ctx
         self.interaction: discord.Interaction = interaction
         self.negative_prompt = negative_prompt
         self.use_default_negative = use_default_negative
@@ -443,36 +438,6 @@ class ImageDiffusion(Cog):
         return pipe
 
 
-    @commands.group(invoke_without_command=True)
-    @in_allowed_channels()
-    async def anime(self, ctx: commands.Context, *, prompt: str) -> None:
-        """Generate text to image using Anime (WAI-NSFW-illustrious-SDXL v14).
-
-        Arguments:
-        - prompt (str): The prompt for the image generation.
-        """
-        await self.schedule_generation(prompt, Models.ANIME, ctx=ctx)
-
-    @commands.group(invoke_without_command=True)
-    @in_allowed_channels()
-    async def pony(self, ctx: commands.Context, *, prompt: str) -> None:
-        """Generate text to image using Pony (Pony Realism v23).
-
-        Arguments:
-        - prompt (str): The prompt for the image generation.
-        """
-        await self.schedule_generation(prompt, Models.PONY, ctx=ctx)
-
-    @commands.group(invoke_without_command=True)
-    @in_allowed_channels()
-    async def anipony(self, ctx: commands.Context, *, prompt: str) -> None:
-        """Queue image using Anipony (WAI-ANI-PONYXL v14.0.).
-
-        Arguments:
-        - prompt (str): The prompt for the image generation.
-        """
-        await self.schedule_generation(prompt, Models.ANIPONY, ctx=ctx)
-
     @app_commands.command(name="imagegen_default_prompts", description='Print the default negative or positive prompts for the given model.')
     @app_commands.describe(
         model=f'The model you want to see the default prompt of.',
@@ -550,18 +515,15 @@ class ImageDiffusion(Cog):
                                        use_default_positive=add_default_positive,
                                        nsfw=nsfw_level)
 
-    async def schedule_generation(self, prompt: str, model: Models, ctx: commands.Context = None,
+    async def schedule_generation(self, prompt: str, model: Models,
                                   interaction: discord.Interaction =None, negative_prompt='', use_default_negative=True,
                                   use_default_positive=True, nsfw: NsfwLevel=NsfwLevel.NOT_SPECIFIED) -> None:
         if self.image_queue.full():
-            if ctx:
-                await ctx.reply("Queue is full! Please wait and try again.")
-            elif interaction:
-                await interaction.response.send_message("Queue is full! Please wait and try again.")
+            await interaction.response.send_message("Queue is full! Please wait and try again.")
             return
 
         # Non-nsfw channels will default to less nsfw and explicit things
-        channel_id = ctx.channel.id if ctx else interaction.channel.id
+        channel_id = interaction.channel.id
         if channel_id in [IMAGE_DIFFUSION_CHANNEL, SHEPHERD_CHANNEL] and nsfw == NsfwLevel.NOT_SPECIFIED:
             if negative_prompt:
                 negative_prompt += ', '
@@ -569,15 +531,12 @@ class ImageDiffusion(Cog):
                                 ' exposed, suggestive, inappropriate, skimpy, pornographic, uncensored'
             # prompt += ', general, sensitive'
 
-        image_entry = ImageCreation(prompt, model, ctx=ctx, interaction=interaction, negative_prompt=negative_prompt,
+        image_entry = ImageCreation(prompt, model, interaction=interaction, negative_prompt=negative_prompt,
                               use_default_negative=use_default_negative, use_default_positive=use_default_positive,
                               nsfw=nsfw)
-        await self.image_queue.put(image_entry)
 
-        if ctx:
-            await ctx.message.add_reaction("👍")
-        elif interaction:
-            await interaction.response.send_message("Added your prompt to the generation queue")
+        await self.image_queue.put(image_entry)
+        await interaction.response.send_message("Added your prompt to the generation queue")
 
         log.info(f"Added prompt to queue: {prompt} for model: {model}")
 
@@ -590,75 +549,10 @@ class ImageDiffusion(Cog):
         self.next_image.clear()
         image: ImageCreation = await self.image_queue.get()
 
-        # If the image is ctx based, then use image.ctx path for this, otherwise use the image.interaction path
-        if image.ctx:
-            await self._image_generation_context(image)
-        elif image.interaction:
-            await self._image_generation_interaction(image)
+        await self._image_generation_interaction(image)
 
         self.bot.loop.call_soon_threadsafe(self.next_image.set)
         await self.next_image.wait()
-
-    async def _image_generation_context(self, image: ImageCreation) -> None:
-        """Handles image generation but with a context. This is the original path to image generation. """
-        timeout = 600
-
-        try:
-            image_gen = self.model_gen_method[image.model]
-        except KeyError:
-            log.warning("There was somehow a model queued up that does not exist.")
-            await image.ctx.reply("You somehow queued up a model that did not exist. Naughty you!")
-            return
-
-        try:
-            output, positive, negative, gen_time = await asyncio.wait_for(image_gen(image), timeout=timeout)
-        except asyncio.TimeoutError:
-            log.error("Image generation timed out")
-            await image.ctx.reply("Image generation timed out. Try again with a simpler prompt.")
-            return
-        except discord.HTTPException:
-            await image.ctx.send(f"Error generating prompt: {image.prompt}.")
-        except RuntimeError as e:
-            log.error(f"RuntimeError during generation: {e}")
-            if "CUDNN_STATUS_INTERNAL_ERROR" in str(e) or "allocation failed" in str(e).lower():
-                log.error("Trying gc.collect and stuff")
-                gc.collect()
-                torch.cuda.ipc_collect()
-                torch.cuda.empty_cache()
-            await image.ctx.reply(content=f"Image generation failed: {str(e)}",
-                                                 allowed_mentions=discord.AllowedMentions(users=True))
-            return
-        except Exception as e:
-            log.error(f"Generation failed: {str(e)}")
-            await image.ctx.reply(f"Image generation failed: {str(e)}")
-            return
-
-        img = output.images[0]
-        buffer = BytesIO()
-        img.save(buffer, format="PNG")
-        buffer.seek(0)
-        file = discord.File(buffer, filename="generated.png")
-        author_id = image.ctx.author.id
-
-        prompt_details = PromptDetailButton(
-            user_prompt=image.prompt,
-            user_negative=image.negative_prompt,
-            positive=positive,
-            negative=negative,
-            image=image,
-            author_id=author_id,
-            gen_time=gen_time
-        )
-
-        try:
-            prompt_details.message = await image.ctx.reply(content=f"**{image.prompt} - {image.model} model**", file=file, view=prompt_details)
-        except discord.HTTPException:
-            log.warning("Hit case where was unable to do ctx.reply in image generation.")
-            await image.ctx.channel.send(content=f"**{image.prompt} - {image.model} model {image.ctx.author.mention}**", file=file)
-        except Exception as e:
-            log.error(f"Error: {e}")
-            await image.ctx.send(f"Some error occurred while image generation from {image.ctx.author.name}")
-        log.debug("Image sent to Discord")
 
     async def _image_generation_interaction(self, image: ImageCreation) -> None:
         """Handles image generation but with an interaction."""
