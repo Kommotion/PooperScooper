@@ -21,7 +21,10 @@ HOURS_IN_DAY = 24
 ONE_HOUR_IN_SECONDS = 1 * SECONDS_IN_HOUR
 SECONDS_IN_DAY = SECONDS_IN_HOUR * HOURS_IN_DAY
 THUMBS_UP_EMOJI = '👍'
-
+CUDA = "cuda"
 PALWORLD_JSON = 'palworld.json'
 base_dir = os.path.dirname(os.path.abspath(__file__))
 PALWORLD_UTIL_PATH = os.path.join(base_dir, "palworld_utils")
+
+YES = 'yes'
+NO = 'No'

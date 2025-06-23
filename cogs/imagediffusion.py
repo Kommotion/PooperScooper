@@ -15,32 +15,12 @@ from enum import Enum, StrEnum
 from diffusers import EulerAncestralDiscreteScheduler, StableDiffusionXLPipeline
 from discord.ext import commands, tasks
 from discord.ext.commands import Cog
+from cogs.utils.constants import *
 from discord import app_commands, ui, NSFWLevel
+from cogs.utils.image_models import Models, NsfwLevel, BaseDiffusionModel, WaiAnimePonyModel, WaiAnimeIllustriousModel, CyberRealisticPonyModel, ImageCreation
 from cogs.utils.constants import MENACES_TO_SOBRIETY_SERVER_ID, POOPER_SCOOPER_SUPPORT_SERVER_ID
 
 log = logging.getLogger(__name__)
-CUDA = "cuda"
-
-
-ANI_PONY = r'.\models\ani-pony\waiANINSFWPONYXL_v140.safetensors'
-WAI_ILLUSTRIOUS = r".\models\wai_illustrious\waiNSFWIllustrious_v140.safetensors"
-PONY_REALISM = r'.\models\pony-realism\ponyRealism_V23.safetensors'
-CYBER_PONY = r".\models\cyber-pony\cyberrealisticPony_v120.safetensors"
-
-ANI_PONY_POSITIVE_PROMPT = "score_9, score_8_up, score_7_up, source_anime"
-ANI_PONY_NEGATIVE_PROMPT = "worst quality, bad quality, jpeg artifacts, source_cartoon, \
-3d, (censor), monochrome, blurry, lowres, watermark,"
-
-WAI_ILLUSTRIOUS_POSITIVE_PROMPT = "masterpiece,best quality,amazing quality"
-WAI_ILLUSTRIOUS_NEGATIVE_PROMPT = "bad quality,worst quality,worst detail,sketch,censor,"
-
-PONY_REALISM_POSITIVE_PROMPT = "score_9, score_8_up, score_7_up, BREAK"
-PONY_REALISM_NEGATIVE_PROMPT = "score_4, score_5, score_6"
-
-CYBER_PONY_POSITIVE_PROMPT = "score_9, score_8_up, score_7_up, (SUBJECT), "
-CYBER_PONY_NEGATIVE_PROMPT = "score_6, score_5, score_4, (worst quality:1.2), (low quality:1.2), (normal quality:1.2)," \
-                              " lowres, bad anatomy, bad hands, signature, watermarks, ugly, imperfect eyes, \
-                              skewed eyes,\ unnatural face, unnatural body, error, extra limb, missing limbs"
 
 NSFW_IMAGE_DIFFUSION_CHANNEL = 1373140173067653120
 IMAGE_DIFFUSION_CHANNEL = 1365847564196249620
@@ -52,19 +32,6 @@ ANIME_DESCRIPTION = 'Anime (WAI-NSFW-illustrious-SDXL v14)'
 ANIPONY_DESCRIPTION = 'Anipony (WAI-ANI-PONYXL v14.0.)'
 PONY_DESCRIPTION = 'Pony (Pony Realism v23)'
 
-
-class Models(StrEnum):
-    ANIME = "anime"
-    ANIPONY = "anipony"
-    PONY = "pony"
-
-    @classmethod
-    def _missing_(cls, value):
-        # Check against name (case-insensitive)
-        for member in cls:
-            if member.name.lower() == value.lower():
-                return member
-        raise ValueError(f"{value} is not a valid {cls.__name__}")
 
 class PromptType(StrEnum):
     POSITIVE = 'positive'
@@ -81,24 +48,6 @@ class PromptType(StrEnum):
 class DefaultChoice(StrEnum):
     YES = 'yes'
     NO = 'No'
-
-class NsfwLevel(StrEnum):
-    GENERAL = 'general'
-    SENSITIVE = 'sensitive'
-    NSFW = 'nsfw'
-    EXPLICIT = 'explicit'
-    NOT_SPECIFIED = 'not_specified'
-
-    @classmethod
-    def _missing_(cls, value):
-        # Check against name (case-insensitive)
-        for member in cls:
-            if member.name.lower() == value.lower():
-                return member
-        raise ValueError(f"{value} is not a valid {cls.__name__}")
-
-YES = 'yes'
-NO = 'No'
 
 
 class ImageGenPrefView(ui.View):
@@ -262,18 +211,6 @@ def to_thread(func: typing.Callable) -> typing.Coroutine:
     return wrapper
 
 
-class ImageCreation:
-    def __init__(self, prompt: Models, model, interaction=None, negative_prompt='', use_default_negative=True,
-                 use_default_positive=True, nsfw: NsfwLevel=NsfwLevel.NOT_SPECIFIED):
-        self.interaction: discord.Interaction = interaction
-        self.negative_prompt = negative_prompt
-        self.use_default_negative = use_default_negative
-        self.use_default_positive = use_default_positive
-        self.prompt: str = prompt
-        self.model: Models = model
-        self.nsfw: NsfwLevel = nsfw
-
-
 class PromptDetailButton(ui.View):
     def __init__(self, user_prompt: str, user_negative: str, positive: str, negative: str,
                  image: ImageCreation, author_id: int, gen_time: float):
@@ -368,74 +305,29 @@ class ImageDiffusion(Cog):
         self.bot = bot
         self.image_queue = asyncio.Queue(maxsize=5)
         self.next_image = asyncio.Event()
-        self.pipelines = {}
-        self.models_to_load = [
-            WAI_ILLUSTRIOUS,
-            PONY_REALISM,
-            ANI_PONY
+
+        self.models_to_load_on_boot = [
+            Models.ANIME,
+            Models.ANIPONY,
+            Models.PONY
         ]
 
-        self.model_gen_method = {
-            Models.ANIME: self.generate_image_wai_illustrious,
-            Models.PONY: self.generate_image_pony,
-            Models.ANIPONY: self.generate_image_ani_pony
+        self.models: dict[Models, BaseDiffusionModel] = {
+            Models.ANIME: WaiAnimeIllustriousModel(),
+            Models.ANIPONY: WaiAnimePonyModel(),
+            Models.PONY: CyberRealisticPonyModel(), # TODO update this later, but for now we will only use that one
+            Models.CYBER_PONY: CyberRealisticPonyModel()
         }
 
         self.bot.loop.create_task(self.load_pipelines())
         self.image_generation.start()
 
     async def load_pipelines(self):
-        """Preload all models into memory."""
+        """Preload all specified models into memory."""
         log.info("Loading all pipelines...")
-        for model in self.models_to_load:
-            self.pipelines[model] = await self.load_pipeline(model)
-        log.info("All pipelines loaded successfully.")
-
-    async def load_single_pipeline(self, model: str):
-        log.info(f"Loading specific model: {model}")
-        self.pipelines[model] = await self.load_pipeline(model)
-        log.info("Model loaded successfully.")
-
-    async def load_pipeline(self, model: str):
-        """Helper to load one model."""
-        if model == PONY_REALISM:
-                pipe = StableDiffusionXLPipeline.from_single_file(
-                    PONY_REALISM,
-                    torch_dtype=torch.float16,
-                    use_safetensors=True,
-                    load_safety_checker=None,
-                )
-                pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
-                pipe.enable_xformers_memory_efficient_attention()
-                pipe.enable_model_cpu_offload()
-
-        elif model == ANI_PONY:
-                pipe = StableDiffusionXLPipeline.from_single_file(
-                    ANI_PONY,
-                    torch_dtype=torch.float16,
-                    use_safetensors=True,
-                    load_safety_checker=None,
-                )
-                pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
-                pipe.enable_xformers_memory_efficient_attention()
-                pipe.enable_model_cpu_offload()
-
-        elif model == WAI_ILLUSTRIOUS:
-                pipe = StableDiffusionXLPipeline.from_single_file(
-                    WAI_ILLUSTRIOUS,
-                    torch_dtype=torch.float16,
-                    use_safetensors=True,
-                    load_safety_checker=None,
-                )
-                pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
-                pipe.enable_xformers_memory_efficient_attention()
-                pipe.enable_model_cpu_offload()
-
-        else:
-            log.error(f"Tried to load an unsupported model: {model}")
-            raise ValueError(f"Unsupported model: {model}")
-
-        return pipe
+        for model in self.models_to_load_on_boot:
+            await self.models[model].load_pipeline()
+        log.info("All specified pipelines loaded successfully.")
 
 
     @app_commands.command(name="imagegen_default_prompts", description='Print the default negative or positive prompts for the given model.')
@@ -453,26 +345,16 @@ class ImageDiffusion(Cog):
             await interaction.response.send_message("This command is not allowed in this channel!", ephemeral=True)
             return
 
-        default_prompt = None
-
-        if model == Models.ANIPONY:
-            if prompt_type == PromptType.POSITIVE:
-                default_prompt = ANI_PONY_POSITIVE_PROMPT
-            elif prompt_type == PromptType.NEGATIVE:
-                default_prompt = ANI_PONY_NEGATIVE_PROMPT
-        elif model == Models.PONY:
-            if prompt_type == PromptType.POSITIVE:
-                default_prompt = PONY_REALISM_POSITIVE_PROMPT
-            elif prompt_type == PromptType.NEGATIVE:
-                default_prompt = PONY_REALISM_NEGATIVE_PROMPT
-        elif model == Models.ANIME:
-            if prompt_type == PromptType.POSITIVE:
-                default_prompt = WAI_ILLUSTRIOUS_POSITIVE_PROMPT
-            elif prompt_type == PromptType.NEGATIVE:
-                default_prompt = WAI_ILLUSTRIOUS_NEGATIVE_PROMPT
-        else:
+        try:
+            model_class = self.models[model]
+        except KeyError:
             await interaction.response.send_message("You did not specify a correct model.", ephemeral=True)
             return
+
+        if prompt_type == PromptType.POSITIVE:
+            default_prompt = model_class.default_pos
+        else:  # Default Negative
+            default_prompt = model_class.default_neg
 
         await interaction.response.send_message(f"The default {prompt_type.value} prompt for {model.value} is:\n{default_prompt}")
 
@@ -529,7 +411,6 @@ class ImageDiffusion(Cog):
                 negative_prompt += ', '
             negative_prompt += 'nsfw, nude, nudity, naked, lingerie, underwear, cleavage, erotic, lewd, sexual,'\
                                 ' exposed, suggestive, inappropriate, skimpy, pornographic, uncensored'
-            # prompt += ', general, sensitive'
 
         image_entry = ImageCreation(prompt, model, interaction=interaction, negative_prompt=negative_prompt,
                               use_default_negative=use_default_negative, use_default_positive=use_default_positive,
@@ -544,30 +425,20 @@ class ImageDiffusion(Cog):
     async def image_generation(self) -> None:
         if self.image_queue.empty():
             return
-
         log.debug("Processing next queued image...")
         self.next_image.clear()
         image: ImageCreation = await self.image_queue.get()
-
         await self._image_generation_interaction(image)
-
         self.bot.loop.call_soon_threadsafe(self.next_image.set)
         await self.next_image.wait()
 
     async def _image_generation_interaction(self, image: ImageCreation) -> None:
         """Handles image generation but with an interaction."""
         timeout = 600
+        model = self.models[image.model]
 
         try:
-            image_gen = self.model_gen_method[image.model]
-        except KeyError:
-            log.warning("There was somehow a model queued up that does not exist.")
-            await image.interaction.channel.send(content="You somehow queued up a model that did not exist. Naughty you!",
-                                                  allowed_mentions=discord.AllowedMentions(users=True))
-            return
-
-        try:
-            output, positive, negative, gen_time = await asyncio.wait_for(image_gen(image), timeout=timeout)
+            output, positive, negative, gen_time = await asyncio.wait_for(model.generate(image), timeout=timeout)
         except asyncio.TimeoutError:
             log.error("Image generation timed out")
             await image.interaction.channel.send(content="Image generation timed out. Try again with a simpler prompt.",
@@ -624,105 +495,11 @@ class ImageDiffusion(Cog):
 
         log.debug("Image sent to Discord")
 
-    @to_thread
-    def generate_image_ani_pony(self, image: ImageCreation):
-        """Generate an image given a model path and a prompt."""
-        pipe = self.pipelines.get(ANI_PONY)
-        if pipe is None:
-            raise ValueError(f"No pipeline loaded for model {image.model}")
-
-        default_negative = ANI_PONY_NEGATIVE_PROMPT if image.use_default_negative else ''
-        default_positive = ANI_PONY_POSITIVE_PROMPT if image.use_default_positive else ''
-
-        positive_prompt = image.prompt
-        if image.nsfw != NsfwLevel.NOT_SPECIFIED:
-            positive_prompt += f", {image.nsfw}"
-        if default_positive:
-            positive_prompt += f", {default_positive}"
-
-        negative_prompt = f"{image.negative_prompt}, {default_negative}" if image.negative_prompt else default_negative
-
-        log.info(f"Starting {image.model} generation for prompt: {positive_prompt}\nnegative: {negative_prompt}")
-        gen_start = time.time()
-        with torch.autocast(CUDA, dtype=torch.float16):
-            result = pipe(
-                positive_prompt,
-                num_inference_steps=25,
-                guidance_scale=8,
-                height=1024,
-                width=1024,
-                negative_prompt=negative_prompt
-            )
-        gen_time = time.time() - gen_start
-        log.info(f"Generation completed for prompt: {positive_prompt} in {gen_time:.2f} seconds")
-        return result, positive_prompt, negative_prompt, gen_time
-
-    @to_thread
-    def generate_image_pony(self, image: ImageCreation):
-        pipe = self.pipelines.get(PONY_REALISM)
-        if pipe is None:
-            raise ValueError(f"No pipeline loaded for model {image.model}")
-
-        default_negative = PONY_REALISM_NEGATIVE_PROMPT if image.use_default_negative else ''
-        default_positive = PONY_REALISM_POSITIVE_PROMPT if image.use_default_positive else ''
-
-        positive_prompt = image.prompt
-        if image.nsfw != NsfwLevel.NOT_SPECIFIED:
-            positive_prompt += f", {image.nsfw}"
-        if default_positive:
-            positive_prompt += f", {default_positive}"
-
-        negative_prompt = f"{image.negative_prompt}, {default_negative}" if image.negative_prompt else default_negative
-
-        log.info(f"Starting {image.model} generation for prompt: {positive_prompt}\nnegative: {negative_prompt}")
-        gen_start = time.time()
-        with torch.autocast(CUDA, dtype=torch.float16):
-            result = pipe(
-                positive_prompt,
-                num_inference_steps=25,
-                guidance_scale=8,
-                height=1024,
-                width=1024,
-                negative_prompt=negative_prompt
-            )
-        gen_time = time.time() - gen_start
-        log.info(f"Generation completed for prompt: {positive_prompt} in {gen_time:.2f} seconds")
-        return result, positive_prompt, negative_prompt, gen_time
-
-    @to_thread
-    def generate_image_wai_illustrious(self, image: ImageCreation):
-        pipe = self.pipelines.get(WAI_ILLUSTRIOUS)
-        if pipe is None:
-            raise ValueError(f"No pipeline loaded for model {image.model}")
-
-        default_negative = WAI_ILLUSTRIOUS_NEGATIVE_PROMPT if image.use_default_negative else ''
-        default_positive = WAI_ILLUSTRIOUS_POSITIVE_PROMPT if image.use_default_positive else ''
-
-        positive_prompt = image.prompt
-        if image.nsfw != NsfwLevel.NOT_SPECIFIED:
-            positive_prompt += f", {image.nsfw}"
-        if default_positive:
-            positive_prompt += f", {default_positive}"
-
-        negative_prompt = f"{image.negative_prompt}, {default_negative}" if image.negative_prompt else default_negative
-
-        log.info(f"Starting {image.model} generation for prompt: {positive_prompt}\nnegative: {negative_prompt}")
-        gen_start = time.time()
-        with torch.autocast(CUDA, dtype=torch.float16):
-            result = pipe(
-                positive_prompt,
-                num_inference_steps=20,
-                guidance_scale=7,
-                height=1024,
-                width=1024,
-                negative_prompt=negative_prompt
-            )
-        gen_time = time.time() - gen_start
-        log.info(f"Generation completed for prompt: {positive_prompt} in {gen_time:.2f} seconds")
-        return result, positive_prompt, negative_prompt, gen_time
 
     def cog_unload(self):
         self.image_generation.cancel()
+        for model in self.models.values():
+            model.unload_pipeline()
         gc.collect()
         torch.cuda.empty_cache()
 
