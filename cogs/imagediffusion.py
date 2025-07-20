@@ -17,7 +17,8 @@ from discord.ext import commands, tasks
 from discord.ext.commands import Cog
 from cogs.utils.constants import *
 from discord import app_commands, ui, NSFWLevel
-from cogs.utils.image_models import Models, NsfwLevel, BaseDiffusionModel, WaiAnimePonyModel, WaiAnimeIllustriousModel, CyberRealisticPonyModel, ImageCreation
+from cogs.utils.image_models import Models, NsfwLevel, BaseDiffusionModel, WaiAnimePonyModel, WaiAnimeIllustriousModel, \
+    CyberRealisticPonyModel, ImageCreation, PonyRealismModel
 from cogs.utils.constants import MENACES_TO_SOBRIETY_SERVER_ID, POOPER_SCOOPER_SUPPORT_SERVER_ID
 
 log = logging.getLogger(__name__)
@@ -71,12 +72,18 @@ class ImageGenPrefView(ui.View):
         self.model_select = ui.Select(
             placeholder="Select a model (required)",
             options=[
-                discord.SelectOption(label="Anime", value=Models.ANIME, description="WAI Illustrious anime-style images",
-                                     default=(default_model == Models.ANIME)),
-                discord.SelectOption(label="Anipony", value=Models.ANIPONY, description="ANI Pony anime-style pony characters",
-                                     default=(default_model == Models.ANIPONY)),
-                discord.SelectOption(label="Pony", value=Models.PONY, description="Pony Realism realistic pony images",
-                                     default=(default_model == Models.PONY)),
+                discord.SelectOption(label="Anime WAI Illustrious", value=Models.ANIME_WAI_ILLUSTRIOUS,
+                                     description="WAI Illustrious anime-style images",
+                                     default=(default_model == Models.ANIME_WAI_ILLUSTRIOUS)),
+                discord.SelectOption(label="WAI Anime Pony", value=Models.ANIME_WAI_PONY,
+                                     description="ANI Pony anime-style pony characters",
+                                     default=(default_model == Models.ANIME_WAI_PONY)),
+                discord.SelectOption(label="Pony Realism", value=Models.PONY_REALISM,
+                                     description="Pony Realism realistic pony images",
+                                     default=(default_model == Models.PONY_REALISM)),
+                discord.SelectOption(label="CyberRealistic Pony", value=Models.CYBER_REALISTIC_PONY,
+                                     description="Cyber Realistic pony images",
+                                     default=(default_model == Models.CYBER_REALISTIC_PONY)),
             ]
         )
         self.model_select.callback = self.model_callback
@@ -177,7 +184,7 @@ class ImageGenPromptModal(ui.Modal, title="🖼️ Enter Prompt for Image Genera
             label="Prompt",
             placeholder="e.g., A futuristic cyberpunk city at night",
             required=True,
-            max_length=500,
+            max_length=1000,
             style=discord.TextStyle.paragraph,
             default=initial_prompt
         )
@@ -186,7 +193,7 @@ class ImageGenPromptModal(ui.Modal, title="🖼️ Enter Prompt for Image Genera
             label="Negative Prompt (Optional)",
             placeholder="e.g., blurry, out of focus",
             required=False,
-            max_length=300,
+            max_length=1000,
             default=initial_negative_prompt
         )
         self.add_item(self.prompt)
@@ -307,16 +314,17 @@ class ImageDiffusion(Cog):
         self.next_image = asyncio.Event()
 
         self.models_to_load_on_boot = [
-            Models.ANIME,
-            Models.ANIPONY,
-            Models.PONY
+            Models.ANIME_WAI_ILLUSTRIOUS,
+            Models.ANIME_WAI_PONY,
+            Models.PONY_REALISM,
+            Models.CYBER_REALISTIC_PONY
         ]
 
         self.models: dict[Models, BaseDiffusionModel] = {
-            Models.ANIME: WaiAnimeIllustriousModel(),
-            Models.ANIPONY: WaiAnimePonyModel(),
-            Models.PONY: CyberRealisticPonyModel(), # TODO update this later, but for now we will only use that one
-            Models.CYBER_PONY: CyberRealisticPonyModel()
+            Models.ANIME_WAI_ILLUSTRIOUS: WaiAnimeIllustriousModel(),
+            Models.ANIME_WAI_PONY: WaiAnimePonyModel(),
+            Models.PONY_REALISM: PonyRealismModel(),
+            Models.CYBER_REALISTIC_PONY: CyberRealisticPonyModel()
         }
 
         self.bot.loop.create_task(self.load_pipelines())
@@ -369,7 +377,7 @@ class ImageDiffusion(Cog):
 
     @app_commands.command(name="imagegen", description='Generate an image using text to image model.')
     @app_commands.describe(
-        model=f'Choose one of these models: {ANIME_DESCRIPTION}, {PONY_DESCRIPTION}, {ANIPONY_DESCRIPTION}',
+        model=f'Choose one of these model models.',
         prompt='Prompt to generate the image.',
         negative_prompt="(Optional) Avoid these elements in the image.",
         add_default_negative="(Optional) Whether to include the default negative prompt (default: Yes).",

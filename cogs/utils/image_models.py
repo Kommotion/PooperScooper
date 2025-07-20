@@ -58,10 +58,10 @@ class NsfwLevel(StrEnum):
 
 
 class Models(StrEnum):
-    ANIME = "anime_wai"
-    ANIPONY = "wai_pony"
-    PONY = "pony_realism"
-    CYBER_PONY = "cyber_pony"
+    ANIME_WAI_ILLUSTRIOUS = "anime_wai_illustrious"
+    ANIME_WAI_PONY = "wai_anime_pony"
+    PONY_REALISM = "pony_realism"
+    CYBER_REALISTIC_PONY = "cyber_realistic_pony"
 
     @classmethod
     def _missing_(cls, value):
@@ -159,7 +159,7 @@ class BaseDiffusionModel:
 class WaiAnimePonyModel(BaseDiffusionModel):
     def __init__(self):
         super().__init__(
-            name=Models.ANIPONY,
+            name=Models.PONY_REALISM,
             model_path=ANI_PONY_PATH,
             default_pos=ANI_PONY_POSITIVE_PROMPT,
             default_neg=ANI_PONY_NEGATIVE_PROMPT,
@@ -171,7 +171,7 @@ class WaiAnimePonyModel(BaseDiffusionModel):
 class CyberRealisticPonyModel(BaseDiffusionModel):
     def __init__(self):
         super().__init__(
-            name=Models.CYBER_PONY,
+            name=Models.CYBER_REALISTIC_PONY,
             model_path=CYBER_PONY_PATH,
             default_pos=CYBER_PONY_POSITIVE_PROMPT,
             default_neg=CYBER_PONY_NEGATIVE_PROMPT,
@@ -185,7 +185,7 @@ class CyberRealisticPonyModel(BaseDiffusionModel):
 class WaiAnimeIllustriousModel(BaseDiffusionModel):
     def __init__(self):
         super().__init__(
-            name=Models.ANIME,
+            name=Models.ANIME_WAI_ILLUSTRIOUS,
             model_path=WAI_ILLUSTRIOUS_PATH,
             default_pos=WAI_ILLUSTRIOUS_POSITIVE_PROMPT,
             default_neg=WAI_ILLUSTRIOUS_NEGATIVE_PROMPT,
@@ -197,7 +197,7 @@ class WaiAnimeIllustriousModel(BaseDiffusionModel):
 class PonyRealismModel(BaseDiffusionModel):
     def __init__(self):
         super().__init__(
-            name=Models.PONY,
+            name=Models.PONY_REALISM,
             model_path=PONY_REALISM_PATH,
             default_pos=PONY_REALISM_POSITIVE_PROMPT,
             default_neg=PONY_REALISM_NEGATIVE_PROMPT,
