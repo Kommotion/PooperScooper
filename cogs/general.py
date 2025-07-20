@@ -252,7 +252,7 @@ class General(Cog):
             value = 'Python'
             embed.add_field(name=name, value=value, inline=True)
 
-            embed.set_footer(text='In memory of all the good boys and girls - Junior, Cole, and Shirley.')
+            embed.set_footer(text='In memory of all the good boys and girls - Junior, Cole, Shirley, and Mocha.')
 
             await ctx.send(files=file_list, embed=embed)
 
