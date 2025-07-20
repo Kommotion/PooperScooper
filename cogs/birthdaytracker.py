@@ -83,6 +83,8 @@ class BirthdayTracker(Cog):
         self.birthdays = BirthdayData()
         self.check_for_birthdays.start()
 
+    birthday_group = app_commands.Group(name="birthday", description="Track your birthday.")
+
     @tasks.loop(hours=8)
     async def check_for_birthdays(self):
         """Checks if there's any birthdays and sends a message if there is. """
@@ -143,7 +145,7 @@ class BirthdayTracker(Cog):
     async def before_birthday(self):
         await self.bot.wait_until_ready()
 
-    @app_commands.command(name="birthday-add")
+    @birthday_group.command(name="add")
     async def birthday_add(self, interaction: discord.Interaction, month: int, day: int,
                            year: Optional[int] = NO_YEAR) -> None:
         """Adds your birthday to the birthday tracker. If it's your birthday, the server will be reminded (LIMITED TO
@@ -174,7 +176,7 @@ class BirthdayTracker(Cog):
 
         await interaction.response.send_message(response, ephemeral=True)
 
-    @app_commands.command(name="birthday-delete")
+    @birthday_group.command(name="delete")
     async def birthday_delete(self, interaction: discord.Interaction) -> None:
         """Deletes your birthday from the birthday tracker if it exists."""
         self.birthdays.delete_birthday_data(interaction.user.id)

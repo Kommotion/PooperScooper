@@ -135,7 +135,9 @@ class Bingo(Cog):
         self.bot = bot
         self.bingo_data = BingoData()
 
-    @app_commands.command(name="bingo-add")
+    bingo_group = app_commands.Group(name="bingo", description="MTS Bingo Card commands.")
+
+    @bingo_group.command(name="add")
     async def add_bingo(self, interaction: discord.Interaction, prompt: str) -> None:
         """Add to the list of bingo cards.
 
@@ -161,7 +163,7 @@ class Bingo(Cog):
 
         await interaction.response.send_message(embed=embed)
 
-    @app_commands.command(name="bingo-list")
+    @bingo_group.command(name="list")
     async def list_bingo(self, interaction: discord.Interaction) -> None:
         """Returns the list of the bingo cards for the server. """
         bingo_list = await self.bingo_data.get_bingo_list(interaction.guild_id)
@@ -200,7 +202,7 @@ class Bingo(Cog):
         for embed in embeds[1:]:
             await interaction.followup.send(embed=embed)
 
-    @app_commands.command(name="bingo-remove")
+    @bingo_group.command(name="remove")
     async def remove_bingo(self, interaction: discord.Interaction, prompt: str) -> None:
         """Returns the list of the bingo cards for the server.
 
@@ -226,7 +228,7 @@ class Bingo(Cog):
 
         await interaction.response.send_message(embed=embed)
 
-    @app_commands.command(name="bingo-generate")
+    @bingo_group.command(name="generate")
     async def generate_bingo_card(self, interaction: discord.Interaction) -> None:
         """Generates a 4x4 Bingo card. """
         full_bingo_list = await self.bingo_data.get_bingo_list(interaction.guild_id)

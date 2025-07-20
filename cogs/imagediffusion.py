@@ -337,8 +337,9 @@ class ImageDiffusion(Cog):
             await self.models[model].load_pipeline()
         log.info("All specified pipelines loaded successfully.")
 
+    imagegen_group = app_commands.Group(name="imagegen", description="Image Generation Commands.")
 
-    @app_commands.command(name="imagegen_default_prompts", description='Print the default negative or positive prompts for the given model.')
+    @imagegen_group.command(name="show_default_prompts", description='Print the default negative or positive prompts for the given model.')
     @app_commands.describe(
         model=f'The model you want to see the default prompt of.',
         prompt_type='Whether you want to see the default positive or negative prompt.'
@@ -366,16 +367,7 @@ class ImageDiffusion(Cog):
 
         await interaction.response.send_message(f"The default {prompt_type.value} prompt for {model.value} is:\n{default_prompt}")
 
-    @app_commands.command(name="imagegen_form", description='Open a form to generate an image with prompt options.')
-    @app_commands.guild_only()
-    async def generate_modal(self, interaction: discord.Interaction) -> None:
-        if interaction.channel_id not in ALlOWED_CHANNELS:
-            await interaction.response.send_message("This command is not allowed in this channel!", ephemeral=True)
-            return
-
-        await interaction.response.send_message(content="Select options to generate image:", view=ImageGenPrefView(self), ephemeral=True)
-
-    @app_commands.command(name="imagegen", description='Generate an image using text to image model.')
+    @imagegen_group.command(name="generate", description='Generate an image using text to image model.')
     @app_commands.describe(
         model=f'Choose one of these model models.',
         prompt='Prompt to generate the image.',
