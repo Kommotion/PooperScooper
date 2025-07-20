@@ -4,14 +4,14 @@ Personal Discord bot using the discord.py library by Rapptz (https://github.com/
 This bot was intended to be a single server bot and was not developed to be in multiple servers.
 Feel free to use this as a reference for your own bot.
 
-Note: Some stuff will be hardcoded to particular servers such as menacesroles and grammarpolice cogs. Change these if
+Note: Some stuff will be hardcoded to particular servers. Change these if
 your intention is to use this in your own server.
 
 ## Key Features
 1. Music
-2. Gametime
+2. Gametime tracking
 3. ImageDiffusion
-4. GrammarPolice
+4. GrammarPolice (Limited, no LLM being used)
 5. Role Selection by Emoji
 6. Birthday Tracking (Opt in)
 7. Poll
@@ -56,14 +56,20 @@ Add credentials to config.json from Spotify/Discord. Place in root dir of bot.
 Download FFMPEG and add the executable to your environment variables
 * https://www.ffmpeg.org/download.html
 
-7. **Install Stable/Waifu Diffusion**
+7. **Install Image Diffusion Models**
 
-NOTE: This requires a powerful host platform with at least 4GB+ of VRAM recommended
+NOTE: This requires a powerful host platform with at least 4GB+ of VRAM recommended. I recommend doing more research on
+OS/hardware requirements before enabling the image diffusion cog. Currently, I have it running on 8GB VRAM GPU and 64GB RAM system
+while offloading some of the processing to the CPU at the time of this writing.
 
-Follow the instructions to set up Stable/Waifu Diffusion if your system is powerful enough
-* https://huggingface.co/hakurei/waifu-diffusion
+Check the image diffusion cog for all the models that you might need. All models used can be found here:
+* https://civitai.com/
+* https://huggingface.co/
 
-You might need Pytorch installation from: https://pytorch.org/get-started/locally/
+You will need Pytorch installation for your setup: https://pytorch.org/get-started/locally/
+
+The cog currently expects that your models are cached locally on your system. I definitely recommend doing this
+otherwise the huggingface library will download a model if it is not cached which can destroy your bandwidth limits.
 
 ## Running
 Run the following with administrator privileges
