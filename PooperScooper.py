@@ -16,13 +16,15 @@ initial_extensions = [
     'cogs.general',
     'cogs.music',
     'cogs.gametime',
-    'cogs.grammarpolice',
+    #'cogs.grammarpolice',
     'cogs.menacesroles',
     'cogs.imagediffusion',
     'cogs.birthdaytracker',
     'cogs.poll',
     'cogs.palworld',
-    'cogs.bingo'
+    'cogs.bingo',
+    'cogs.gamepicker',
+    'cogs.random'
 ]
 
 # Set up logging
