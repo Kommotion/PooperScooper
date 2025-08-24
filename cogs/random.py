@@ -140,6 +140,10 @@ class RandomGroup(app_commands.Group):
 
     @app_commands.command(name="impostor", description="Randomly selects an impostor from your current voice call.")
     async def impostor(self, interaction: discord.Interaction):
+        if interaction.guild is None:
+            await interaction.response.send_message("This command is not allowed in DMs!", ephemeral=True)
+            return
+
         if not interaction.user.voice or not interaction.user.voice.channel:
             await interaction.response.send_message(
                 embed=discord.Embed(
