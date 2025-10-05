@@ -242,7 +242,6 @@ class PromptDetailButton(ui.View):
     async def on_timeout(self) -> None:
         for item in self.children:
             item.disabled = True
-
         await self.message.edit(view=self)
 
     @ui.button(label="See prompt details", style=discord.ButtonStyle.blurple)
@@ -267,8 +266,9 @@ class PromptDetailButton(ui.View):
         self.already_clicked_prompt_details.add(interaction.user.id)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @ui.button(label="Resubmit", style=discord.ButtonStyle.green)
-    async def resubmit_button(self, interaction: discord.Interaction, button: ui.Button):
+    @ui.button(label="Edit and Regenerate", style=discord.ButtonStyle.green)
+    async def edit_regenerate_button(self, interaction: discord.Interaction, button: ui.Button):
+        """Opens the same editor as before to tweak prompts/settings before regenerating."""
         now = time.time()
         last_used = self._cooldown.get(interaction.user.id, 0)
         if now - last_used < self._cooldown_seconds:
@@ -291,8 +291,36 @@ class PromptDetailButton(ui.View):
         )
 
         await interaction.response.send_message(
-            "Edit your options before resubmitting:", view=view, ephemeral=True
+            "Edit your options before regenerating:", view=view, ephemeral=True
         )
+
+    @ui.button(label="Regenerate", style=discord.ButtonStyle.gray)
+    async def regenerate_button(self, interaction: discord.Interaction, button: ui.Button):
+        """Regenerates the image with the exact same settings (no editing)."""
+        now = time.time()
+        last_used = self._cooldown.get(interaction.user.id, 0)
+        if now - last_used < self._cooldown_seconds:
+            await interaction.response.send_message(
+                f"You're using this too quickly! Try again in {int(self._cooldown_seconds - (now - last_used))}s.",
+                ephemeral=True
+            )
+            return
+
+        self._cooldown[interaction.user.id] = now
+
+        # Reuse the exact same creation parameters
+        image_entry = ImageCreation(
+            prompt=self.user_prompt,
+            model=self.model,
+            interaction=interaction,
+            negative_prompt=self.user_negative,
+            use_default_negative=self.use_default_negative,
+            use_default_positive=self.use_default_positive,
+            nsfw=self.nsfw_level
+        )
+
+        await interaction.client.get_cog("ImageDiffusion").image_queue.put(image_entry)
+        await interaction.response.send_message("Queued a new generation with the same settings!", ephemeral=True)
 
     @ui.button(label="Delete", style=discord.ButtonStyle.red)
     async def delete_button(self, interaction: discord.Interaction, button: ui.Button):
