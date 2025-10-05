@@ -190,6 +190,7 @@ class RandomGroup(app_commands.Group):
             return
 
         participants = view.result or members
+        participants = [member for member in participants if not member.bot]
 
         impostor = random.choice(participants)
 
