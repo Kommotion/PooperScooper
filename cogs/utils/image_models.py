@@ -13,7 +13,7 @@ from cogs.utils.constants import *
 
 
 ANI_PONY_PATH = r'.\models\ani-pony\waiANINSFWPONYXL_v140.safetensors'
-WAI_ILLUSTRIOUS_PATH = r".\models\wai_illustrious\waiNSFWIllustrious_v140.safetensors"
+WAI_ILLUSTRIOUS_PATH = r".\models\wai_illustrious\waiNSFWIllustrious_v150.safetensors"
 PONY_REALISM_PATH = r'.\models\pony-realism\ponyRealism_V23.safetensors'
 CYBER_PONY_PATH = r".\models\cyber-pony\cyberrealisticPony_v120.safetensors"
 
