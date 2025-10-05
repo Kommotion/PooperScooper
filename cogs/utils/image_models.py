@@ -12,10 +12,10 @@ from diffusers import EulerAncestralDiscreteScheduler, StableDiffusionXLPipeline
 from cogs.utils.constants import *
 
 
-ANI_PONY_PATH = r'.\models\ani-pony\waiANINSFWPONYXL_v140.safetensors'
-WAI_ILLUSTRIOUS_PATH = r".\models\wai_illustrious\waiNSFWIllustrious_v150.safetensors"
-PONY_REALISM_PATH = r'.\models\pony-realism\ponyRealism_V23.safetensors'
-CYBER_PONY_PATH = r".\models\cyber-pony\cyberrealisticPony_v120.safetensors"
+ANI_PONY_PATH = r'.\ComfyUI\models\checkpoints\waiANINSFWPONYXL_v140.safetensors'
+WAI_ILLUSTRIOUS_PATH = r".\ComfyUI\models\checkpoints\waiNSFWIllustrious_v150.safetensors"
+PONY_REALISM_PATH = r'.\ComfyUI\models\checkpoints\ponyRealism_V23.safetensors'
+CYBER_PONY_PATH = r".\ComfyUI\models\checkpoints\cyberrealisticPony_v120.safetensors"
 
 ANI_PONY_POSITIVE_PROMPT = "score_9, score_8_up, score_7_up, source_anime"
 ANI_PONY_NEGATIVE_PROMPT = "worst quality, bad quality, jpeg artifacts, source_cartoon, \
