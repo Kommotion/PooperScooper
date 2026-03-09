@@ -36,6 +36,10 @@ ONE_MEMBER = 1
 credentials = load_credentials()
 DEFAULT_VOLUME = 0.15
 
+# Now Playing embed images: spinning when playing, static when paused/ended
+SPINNING_DISC_GIF = "https://i.makeagif.com/media/5-01-2016/eEcTQ8.gif"
+STATIC_DISC_URL = "https://upload.wikimedia.org/wikipedia/commons/2/22/Vinyl_record.png"
+
 
 class MusicEntry:
     def __init__(self, url, voice_client: discord.VoiceClient, ctx: commands.Context, player=None):
@@ -65,6 +69,132 @@ class YTDLSource(discord.PCMVolumeTransformer):
         return cls(discord.FFmpegPCMAudio(filename, **ffmpeg_options), data=data)
 
 
+class NowPlayingView(discord.ui.View):
+    """View with control buttons for the Now Playing embed. Only one active per guild."""
+
+    def __init__(self, cog: "Music", entry: MusicEntry, message: discord.Message = None, timeout=3600):
+        super().__init__(timeout=timeout)
+        self.cog = cog
+        self.entry = entry
+        self.message = message
+        # Color repeat/loop/shuffle by state (primary = on)
+        for child in self.children:
+            cid = getattr(child, "custom_id", None)
+            if cid == "np_repeat":
+                child.style = discord.ButtonStyle.primary if cog.repeat_enabled else discord.ButtonStyle.secondary
+            elif cid == "np_loop":
+                child.style = discord.ButtonStyle.primary if cog.loop_enabled else discord.ButtonStyle.secondary
+            elif cid == "np_shuffle":
+                child.style = discord.ButtonStyle.primary if cog.shuffle_mode else discord.ButtonStyle.secondary
+
+    def _check_voice(self, interaction):
+        if not self.cog._same_voice_check(interaction):
+            return False
+        return True
+
+    def _is_current_np(self, interaction):
+        """True if this view's message is still the active Now Playing for this guild."""
+        return self.cog.current_np_message.get(interaction.guild.id) == self.message
+
+    async def _refresh_embed(self, interaction):
+        """Update the Now Playing message to reflect current state (repeat, loop, paused)."""
+        if not self.message or not self._is_current_np(interaction):
+            return
+        voice_client = interaction.guild.voice_client
+        is_paused = voice_client.is_paused() if voice_client else False
+        embed = self.cog.now_playing_embed(self.entry, is_paused=is_paused)
+        new_view = NowPlayingView(self.cog, self.entry, self.message)
+        try:
+            await self.message.edit(embed=embed, view=new_view)
+        except discord.NotFound:
+            pass
+
+    async def on_timeout(self):
+        """When the view expires, remove buttons and clear the current NP reference."""
+        if self.message:
+            guild_id = self.message.guild.id
+            self.cog.current_np_message.pop(guild_id, None)
+            try:
+                await self.message.edit(view=None)
+            except (discord.NotFound, discord.HTTPException):
+                pass
+
+    @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.secondary, custom_id="np_skip")
+    async def skip_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self._check_voice(interaction):
+            await interaction.response.send_message("You must be in the same voice channel to control playback.", ephemeral=True)
+            return
+        if not self._is_current_np(interaction):
+            await interaction.response.send_message("This player is no longer active.", ephemeral=True)
+            return
+        await self.cog._button_skip(interaction)
+
+    @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.danger, custom_id="np_stop")
+    async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self._check_voice(interaction):
+            await interaction.response.send_message("You must be in the same voice channel to control playback.", ephemeral=True)
+            return
+        if not self._is_current_np(interaction):
+            await interaction.response.send_message("This player is no longer active.", ephemeral=True)
+            return
+        await self.cog._button_stop(interaction)
+
+    @discord.ui.button(emoji="⏸️", style=discord.ButtonStyle.secondary, custom_id="np_pause")
+    async def pause_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self._check_voice(interaction):
+            await interaction.response.send_message("You must be in the same voice channel to control playback.", ephemeral=True)
+            return
+        if not self._is_current_np(interaction):
+            await interaction.response.send_message("This player is no longer active.", ephemeral=True)
+            return
+        await self.cog._button_pause(interaction)
+        await self._refresh_embed(interaction)
+
+    @discord.ui.button(emoji="▶️", style=discord.ButtonStyle.success, custom_id="np_resume")
+    async def resume_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self._check_voice(interaction):
+            await interaction.response.send_message("You must be in the same voice channel to control playback.", ephemeral=True)
+            return
+        if not self._is_current_np(interaction):
+            await interaction.response.send_message("This player is no longer active.", ephemeral=True)
+            return
+        await self.cog._button_resume(interaction)
+        await self._refresh_embed(interaction)
+
+    @discord.ui.button(emoji="🔂", style=discord.ButtonStyle.secondary, custom_id="np_repeat")
+    async def repeat_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self._check_voice(interaction):
+            await interaction.response.send_message("You must be in the same voice channel to control playback.", ephemeral=True)
+            return
+        if not self._is_current_np(interaction):
+            await interaction.response.send_message("This player is no longer active.", ephemeral=True)
+            return
+        await self.cog._button_repeat(interaction)
+        await self._refresh_embed(interaction)
+
+    @discord.ui.button(emoji="🔁", style=discord.ButtonStyle.secondary, custom_id="np_loop")
+    async def loop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self._check_voice(interaction):
+            await interaction.response.send_message("You must be in the same voice channel to control playback.", ephemeral=True)
+            return
+        if not self._is_current_np(interaction):
+            await interaction.response.send_message("This player is no longer active.", ephemeral=True)
+            return
+        await self.cog._button_loop(interaction)
+        await self._refresh_embed(interaction)
+
+    @discord.ui.button(emoji="🔀", style=discord.ButtonStyle.secondary, custom_id="np_shuffle")
+    async def shuffle_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self._check_voice(interaction):
+            await interaction.response.send_message("You must be in the same voice channel to control playback.", ephemeral=True)
+            return
+        if not self._is_current_np(interaction):
+            await interaction.response.send_message("This player is no longer active.", ephemeral=True)
+            return
+        await self.cog._button_shuffle(interaction)
+        await self._refresh_embed(interaction)
+
+
 class Music(Cog):
     """Commands for playing music in voice chat. """
 
@@ -83,11 +213,29 @@ class Music(Cog):
         self.repeat_enabled = False
         self.repeated_entry = None
         self.loop_enabled = False
+        self.shuffle_mode = False
+        # One active Now Playing message per guild; invalidated when new song or bot disconnects
+        self.current_np_message = {}
 
     async def reset_player_controls(self):
         self.repeat_enabled = False
         self.repeated_entry = None
         self.loop_enabled = False
+        self.shuffle_mode = False
+
+    async def invalidate_current_np(self, guild_id: int, entry: MusicEntry = None):
+        """Remove buttons from the current Now Playing message. If entry is given (song ended), show 'ended' embed with static disc."""
+        message = self.current_np_message.pop(guild_id, None)
+        if not message:
+            return
+        try:
+            if entry is not None:
+                ended_embed = self.now_playing_ended_embed(entry)
+                await message.edit(embed=ended_embed, view=None)
+            else:
+                await message.edit(view=None)
+        except (discord.NotFound, discord.HTTPException):
+            pass
 
     async def get_entry(self):
         # If repeat is enabled get the stored repeated entry if there is one
@@ -95,8 +243,23 @@ class Music(Cog):
             entry = self.repeated_entry if self.repeated_entry else await self.music_queue.get()
             if not self.repeated_entry:
                 self.repeated_entry = entry
-        else:
-            entry = await self.music_queue.get()
+            return entry
+        # Shuffle mode: next song is a random pick from the queue
+        if self.shuffle_mode:
+            items = []
+            while True:
+                try:
+                    items.append(self.music_queue.get_nowait())
+                except asyncio.QueueEmpty:
+                    break
+            if not items:
+                items.append(await self.music_queue.get())
+            entry = random.choice(items)
+            items.remove(entry)
+            for e in items:
+                await self.music_queue.put(e)
+            return entry
+        entry = await self.music_queue.get()
         return entry
 
     @tasks.loop(seconds=1)
@@ -113,8 +276,12 @@ class Music(Cog):
 
         try:
             entry.player = await YTDLSource.from_url(entry.url, loop=self.bot.loop, stream=True)
+            await self.invalidate_current_np(entry.ctx.guild.id)
             embed = self.now_playing_embed(entry)
-            await entry.ctx.send(embed=embed)
+            view = NowPlayingView(self, entry)
+            msg = await entry.ctx.send(embed=embed, view=view)
+            view.message = msg
+            self.current_np_message[entry.ctx.guild.id] = msg
             entry.voice_client.play(entry.player, after=self.play_next_entry)
             # If repeat was enabled, make sure that we store the current entry to the repeated entry
             if self.repeat_enabled:
@@ -127,12 +294,16 @@ class Music(Cog):
             self.play_next_entry(e)
 
         await self.next_song.wait()
+        # Song ended: remove buttons and show static "ended" state so only one NP is active
+        await self.invalidate_current_np(entry.ctx.guild.id, entry=entry)
 
     @tasks.loop(seconds=30)
     async def idle_timeout(self):
         for voice_client in self.bot.voice_clients:
             if len(voice_client.channel.voice_states) <= ONE_MEMBER:
+                guild_id = voice_client.guild.id
                 await voice_client.disconnect()
+                await self.invalidate_current_np(guild_id)
 
     @idle_timeout.before_loop
     async def before_timeout(self):
@@ -161,44 +332,58 @@ class Music(Cog):
         )
         await entry.ctx.send(embed=embed)
 
-    def now_playing_embed(self, entry):
-        title = '▶️ Now Playing 🎵'
-        if self.repeat_enabled:
-            title += ' 🔂'
-        elif self.loop_enabled:
-            title += ' 🔁'
+    def now_playing_embed(self, entry, is_paused=False):
+        is_playing = not is_paused
+        # Spinning disc when playing, static when paused
+        disc_url = SPINNING_DISC_GIF if is_playing else STATIC_DISC_URL
 
-        embed = discord.Embed(
-            title=title,
-            description=entry.player.title,
-            colour=discord.Colour.blue(),
+        if is_paused:
+            status_line = '⏸️ **Paused**'
+            colour = discord.Colour.orange()
+        else:
+            status_line = '▶️ **Playing**'
+            colour = discord.Colour(0x1DB954)  # Spotify green
+
+        embed = discord.Embed(colour=colour, timestamp=discord.utils.utcnow())
+        embed.set_author(name='Now Playing', icon_url=disc_url)
+        embed.set_image(url=disc_url)
+        embed.add_field(name='Track', value=entry.player.title, inline=False)
+        embed.add_field(name='Status', value=status_line, inline=True)
+        embed.add_field(name='In queue', value=str(self.music_queue.qsize()), inline=True)
+        embed.add_field(name='Requested by', value=entry.ctx.message.author.mention, inline=True)
+        embed.add_field(
+            name='Mode',
+            value=' • '.join(
+                s for s, on in [
+                    ('🔂 Repeat', self.repeat_enabled),
+                    ('🔁 Loop', self.loop_enabled),
+                    ('🔀 Shuffle', self.shuffle_mode),
+                ] if on
+            ) or '—',
+            inline=False,
         )
-
-        name = 'Requester'
-        value = entry.ctx.message.author
-        embed.add_field(name=name, value=value, inline=True)
-
-        name = 'Songs in Queue'
-        value = str(self.music_queue.qsize())
-        embed.add_field(name=name, value=value, inline=True)
-
-        name = 'Loop'
-        value = 'Enabled' if self.loop_enabled else 'Disabled'
-        embed.add_field(name=name, value=value, inline=True)
-
-        name = 'Repeat'
-        value = 'Enabled' if self.repeat_enabled else 'Disabled'
-        embed.add_field(name=name, value=value, inline=True)
-
-        name = 'Source'
         webpage_url = self._get_value(entry, 'webpage_url')
-        value = '{}'.format(webpage_url)
-        embed.add_field(name=name, value=value, inline=False)
+        embed.add_field(name='Link', value=webpage_url, inline=False)
+        thumb = self._get_value(entry, 'thumbnail')
+        if thumb != 'No thumbnail specified':
+            embed.set_thumbnail(url=thumb)
+        embed.set_footer(text='Use the buttons below to control playback')
+        return embed
 
-        url = self._get_value(entry, 'thumbnail')
-        if url != 'No thumbnail specified':
-            embed.set_thumbnail(url=url)
-
+    def now_playing_ended_embed(self, entry):
+        """Embed shown when playback has ended (buttons removed); static disc."""
+        embed = discord.Embed(
+            colour=discord.Colour.dark_gray(),
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.set_author(name='Playback ended', icon_url=STATIC_DISC_URL)
+        embed.set_image(url=STATIC_DISC_URL)
+        embed.add_field(name='Last played', value=entry.player.title, inline=False)
+        embed.add_field(name='Requested by', value=entry.ctx.message.author.mention, inline=True)
+        thumb = self._get_value(entry, 'thumbnail')
+        if thumb != 'No thumbnail specified':
+            embed.set_thumbnail(url=thumb)
+        embed.set_footer(text='Queue another track to keep the party going')
         return embed
 
     def _get_value(self, entry, value):
@@ -206,6 +391,68 @@ class Music(Cog):
             return entry.player.data[value]
         except KeyError:
             return 'No {} specified'.format(value)
+
+    def _same_voice_check(self, interaction):
+        """Returns True if the user is in the same voice channel as the bot."""
+        voice_client = interaction.guild.voice_client
+        if not voice_client or not voice_client.channel:
+            return False
+        if not interaction.user.voice or not interaction.user.voice.channel:
+            return False
+        return interaction.user.voice.channel == voice_client.channel
+
+    async def _button_skip(self, interaction):
+        if self.repeat_enabled:
+            await interaction.response.send_message("Can't skip while Repeat is enabled!", ephemeral=True)
+            return
+        voice_client = interaction.guild.voice_client
+        if voice_client and voice_client.is_playing():
+            voice_client.stop()
+        await interaction.response.defer()
+
+    async def _button_stop(self, interaction):
+        while not self.music_queue.empty():
+            self.music_queue.get_nowait()
+        voice_client = interaction.guild.voice_client
+        if voice_client and (voice_client.is_playing() or voice_client.is_paused()):
+            voice_client.stop()
+        guild_id = interaction.guild.id
+        await voice_client.disconnect()
+        await self.invalidate_current_np(guild_id)
+        await interaction.response.defer()
+
+    async def _button_pause(self, interaction):
+        voice_client = interaction.guild.voice_client
+        if voice_client and voice_client.is_playing():
+            voice_client.pause()
+            await interaction.response.defer()
+        else:
+            await interaction.response.send_message("Nothing is playing.", ephemeral=True)
+
+    async def _button_resume(self, interaction):
+        voice_client = interaction.guild.voice_client
+        if voice_client and voice_client.is_paused():
+            voice_client.resume()
+            await interaction.response.defer()
+        else:
+            await interaction.response.send_message("Player is not paused.", ephemeral=True)
+
+    async def _button_repeat(self, interaction):
+        self.repeat_enabled = not self.repeat_enabled
+        if not self.repeat_enabled:
+            self.repeated_entry = None
+        await interaction.response.defer()
+
+    async def _button_loop(self, interaction):
+        self.loop_enabled = not self.loop_enabled
+        await interaction.response.defer()
+
+    async def _button_shuffle(self, interaction):
+        if self.repeat_enabled:
+            await interaction.response.send_message("Can't use shuffle mode while repeat is enabled!", ephemeral=True)
+            return
+        self.shuffle_mode = not self.shuffle_mode
+        await interaction.response.defer()
 
     def play_next_entry(self, error):
         log.warning('Player error: %s' % error) if error else None
@@ -371,7 +618,9 @@ class Music(Cog):
         if ctx.voice_client and (ctx.voice_client.is_playing() or ctx.voice_client.is_paused()):
             ctx.voice_client.stop()
 
+        guild_id = ctx.guild.id
         await ctx.voice_client.disconnect()
+        await self.invalidate_current_np(guild_id)
 
     @commands.command()
     async def pause(self, ctx):
@@ -422,7 +671,7 @@ class Music(Cog):
     async def ensure_voice(self, ctx):
         if ctx.voice_client is None:
             if ctx.author.voice:
-                await ctx.author.voice.channel.connect()
+                await ctx.author.voice.channel.connect(self_deaf=True, self_mute=True)
                 await self.reset_player_controls()
             else:
                 await ctx.send("You are not connected to a voice channel.")
