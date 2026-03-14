@@ -4,6 +4,7 @@ import time
 import logging
 import json
 import copy
+import random
 import os
 from io import BytesIO
 
@@ -160,6 +161,10 @@ class BaseComfyWorkflowModel:
             # Patch negative (node 7 in your example)
             if "7" in workflow and workflow["7"].get("class_type") == "CLIPTextEncode":
                 workflow["7"]["inputs"]["text"] = negative_prompt
+
+            # Randomize the seed
+            if "3" in workflow and workflow["3"].get("class_type") == "KSampler":
+                workflow["3"]["inputs"]["seed"] = random.getrandbits(64)
 
             return workflow
 
