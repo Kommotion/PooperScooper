@@ -18,10 +18,7 @@ from cogs.utils import comfy_client
 from cogs.utils.constants import *
 
 
-ANI_PONY_PATH = r'.\ComfyUI_New\models\checkpoints\waiANINSFWPONYXL_v140.safetensors'
 WAI_ILLUSTRIOUS_PATH = r".\ComfyUI_New\models\checkpoints\waiIllustriousSDXL_v160.safetensors"
-PONY_REALISM_PATH = r'.\ComfyUI_New\models\checkpoints\ponyRealism_V23.safetensors'
-CYBER_PONY_PATH = r".\ComfyUI_New\models\checkpoints\cyberrealisticPony_v120.safetensors"
 Z_IMAGE_TURBO_PATH = r".\ComfyUI_New\models\checkpoints\z-image-turbo-fp8-e4m3fn.safetensors"
 
 Z_IMAGE_VAE = r".\ComfyUI_New\models\vae\zimage_turbo_fp8_vae.sft"
@@ -30,20 +27,8 @@ Z_IMAGE_VAE = r".\ComfyUI_New\models\vae\zimage_turbo_fp8_vae.sft"
 WAI_ILLUSTRIOUS_WORKFLOW_PATH = r".\ComfyUI_New\user\default\workflows\WAI-ILLUSTRIOUS-SDXL_API.json"
 Z_IMAGE_TURBO_WORKFLOW_PATH = r".\ComfyUI_New\user\default\workflows\Z_IMAGE_TURBO_FP8_API.json"
 
-ANI_PONY_POSITIVE_PROMPT = "score_9, score_8_up, score_7_up, source_anime"
-ANI_PONY_NEGATIVE_PROMPT = "worst quality, bad quality, jpeg artifacts, source_cartoon, \
-3d, (censor), monochrome, blurry, lowres, watermark,"
-
 WAI_ILLUSTRIOUS_POSITIVE_PROMPT = "masterpiece,best quality,amazing quality"
 WAI_ILLUSTRIOUS_NEGATIVE_PROMPT = "bad quality,worst quality,worst detail,sketch,censor,"
-
-PONY_REALISM_POSITIVE_PROMPT = "score_9, score_8_up, score_7_up, BREAK"
-PONY_REALISM_NEGATIVE_PROMPT = "score_4, score_5, score_6"
-
-CYBER_PONY_POSITIVE_PROMPT = "score_9, score_8_up, score_7_up, (SUBJECT), "
-CYBER_PONY_NEGATIVE_PROMPT = "score_6, score_5, score_4, (worst quality:1.2), (low quality:1.2), (normal quality:1.2), \
-                               lowres, bad anatomy, bad hands, signature, watermarks, ugly, imperfect eyes, \
-                              skewed eyes, unnatural face, unnatural body, error, extra limb, missing limbs"
 
 NO_DEFAULT_POSITIVE = ""
 NO_DEFAULT_NEGATIVE = ""
@@ -76,9 +61,6 @@ class NsfwLevel(StrEnum):
 
 class Models(StrEnum):
     ANIME_WAI_ILLUSTRIOUS = "anime_wai_illustrious"
-    ANIME_WAI_PONY = "wai_anime_pony"
-    PONY_REALISM = "pony_realism"
-    CYBER_REALISTIC_PONY = "cyber_realistic_pony"
     Z_IMAGE_TURBO_FP8 = "z_image_turbo_fp8"
 
     @classmethod
@@ -135,9 +117,6 @@ class BaseComfyWorkflowModel:
 
             raw_ui = await asyncio.to_thread(_load)
             self._ui_workflow_template = raw_ui
-            
-            # You can still pre-convert it if you want, but we won't rely on it for patching
-            # self._api_workflow_template = comfy_client.ui_workflow_to_api_prompt(raw_ui)
             
             self.log.info(f"Loaded UI workflow for {self.name} from {self.workflow_path}")
 

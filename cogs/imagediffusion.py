@@ -74,15 +74,6 @@ class ImageGenPrefView(ui.View):
                 discord.SelectOption(label="Anime WAI Illustrious", value=Models.ANIME_WAI_ILLUSTRIOUS,
                                      description="WAI Illustrious anime-style images",
                                      default=(default_model == Models.ANIME_WAI_ILLUSTRIOUS)),
-                discord.SelectOption(label="WAI Anime Pony", value=Models.ANIME_WAI_PONY,
-                                     description="ANI Pony anime-style pony characters",
-                                     default=(default_model == Models.ANIME_WAI_PONY)),
-                discord.SelectOption(label="Pony Realism", value=Models.PONY_REALISM,
-                                     description="Pony Realism realistic pony images",
-                                     default=(default_model == Models.PONY_REALISM)),
-                discord.SelectOption(label="CyberRealistic Pony", value=Models.CYBER_REALISTIC_PONY,
-                                     description="Cyber Realistic pony images",
-                                     default=(default_model == Models.CYBER_REALISTIC_PONY)),
                 discord.SelectOption(label="Z Image Turbo", value=Models.Z_IMAGE_TURBO_FP8,
                                      description="Z Image Turbo Model",
                                      default=(default_model == Models.Z_IMAGE_TURBO_FP8)),
@@ -353,10 +344,6 @@ class ImageDiffusion(Cog):
         # Map front-end choices to ComfyUI workflows
         self.models = {
             Models.ANIME_WAI_ILLUSTRIOUS: ComfyWaiIllustriousModel(),
-            # Route WAI pony and realism models through Illustrious workflow for now
-            Models.ANIME_WAI_PONY: ComfyWaiIllustriousModel(),
-            Models.PONY_REALISM: ComfyWaiIllustriousModel(),
-            Models.CYBER_REALISTIC_PONY: ComfyWaiIllustriousModel(),
             Models.Z_IMAGE_TURBO_FP8: ComfyZImageTurboModel(),
         }
 
