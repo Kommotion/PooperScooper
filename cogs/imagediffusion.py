@@ -457,6 +457,8 @@ class ImageDiffusion(Cog):
         # Simple queue-aware model tracking: remember the active model; we can
         # extend this later to make smarter decisions based on queued_models
         image: ImageCreation = await self.image_queue.get()
+        if self.active_model != image.model:
+            comfy_client.free_memory()
         self.active_model = image.model
 
         await self._image_generation_interaction(image)

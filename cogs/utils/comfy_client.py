@@ -249,6 +249,20 @@ def get_history(prompt_id: str, host: str = DEFAULT_COMFY_HOST, port: int = DEFA
     return r.json()
 
 
+def free_memory(host: str = "127.0.0.1", port: int = 8188, unload_models: bool = True, free_memory: bool = True):
+    url = f"http://{host}:{port}/free"
+    payload = {
+        "unload_models": unload_models,
+        "free_memory": free_memory
+    }
+    try:
+        r = requests.post(url, json=payload, timeout=10)
+        r.raise_for_status()
+        log.info("Called /free: models unloaded / memory freed")
+    except Exception as e:
+        log.error(f"Failed to call /free endpoint: {e}")
+
+
 def wait_for_result(
     prompt_id: str,
     host: str = DEFAULT_COMFY_HOST,
