@@ -9,17 +9,20 @@ import os
 import typing
 from typing import Literal, Optional
 import discord
-import torch
 import logging
 from enum import Enum, StrEnum
-from diffusers import EulerAncestralDiscreteScheduler, StableDiffusionXLPipeline
 from discord.ext import commands, tasks
 from discord.ext.commands import Cog
-from cogs.utils.constants import *
 from discord import app_commands, ui, NSFWLevel
-from cogs.utils.image_models import Models, NsfwLevel, BaseDiffusionModel, WaiAnimePonyModel, WaiAnimeIllustriousModel, \
-    CyberRealisticPonyModel, ImageCreation, PonyRealismModel
-from cogs.utils.constants import MENACES_TO_SOBRIETY_SERVER_ID, POOPER_SCOOPER_SUPPORT_SERVER_ID
+from cogs.utils.constants import *
+from cogs.utils.image_models import (
+    Models,
+    NsfwLevel,
+    ImageCreation,
+    ComfyWaiIllustriousModel,
+    ComfyZImageTurboModel,
+)
+from cogs.utils import comfy_client
 
 log = logging.getLogger(__name__)
 
@@ -28,10 +31,6 @@ IMAGE_DIFFUSION_CHANNEL = 1365847564196249620
 TEST_CHANNEL = 1045149015756521493
 SHEPHERD_CHANNEL = 1061073360999698483
 ALlOWED_CHANNELS = [NSFW_IMAGE_DIFFUSION_CHANNEL, TEST_CHANNEL, IMAGE_DIFFUSION_CHANNEL, SHEPHERD_CHANNEL]
-
-ANIME_DESCRIPTION = 'Anime (WAI-NSFW-illustrious-SDXL v14)'
-ANIPONY_DESCRIPTION = 'Anipony (WAI-ANI-PONYXL v14.0.)'
-PONY_DESCRIPTION = 'Pony (Pony Realism v23)'
 
 
 class PromptType(StrEnum):
@@ -84,6 +83,9 @@ class ImageGenPrefView(ui.View):
                 discord.SelectOption(label="CyberRealistic Pony", value=Models.CYBER_REALISTIC_PONY,
                                      description="Cyber Realistic pony images",
                                      default=(default_model == Models.CYBER_REALISTIC_PONY)),
+                discord.SelectOption(label="Z Image Turbo", value=Models.Z_IMAGE_TURBO_FP8,
+                                     description="Z Image Turbo Model",
+                                     default=(default_model == Models.Z_IMAGE_TURBO_FP8)),
             ]
         )
         self.model_select.callback = self.model_callback
@@ -341,29 +343,38 @@ class ImageDiffusion(Cog):
         self.image_queue = asyncio.Queue(maxsize=5)
         self.next_image = asyncio.Event()
 
+        self.active_model: Optional[Models] = None
+
         self.models_to_load_on_boot = [
             Models.ANIME_WAI_ILLUSTRIOUS,
-            Models.ANIME_WAI_PONY,
-            Models.PONY_REALISM,
-            Models.CYBER_REALISTIC_PONY
+            Models.Z_IMAGE_TURBO_FP8,
         ]
 
-        self.models: dict[Models, BaseDiffusionModel] = {
-            Models.ANIME_WAI_ILLUSTRIOUS: WaiAnimeIllustriousModel(),
-            Models.ANIME_WAI_PONY: WaiAnimePonyModel(),
-            Models.PONY_REALISM: PonyRealismModel(),
-            Models.CYBER_REALISTIC_PONY: CyberRealisticPonyModel()
+        # Map front-end choices to ComfyUI workflows
+        self.models = {
+            Models.ANIME_WAI_ILLUSTRIOUS: ComfyWaiIllustriousModel(),
+            # Route WAI pony and realism models through Illustrious workflow for now
+            Models.ANIME_WAI_PONY: ComfyWaiIllustriousModel(),
+            Models.PONY_REALISM: ComfyWaiIllustriousModel(),
+            Models.CYBER_REALISTIC_PONY: ComfyWaiIllustriousModel(),
+            Models.Z_IMAGE_TURBO_FP8: ComfyZImageTurboModel(),
         }
 
-        self.bot.loop.create_task(self.load_pipelines())
+        # Ensure ComfyUI is running, then load workflows
+        self.bot.loop.create_task(self._ensure_comfy_and_load())
         self.image_generation.start()
 
+    async def _ensure_comfy_and_load(self):
+        if not comfy_client.is_comfy_running():
+            comfy_client.start_comfy()
+        await self.load_pipelines()
+
     async def load_pipelines(self):
-        """Preload all specified models into memory."""
-        log.info("Loading all pipelines...")
+        """Preload all specified ComfyUI workflows into memory."""
+        log.info("Loading all ComfyUI workflows...")
         for model in self.models_to_load_on_boot:
             await self.models[model].load_pipeline()
-        log.info("All specified pipelines loaded successfully.")
+        log.info("All specified workflows loaded successfully.")
 
     imagegen_group = app_commands.Group(name="imagegen", description="Image Generation Commands.")
 
@@ -455,7 +466,12 @@ class ImageDiffusion(Cog):
             return
         log.debug("Processing next queued image...")
         self.next_image.clear()
+
+        # Simple queue-aware model tracking: remember the active model; we can
+        # extend this later to make smarter decisions based on queued_models
         image: ImageCreation = await self.image_queue.get()
+        self.active_model = image.model
+
         await self._image_generation_interaction(image)
         self.bot.loop.call_soon_threadsafe(self.next_image.set)
         await self.next_image.wait()
@@ -475,16 +491,6 @@ class ImageDiffusion(Cog):
         except discord.HTTPException:
             await image.interaction.channel.send(content=f"Error generating prompt: {image.prompt}.",
                                                   allowed_mentions=discord.AllowedMentions(users=True))
-            return
-        except RuntimeError as e:
-            log.error(f"RuntimeError during generation: {e}")
-            if "CUDNN_STATUS_INTERNAL_ERROR" in str(e) or "allocation failed" in str(e).lower():
-                log.error("Trying gc.collect and stuff")
-                gc.collect()
-                torch.cuda.ipc_collect()
-                torch.cuda.empty_cache()
-            await image.interaction.channel.send(content=f"Image generation failed: {str(e)}",
-                                                 allowed_mentions=discord.AllowedMentions(users=True))
             return
         except Exception as e:
             log.error(f"Generation failed: {str(e)}")
@@ -528,8 +534,6 @@ class ImageDiffusion(Cog):
         self.image_generation.cancel()
         for model in self.models.values():
             model.unload_pipeline()
-        gc.collect()
-        torch.cuda.empty_cache()
 
 
 async def setup(bot):
