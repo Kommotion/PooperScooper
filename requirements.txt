@@ -5,11 +5,6 @@ yt-dlp
 setuptools
 numpy
 scipy
-diffusers
-transformers
-accelerate
-scipy
 safetensors
-xformers
 pandas
 matplotlib
