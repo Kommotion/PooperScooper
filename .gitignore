@@ -6,6 +6,9 @@ __pycache__/
 # C extensions
 *.so
 
+#palworld logs
+cogs/utils/palworld_utils/logs/*
+
 # Distribution / packaging
 .Python
 env/
@@ -99,3 +102,4 @@ ENV/
 
 # mypy
 .mypy_cache/
+/ComfyUI/
