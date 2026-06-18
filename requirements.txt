@@ -8,3 +8,5 @@ scipy
 safetensors
 pandas
 matplotlib
+requests
+Pillow

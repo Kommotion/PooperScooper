@@ -21,6 +21,7 @@ from cogs.utils.image_models import (
     ImageCreation,
     ComfyWaiIllustriousModel,
     ComfyZImageTurboModel,
+    ComfyWaiAnimaModel,
 )
 from cogs.utils import comfy_client
 
@@ -77,6 +78,9 @@ class ImageGenPrefView(ui.View):
                 discord.SelectOption(label="Z Image Turbo", value=Models.Z_IMAGE_TURBO_FP8,
                                      description="Z Image Turbo Model",
                                      default=(default_model == Models.Z_IMAGE_TURBO_FP8)),
+                discord.SelectOption(label="WAI ANIMA", value=Models.WAI_ANIMA,
+                                     description="WAI ANIMA anime-style model",
+                                     default=(default_model == Models.WAI_ANIMA)),
             ]
         )
         self.model_select.callback = self.model_callback
@@ -312,8 +316,13 @@ class PromptDetailButton(ui.View):
             nsfw=self.nsfw_level
         )
 
-        await interaction.client.get_cog("ImageDiffusion").image_queue.put(image_entry)
-        await interaction.response.send_message("Queued a new generation with the same settings!", ephemeral=True)
+        cog = interaction.client.get_cog("ImageDiffusion")
+        await cog.enqueue_image(
+            image_entry,
+            interaction,
+            queued_message="Queued a new generation with the same settings!",
+            ephemeral=True,
+        )
 
     @ui.button(label="Delete", style=discord.ButtonStyle.red)
     async def delete_button(self, interaction: discord.Interaction, button: ui.Button):
@@ -339,22 +348,34 @@ class ImageDiffusion(Cog):
         self.models_to_load_on_boot = [
             Models.ANIME_WAI_ILLUSTRIOUS,
             Models.Z_IMAGE_TURBO_FP8,
+            Models.WAI_ANIMA,
         ]
 
         # Map front-end choices to ComfyUI workflows
         self.models = {
             Models.ANIME_WAI_ILLUSTRIOUS: ComfyWaiIllustriousModel(),
             Models.Z_IMAGE_TURBO_FP8: ComfyZImageTurboModel(),
+            Models.WAI_ANIMA: ComfyWaiAnimaModel(),
         }
 
-        # Ensure ComfyUI is running, then load workflows
-        self.bot.loop.create_task(self._ensure_comfy_and_load())
-        self.image_generation.start()
+        self.comfy_ready = asyncio.Event()
+        self.comfy_startup_error: Optional[str] = None
+        self._generation_in_progress = False
 
-    async def _ensure_comfy_and_load(self):
-        if not comfy_client.is_comfy_running():
-            comfy_client.start_comfy()
-        await self.load_pipelines()
+        self.bot.loop.create_task(self._startup())
+        self.image_generation.start()
+        self.comfy_health_watcher.start()
+
+    async def _startup(self):
+        await self.bot.wait_until_ready()
+        try:
+            await asyncio.to_thread(comfy_client.ensure_comfy_running)
+            await self.load_pipelines()
+        except Exception as e:
+            self.comfy_startup_error = str(e)
+            log.exception("ComfyUI startup failed")
+        finally:
+            self.comfy_ready.set()
 
     async def load_pipelines(self):
         """Preload all specified ComfyUI workflows into memory."""
@@ -364,6 +385,27 @@ class ImageDiffusion(Cog):
         log.info("All specified workflows loaded successfully.")
 
     imagegen_group = app_commands.Group(name="imagegen", description="Image Generation Commands.")
+
+    @imagegen_group.command(name="status", description="Show ComfyUI health (owner only).")
+    @app_commands.guild_only()
+    async def comfy_status(self, interaction: discord.Interaction) -> None:
+        if not await self.bot.is_owner(interaction.user):
+            await interaction.response.send_message("Owner only.", ephemeral=True)
+            return
+
+        status = comfy_client.get_comfy_status()
+        queue_depth = self.image_queue.qsize()
+        lines = [
+            f"**ComfyUI status**",
+            f"Running: {status['running']}",
+            f"Source: {status['source']}",
+            f"Address: {status['host']}:{status['port']}",
+            f"PID (bot-started): {status['pid'] or 'n/a'}",
+            f"Queue depth: {queue_depth}/{self.image_queue.maxsize}",
+        ]
+        if self.comfy_startup_error:
+            lines.append(f"Startup error: {self.comfy_startup_error}")
+        await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
     @imagegen_group.command(name="show_default_prompts", description='Print the default negative or positive prompts for the given model.')
     @app_commands.describe(
@@ -423,13 +465,42 @@ class ImageDiffusion(Cog):
                                        use_default_positive=add_default_positive,
                                        nsfw=nsfw_level)
 
+    async def enqueue_image(
+        self,
+        image_entry: ImageCreation,
+        interaction: discord.Interaction,
+        *,
+        queued_message: str = "Added your prompt to the generation queue",
+        ephemeral: bool = False,
+    ) -> bool:
+        if not self.comfy_ready.is_set():
+            await interaction.response.send_message(
+                "ComfyUI is still starting up. Please try again in a moment.",
+                ephemeral=True,
+            )
+            return False
+
+        if self.comfy_startup_error:
+            await interaction.response.send_message(
+                f"Image generation is unavailable: {self.comfy_startup_error}",
+                ephemeral=True,
+            )
+            return False
+
+        if self.image_queue.full():
+            await interaction.response.send_message(
+                "Queue is full! Please wait and try again.",
+                ephemeral=ephemeral,
+            )
+            return False
+
+        await self.image_queue.put(image_entry)
+        await interaction.response.send_message(queued_message, ephemeral=ephemeral)
+        return True
+
     async def schedule_generation(self, prompt: str, model: Models,
                                   interaction: discord.Interaction =None, negative_prompt='', use_default_negative=True,
                                   use_default_positive=True, nsfw: NsfwLevel=NsfwLevel.NOT_SPECIFIED) -> None:
-        if self.image_queue.full():
-            await interaction.response.send_message("Queue is full! Please wait and try again.")
-            return
-
         # Non-nsfw channels will default to less nsfw and explicit things
         channel_id = interaction.channel.id
         if channel_id in [IMAGE_DIFFUSION_CHANNEL, SHEPHERD_CHANNEL] and nsfw == NsfwLevel.NOT_SPECIFIED:
@@ -442,49 +513,94 @@ class ImageDiffusion(Cog):
                               use_default_negative=use_default_negative, use_default_positive=use_default_positive,
                               nsfw=nsfw)
 
-        await self.image_queue.put(image_entry)
-        await interaction.response.send_message("Added your prompt to the generation queue")
-
-        log.info(f"Added prompt to queue: {prompt} for model: {model}")
+        if await self.enqueue_image(image_entry, interaction):
+            log.info(f"Added prompt to queue: {prompt} for model: {model}")
 
     @tasks.loop(seconds=1)
     async def image_generation(self) -> None:
         if self.image_queue.empty():
             return
+        if self.comfy_startup_error:
+            return
         log.debug("Processing next queued image...")
         self.next_image.clear()
 
-        # Simple queue-aware model tracking: remember the active model; we can
-        # extend this later to make smarter decisions based on queued_models
         image: ImageCreation = await self.image_queue.get()
         if self.active_model != image.model:
             comfy_client.free_memory()
         self.active_model = image.model
 
-        await self._image_generation_interaction(image)
+        self._generation_in_progress = True
+        try:
+            await self._image_generation_interaction(image)
+        finally:
+            self._generation_in_progress = False
+
         self.bot.loop.call_soon_threadsafe(self.next_image.set)
         await self.next_image.wait()
+
+    @image_generation.before_loop
+    async def before_image_generation(self) -> None:
+        await self.bot.wait_until_ready()
+        await self.comfy_ready.wait()
+
+    @tasks.loop(seconds=30)
+    async def comfy_health_watcher(self) -> None:
+        if self._generation_in_progress:
+            return
+        if comfy_client.is_comfy_running():
+            if self.comfy_startup_error:
+                self.comfy_startup_error = None
+            return
+        log.warning("ComfyUI is not responding; attempting to ensure it is running")
+        try:
+            await asyncio.to_thread(comfy_client.ensure_comfy_running)
+            self.comfy_startup_error = None
+        except Exception as e:
+            self.comfy_startup_error = str(e)
+            log.exception("ComfyUI health watcher failed to restore ComfyUI")
+
+    @comfy_health_watcher.before_loop
+    async def before_comfy_health_watcher(self) -> None:
+        await self.bot.wait_until_ready()
+        await self.comfy_ready.wait()
 
     async def _image_generation_interaction(self, image: ImageCreation) -> None:
         """Handles image generation but with an interaction."""
         timeout = 600
         model = self.models[image.model]
 
+        async def _send_generation_error(message: str):
+            # Discord message content limit is 2000 chars; keep room for prefix.
+            safe_message = message if len(message) <= 1800 else f"{message[:1800]}... [truncated]"
+            try:
+                await image.interaction.channel.send(
+                    content=safe_message,
+                    allowed_mentions=discord.AllowedMentions(users=True)
+                )
+            except Exception as send_error:
+                log.error(f"Failed to send generation error message: {send_error}")
+
+        if not comfy_client.is_comfy_running():
+            try:
+                await asyncio.to_thread(comfy_client.ensure_comfy_running)
+                self.comfy_startup_error = None
+            except Exception as e:
+                await _send_generation_error(f"ComfyUI is not available: {e}")
+                return
+
         try:
             output, positive, negative, gen_time = await asyncio.wait_for(model.generate(image), timeout=timeout)
         except asyncio.TimeoutError:
             log.error("Image generation timed out")
-            await image.interaction.channel.send(content="Image generation timed out. Try again with a simpler prompt.",
-                                                  allowed_mentions=discord.AllowedMentions(users=True))
+            await _send_generation_error("Image generation timed out. Try again with a simpler prompt.")
             return
         except discord.HTTPException:
-            await image.interaction.channel.send(content=f"Error generating prompt: {image.prompt}.",
-                                                  allowed_mentions=discord.AllowedMentions(users=True))
+            await _send_generation_error(f"Error generating prompt: {image.prompt}.")
             return
         except Exception as e:
             log.error(f"Generation failed: {str(e)}")
-            await image.interaction.channel.send(content=f"Image generation failed: {str(e)}",
-                                                  allowed_mentions=discord.AllowedMentions(users=True))
+            await _send_generation_error(f"Image generation failed: {str(e)}")
             return
 
         img = output.images[0]
@@ -521,6 +637,8 @@ class ImageDiffusion(Cog):
 
     def cog_unload(self):
         self.image_generation.cancel()
+        self.comfy_health_watcher.cancel()
+        comfy_client.shutdown_if_bot_started()
         for model in self.models.values():
             model.unload_pipeline()
 

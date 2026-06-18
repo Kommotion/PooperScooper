@@ -27,9 +27,12 @@ Z_IMAGE_VAE = r".\ComfyUI_New\models\vae\zimage_turbo_fp8_vae.sft"
 # ComfyUI API workflow JSON paths
 WAI_ILLUSTRIOUS_WORKFLOW_PATH = r".\ComfyUI_New\user\default\workflows\WAI-ILLUSTRIOUS-SDXL_API.json"
 Z_IMAGE_TURBO_WORKFLOW_PATH = r".\ComfyUI_New\user\default\workflows\Z_IMAGE_TURBO_FP8_API.json"
+WAI_ANIMA_WORKFLOW_PATH = r".\ComfyUI_New\user\default\workflows\WAI-ANIMA_API.json"
 
 WAI_ILLUSTRIOUS_POSITIVE_PROMPT = "masterpiece,best quality,amazing quality"
 WAI_ILLUSTRIOUS_NEGATIVE_PROMPT = "bad quality,worst quality,worst detail,sketch,censor,"
+WAI_ANIMA_POSITIVE_PROMPT = "masterpiece, best quality,score_9, score_8, score_7,"
+WAI_ANIMA_NEGATIVE_PROMPT = "worst quality, low quality, score_1, score_2, score_3, artist name,blurry, jpeg artifacts, lowres,censor"
 
 NO_DEFAULT_POSITIVE = ""
 NO_DEFAULT_NEGATIVE = ""
@@ -63,6 +66,7 @@ class NsfwLevel(StrEnum):
 class Models(StrEnum):
     ANIME_WAI_ILLUSTRIOUS = "anime_wai_illustrious"
     Z_IMAGE_TURBO_FP8 = "z_image_turbo_fp8"
+    WAI_ANIMA = "anime_wai_anima"
 
     @classmethod
     def _missing_(cls, value):
@@ -123,7 +127,7 @@ class BaseComfyWorkflowModel:
 
     def unload_pipeline(self):
         """Nothing heavy to unload for ComfyUI workflows; keep API shape for cog compatibility."""
-        self._workflow_template = None
+        self._ui_workflow_template = None
 
     def _compose_prompts(self, image: ImageCreation) -> tuple[str, str]:
         default_negative = self.default_neg if image.use_default_negative else ""
@@ -230,4 +234,16 @@ class ComfyZImageTurboModel(BaseComfyWorkflowModel):
             workflow_path=Z_IMAGE_TURBO_WORKFLOW_PATH,
             default_pos=NO_DEFAULT_POSITIVE,
             default_neg=NO_DEFAULT_NEGATIVE,
+        )
+
+
+class ComfyWaiAnimaModel(BaseComfyWorkflowModel):
+    """ComfyUI workflow-backed WAI ANIMA model."""
+
+    def __init__(self):
+        super().__init__(
+            name=Models.WAI_ANIMA,
+            workflow_path=WAI_ANIMA_WORKFLOW_PATH,
+            default_pos=WAI_ANIMA_POSITIVE_PROMPT,
+            default_neg=WAI_ANIMA_NEGATIVE_PROMPT,
         )

@@ -4,10 +4,8 @@ import uuid
 import json
 import logging
 import subprocess
+from enum import StrEnum
 from typing import Optional, List, Dict, Any
-import websocket
-import json
-import select
 
 import requests
 
@@ -16,18 +14,159 @@ log = logging.getLogger(__name__)
 
 DEFAULT_COMFY_HOST = "127.0.0.1"
 DEFAULT_COMFY_PORT = 8188
+READINESS_TIMEOUT_SEC = 120.0
+READINESS_POLL_INTERVAL_SEC = 2.0
 
 
 def comfy_base_url(host: str = DEFAULT_COMFY_HOST, port: int = DEFAULT_COMFY_PORT) -> str:
     return f"http://{host}:{port}"
 
 
-def is_comfy_running(host: str = DEFAULT_COMFY_HOST, port: int = DEFAULT_COMFY_PORT, timeout: float = 0.5) -> bool:
+def is_comfy_running(host: str = DEFAULT_COMFY_HOST, port: int = DEFAULT_COMFY_PORT, timeout: float = 2.0) -> bool:
     try:
         r = requests.get(f"{comfy_base_url(host, port)}/system_stats", timeout=timeout)
         return r.status_code == 200
     except Exception:
         return False
+
+
+class ComfySource(StrEnum):
+    EXTERNAL = "external"
+    BOT_STARTED = "bot_started"
+    DOWN = "down"
+
+
+def default_comfy_root() -> str:
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'ComfyUI_New'))
+
+
+def comfy_log_path(comfy_root: Optional[str] = None) -> str:
+    root = comfy_root or default_comfy_root()
+    return os.path.join(root, "comfyui_bot.log")
+
+
+def wait_until_ready(
+    host: str = DEFAULT_COMFY_HOST,
+    port: int = DEFAULT_COMFY_PORT,
+    timeout_sec: float = READINESS_TIMEOUT_SEC,
+    poll_interval_sec: float = READINESS_POLL_INTERVAL_SEC,
+) -> bool:
+    """Poll /system_stats until ComfyUI responds or timeout."""
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        if is_comfy_running(host=host, port=port):
+            return True
+        time.sleep(poll_interval_sec)
+    return False
+
+
+class ComfyManager:
+    def __init__(self):
+        self._process: Optional[subprocess.Popen] = None
+        self._source: ComfySource = ComfySource.DOWN
+        self._last_health_check: float = 0.0
+        self._host = DEFAULT_COMFY_HOST
+        self._port = DEFAULT_COMFY_PORT
+
+    def bot_owns_process(self) -> bool:
+        return self._source == ComfySource.BOT_STARTED and self._process is not None
+
+    def ensure_comfy_running(
+        self,
+        comfy_root: Optional[str] = None,
+        host: str = DEFAULT_COMFY_HOST,
+        port: int = DEFAULT_COMFY_PORT,
+        extra_args: Optional[list] = None,
+        readiness_timeout_sec: float = READINESS_TIMEOUT_SEC,
+    ) -> ComfySource:
+        self._host = host
+        self._port = port
+        self._last_health_check = time.time()
+
+        if is_comfy_running(host=host, port=port):
+            if self._process is not None and self._process.poll() is None:
+                self._source = ComfySource.BOT_STARTED
+            else:
+                self._source = ComfySource.EXTERNAL
+            log.info(f"ComfyUI already running on {host}:{port} (source={self._source})")
+            return self._source
+
+        process = start_comfy(comfy_root=comfy_root, host=host, port=port, extra_args=extra_args)
+        if process is None:
+            self._source = ComfySource.DOWN
+            raise RuntimeError("Failed to start ComfyUI subprocess")
+
+        self._process = process
+        self._source = ComfySource.BOT_STARTED
+        log.info(f"Started ComfyUI subprocess (pid={process.pid}); waiting for readiness...")
+
+        if not wait_until_ready(
+            host=host,
+            port=port,
+            timeout_sec=readiness_timeout_sec,
+        ):
+            self._source = ComfySource.DOWN
+            raise RuntimeError(
+                f"ComfyUI did not become ready within {readiness_timeout_sec}s "
+                f"(check {comfy_log_path(comfy_root)})"
+            )
+
+        log.info(f"ComfyUI ready on {host}:{port} (source={self._source})")
+        return self._source
+
+    def get_status(self) -> Dict[str, Any]:
+        running = is_comfy_running(host=self._host, port=self._port)
+        self._last_health_check = time.time()
+        pid = self._process.pid if self._process is not None else None
+        if running and self._source == ComfySource.DOWN:
+            self._source = ComfySource.EXTERNAL
+        if not running:
+            self._source = ComfySource.DOWN
+        return {
+            "running": running,
+            "ready": running,
+            "source": self._source.value,
+            "host": self._host,
+            "port": self._port,
+            "pid": pid,
+            "bot_owns_process": self.bot_owns_process(),
+            "last_health_check": self._last_health_check,
+        }
+
+    def shutdown_if_bot_started(self) -> None:
+        if not self.bot_owns_process():
+            return
+        process = self._process
+        if process is None:
+            return
+        log.info(f"Stopping bot-started ComfyUI (pid={process.pid})")
+        try:
+            process.terminate()
+            process.wait(timeout=15)
+        except Exception as e:
+            log.warning(f"Error stopping ComfyUI process: {e}")
+            try:
+                process.kill()
+            except Exception:
+                pass
+        finally:
+            self._process = None
+            self._source = ComfySource.DOWN
+
+
+manager = ComfyManager()
+
+
+def ensure_comfy_running(**kwargs) -> ComfySource:
+    return manager.ensure_comfy_running(**kwargs)
+
+
+def get_comfy_status() -> Dict[str, Any]:
+    return manager.get_status()
+
+
+def shutdown_if_bot_started() -> None:
+    manager.shutdown_if_bot_started()
 
 
 def start_comfy(comfy_root: str = None, host: str = DEFAULT_COMFY_HOST, port: int = DEFAULT_COMFY_PORT, extra_args: Optional[list] = None) -> Optional[subprocess.Popen]:
@@ -38,9 +177,7 @@ def start_comfy(comfy_root: str = None, host: str = DEFAULT_COMFY_HOST, port: in
     extra_args: list of additional CLI args to pass, e.g. ['--disable-auto-launch', '--fp8_e4m3fn-unet']
     """
     if comfy_root is None:
-        # assume sibling folder `ComfyUI`
-        base = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'ComfyUI_New'))
-        comfy_root = base
+        comfy_root = default_comfy_root()
 
     main_py = os.path.join(comfy_root, 'main.py')
     if not os.path.isfile(main_py):
@@ -59,11 +196,35 @@ def start_comfy(comfy_root: str = None, host: str = DEFAULT_COMFY_HOST, port: in
     except Exception:
         creationflags = 0
 
-    log.info(f"Starting ComfyUI: {' '.join(cmd)}")
+    log_file = comfy_log_path(comfy_root)
+    stderr_handle = subprocess.DEVNULL
+    stderr_target = "DEVNULL"
     try:
-        p = subprocess.Popen(cmd, cwd=comfy_root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=creationflags)
-        # give it a moment to start
-        time.sleep(2.0)
+        stderr_handle = open(log_file, "a", encoding="utf-8")
+        stderr_target = log_file
+    except OSError as e:
+        fallback = f"{log_file}.{int(time.time())}.log"
+        log.warning(f"Could not open ComfyUI log at {log_file} ({e}); trying {fallback}")
+        try:
+            stderr_handle = open(fallback, "a", encoding="utf-8")
+            stderr_target = fallback
+        except OSError as e2:
+            log.warning(f"Could not open fallback ComfyUI log ({e2}); stderr discarded")
+
+    env = os.environ.copy()
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    env.setdefault("PYTHONUTF8", "1")
+
+    log.info(f"Starting ComfyUI: {' '.join(cmd)} (stderr -> {stderr_target})")
+    try:
+        p = subprocess.Popen(
+            cmd,
+            cwd=comfy_root,
+            stdout=subprocess.DEVNULL,
+            stderr=stderr_handle,
+            env=env,
+            creationflags=creationflags,
+        )
         return p
     except Exception as e:
         log.exception(f"Failed to start ComfyUI: {e}")
@@ -286,6 +447,33 @@ def wait_for_result(
             # history response structure: {prompt_id: { "outputs": {node_id: [images...] } } }
             if prompt_id in hist:
                 entry = hist[prompt_id]
+                status = entry.get("status") or {}
+                messages = status.get("messages") or []
+
+                # Fail fast when Comfy reports execution_error so callers can surface
+                # the actual node + error text instead of waiting for timeout.
+                for msg in messages:
+                    if not isinstance(msg, list) or len(msg) < 2:
+                        continue
+                    msg_type, msg_payload = msg[0], msg[1]
+                    if msg_type != "execution_error" or not isinstance(msg_payload, dict):
+                        continue
+
+                    node_id = msg_payload.get("node_id")
+                    node_type = msg_payload.get("node_type")
+                    exception_message = msg_payload.get("exception_message", "Unknown ComfyUI execution error")
+                    exception_type = msg_payload.get("exception_type")
+
+                    details = [f"ComfyUI execution_error for prompt_id={prompt_id}"]
+                    if node_id is not None:
+                        details.append(f"node_id={node_id}")
+                    if node_type:
+                        details.append(f"node_type={node_type}")
+                    if exception_type:
+                        details.append(f"exception_type={exception_type}")
+
+                    raise RuntimeError(f"{', '.join(details)}: {exception_message}")
+
                 outputs = entry.get("outputs") or {}
                 images: List[Dict[str, Any]] = []
                 # outputs: { node_id: { "images": [ {filename, subfolder, type}, ...] } }
