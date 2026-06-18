@@ -1,72 +1,30 @@
+from __future__ import annotations
+
 import asyncio
-import discord
 import logging
 import random
-import spotipy
-from spotipy.oauth2 import SpotifyClientCredentials
-import yt_dlp as youtube_dl
+from pathlib import Path
+from typing import Optional
+
+import discord
+import wavelink
 from discord.ext import commands, tasks
 from discord.ext.commands import Cog
-from cogs.utils.utils import load_credentials
-
 
 log = logging.getLogger(__name__)
 
-ytdl_format_options = {
-    'format': 'bestaudio/best',
-    'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
-    'restrictfilenames': True,
-    'noplaylist': True,
-    'nocheckcertificate': True,
-    'ignoreerrors': True,
-    'logtostderr': False,
-    'quiet': True,
-    'no_warnings': True,
-    'default_search': 'auto',
-    'source_address': '0.0.0.0',  # bind to ipv4 since ipv6 addresses cause issues sometimes
-    'force_generic_extractor': True,  # Handle tricky URLs
-}
-ffmpeg_options = {
-    'options': '-vn',
-    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 10 -reconnect_on_network_error 1'
-}
-
-ytdl = youtube_dl.YoutubeDL(ytdl_format_options)
 ONE_MEMBER = 1
-credentials = load_credentials()
-DEFAULT_VOLUME = 0.15
+DEFAULT_VOLUME = 100  # Wavelink/Lavalink scale: 100 = 100%, max 1000
 
-# Now Playing embed images: spinning when playing, static when paused/ended
-SPINNING_DISC_GIF = "https://i.makeagif.com/media/5-01-2016/eEcTQ8.gif"
-STATIC_DISC_URL = "https://upload.wikimedia.org/wikipedia/commons/2/22/Vinyl_record.png"
+ASSETS_DIR = Path(__file__).resolve().parent / "assets" / "music"
+SPINNING_DISC_FILE = "spinning_disc.gif"
+STATIC_DISC_FILE = "vinyl_record.png"
 
 
 class MusicEntry:
-    def __init__(self, url, voice_client: discord.VoiceClient, ctx: commands.Context, player=None):
-        self.player = player
-        self.voice_client = voice_client
+    def __init__(self, track: wavelink.Playable, ctx: commands.Context):
+        self.track = track
         self.ctx = ctx
-        self.url = url
-
-
-class YTDLSource(discord.PCMVolumeTransformer):
-    def __init__(self, source, *, data, volume=DEFAULT_VOLUME):
-        super().__init__(source, volume)
-        self.data = data
-        self.title = data.get('title')
-        self.url = data.get('url')
-
-    @classmethod
-    async def from_url(cls, url, *, loop=None, stream=False):
-        loop = loop or asyncio.get_event_loop()
-        data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=not stream))
-
-        if 'entries' in data:
-            # take first item from a playlist
-            data = data['entries'][0]
-
-        filename = data['url'] if stream else ytdl.prepare_filename(data)
-        return cls(discord.FFmpegPCMAudio(filename, **ffmpeg_options), data=data)
 
 
 class NowPlayingView(discord.ui.View):
@@ -77,7 +35,6 @@ class NowPlayingView(discord.ui.View):
         self.cog = cog
         self.entry = entry
         self.message = message
-        # Color repeat/loop/shuffle by state (primary = on)
         for child in self.children:
             cid = getattr(child, "custom_id", None)
             if cid == "np_repeat":
@@ -93,24 +50,22 @@ class NowPlayingView(discord.ui.View):
         return True
 
     def _is_current_np(self, interaction):
-        """True if this view's message is still the active Now Playing for this guild."""
         return self.cog.current_np_message.get(interaction.guild.id) == self.message
 
     async def _refresh_embed(self, interaction):
-        """Update the Now Playing message to reflect current state (repeat, loop, paused)."""
         if not self.message or not self._is_current_np(interaction):
             return
-        voice_client = interaction.guild.voice_client
-        is_paused = voice_client.is_paused() if voice_client else False
+        player = interaction.guild.voice_client
+        is_paused = player.paused if isinstance(player, wavelink.Player) else False
         embed = self.cog.now_playing_embed(self.entry, is_paused=is_paused)
+        files = self.cog.disc_files(is_playing=not is_paused)
         new_view = NowPlayingView(self.cog, self.entry, self.message)
         try:
-            await self.message.edit(embed=embed, view=new_view)
+            await self.message.edit(embed=embed, view=new_view, attachments=files)
         except discord.NotFound:
             pass
 
     async def on_timeout(self):
-        """When the view expires, remove buttons and clear the current NP reference."""
         if self.message:
             guild_id = self.message.guild.id
             self.cog.current_np_message.pop(guild_id, None)
@@ -196,26 +151,44 @@ class NowPlayingView(discord.ui.View):
 
 
 class Music(Cog):
-    """Commands for playing music in voice chat. """
+    """Commands for playing music in voice chat."""
 
     def __init__(self, bot):
         self.bot = bot
+        self._verify_disc_assets()
         self.music_queue = asyncio.Queue()
         self.next_song = asyncio.Event()
         self.music_player.start()
         self.idle_timeout.start()
-        client_id = credentials['spotify_client_id']
-        client_secret = credentials['spotify_secret']
-        auth_manager = SpotifyClientCredentials(client_id=client_id, client_secret=client_secret)
-        self.spotipy = spotipy.Spotify(auth_manager=auth_manager)
 
-        # Player Control Variables
         self.repeat_enabled = False
         self.repeated_entry = None
         self.loop_enabled = False
         self.shuffle_mode = False
-        # One active Now Playing message per guild; invalidated when new song or bot disconnects
         self.current_np_message = {}
+        self._stopping = False
+
+    @staticmethod
+    def _verify_disc_assets() -> None:
+        for name in (SPINNING_DISC_FILE, STATIC_DISC_FILE):
+            path = ASSETS_DIR / name
+            if not path.is_file():
+                raise FileNotFoundError(
+                    f"Missing music asset {path}. Run agent-tools/generate_disc_assets.py once."
+                )
+
+    @staticmethod
+    def disc_asset_name(*, is_playing: bool) -> str:
+        return SPINNING_DISC_FILE if is_playing else STATIC_DISC_FILE
+
+    @classmethod
+    def disc_attachment_url(cls, *, is_playing: bool) -> str:
+        return f"attachment://{cls.disc_asset_name(is_playing=is_playing)}"
+
+    @classmethod
+    def disc_files(cls, *, is_playing: bool) -> list[discord.File]:
+        name = cls.disc_asset_name(is_playing=is_playing)
+        return [discord.File(ASSETS_DIR / name, filename=name)]
 
     async def reset_player_controls(self):
         self.repeat_enabled = False
@@ -223,28 +196,38 @@ class Music(Cog):
         self.loop_enabled = False
         self.shuffle_mode = False
 
+    def _lavalink_ready(self) -> bool:
+        return bool(wavelink.Pool.nodes)
+
+    def _get_player(self, guild: discord.Guild) -> wavelink.Player | None:
+        vc = guild.voice_client
+        if isinstance(vc, wavelink.Player):
+            return vc
+        return None
+
     async def invalidate_current_np(self, guild_id: int, entry: MusicEntry = None):
-        """Remove buttons from the current Now Playing message. If entry is given (song ended), show 'ended' embed with static disc."""
         message = self.current_np_message.pop(guild_id, None)
         if not message:
             return
         try:
             if entry is not None:
                 ended_embed = self.now_playing_ended_embed(entry)
-                await message.edit(embed=ended_embed, view=None)
+                await message.edit(
+                    embed=ended_embed,
+                    view=None,
+                    attachments=self.disc_files(is_playing=False),
+                )
             else:
                 await message.edit(view=None)
         except (discord.NotFound, discord.HTTPException):
             pass
 
     async def get_entry(self):
-        # If repeat is enabled get the stored repeated entry if there is one
         if self.repeat_enabled:
             entry = self.repeated_entry if self.repeated_entry else await self.music_queue.get()
             if not self.repeated_entry:
                 self.repeated_entry = entry
             return entry
-        # Shuffle mode: next song is a random pick from the queue
         if self.shuffle_mode:
             items = []
             while True:
@@ -259,42 +242,67 @@ class Music(Cog):
             for e in items:
                 await self.music_queue.put(e)
             return entry
-        entry = await self.music_queue.get()
-        return entry
+        return await self.music_queue.get()
+
+    def _signal_next_song(self):
+        self.bot.loop.call_soon_threadsafe(self.next_song.set)
+
+    @commands.Cog.listener()
+    async def on_wavelink_track_end(self, payload: wavelink.TrackEndEventPayload):
+        if self._stopping:
+            return
+        player = payload.player
+        if not player or not player.guild:
+            return
+        if self.current_np_message.get(player.guild.id) is None and not self.repeat_enabled:
+            return
+        self._signal_next_song()
+
+    @commands.Cog.listener()
+    async def on_wavelink_track_exception(self, payload: wavelink.TrackExceptionEventPayload):
+        log.error("Track exception: %s", payload.exception)
+        self._signal_next_song()
 
     @tasks.loop(seconds=1)
     async def music_player(self):
         self.next_song.clear()
         entry = await self.get_entry()
 
-        # If loop is enabled, put it back into the queue
         if self.loop_enabled and not self.repeat_enabled:
             await self.music_queue.put(entry)
 
         if await self.bot_is_alone(entry.ctx):
             return
 
+        player = self._get_player(entry.ctx.guild)
+        if not player:
+            log.error("No Wavelink player for guild %s", entry.ctx.guild.id)
+            self._signal_next_song()
+            return
+
         try:
-            entry.player = await YTDLSource.from_url(entry.url, loop=self.bot.loop, stream=True)
             await self.invalidate_current_np(entry.ctx.guild.id)
             embed = self.now_playing_embed(entry)
             view = NowPlayingView(self, entry)
-            msg = await entry.ctx.send(embed=embed, view=view)
+            msg = await entry.ctx.send(
+                embed=embed,
+                view=view,
+                files=self.disc_files(is_playing=True),
+            )
             view.message = msg
             self.current_np_message[entry.ctx.guild.id] = msg
-            entry.voice_client.play(entry.player, after=self.play_next_entry)
-            # If repeat was enabled, make sure that we store the current entry to the repeated entry
+
+            await player.play(entry.track, volume=DEFAULT_VOLUME)
             if self.repeat_enabled:
                 self.repeated_entry = entry
         except Exception as e:
-            log.error(f"Unexpected error while playing {entry.url}: {e}")
+            log.error("Unexpected error while playing %s: %s", entry.track.uri, e)
             await self.error_playing_embed(entry)
-            # If there was an error playing the song for some reason skip to the next song
             self.repeated_entry = None
-            self.play_next_entry(e)
+            self._signal_next_song()
+            return
 
         await self.next_song.wait()
-        # Song ended: remove buttons and show static "ended" state so only one NP is active
         await self.invalidate_current_np(entry.ctx.guild.id, entry=entry)
 
     @tasks.loop(seconds=30)
@@ -310,7 +318,6 @@ class Music(Cog):
         await self.bot.wait_until_ready()
 
     async def bot_is_alone(self, ctx):
-        """If bot is alone, but we are going to keep playing music, return True to stop playing music."""
         number_of_members = len(ctx.voice_client.channel.voice_states)
         if number_of_members <= ONE_MEMBER:
             while not self.music_queue.empty():
@@ -324,30 +331,32 @@ class Music(Cog):
             return True
         return False
 
-    async def error_playing_embed(self, entry):
+    async def error_playing_embed(self, entry: MusicEntry):
         embed = discord.Embed(
             title='Error While Playing:',
-            description=entry.url,
+            description=entry.track.uri or str(entry.track),
             colour=discord.Colour.blue(),
         )
         await entry.ctx.send(embed=embed)
 
-    def now_playing_embed(self, entry, is_paused=False):
+    def now_playing_embed(self, entry: MusicEntry, is_paused=False):
+        track = entry.track
         is_playing = not is_paused
-        # Spinning disc when playing, static when paused
-        disc_url = SPINNING_DISC_GIF if is_playing else STATIC_DISC_URL
+        disc_url = self.disc_attachment_url(is_playing=is_playing)
 
         if is_paused:
             status_line = '⏸️ **Paused**'
             colour = discord.Colour.orange()
         else:
             status_line = '▶️ **Playing**'
-            colour = discord.Colour(0x1DB954)  # Spotify green
+            colour = discord.Colour(0x1DB954)
 
         embed = discord.Embed(colour=colour, timestamp=discord.utils.utcnow())
         embed.set_author(name='Now Playing', icon_url=disc_url)
         embed.set_image(url=disc_url)
-        embed.add_field(name='Track', value=entry.player.title, inline=False)
+        embed.add_field(name='Track', value=track.title, inline=False)
+        if track.author:
+            embed.add_field(name='Artist', value=track.author, inline=True)
         embed.add_field(name='Status', value=status_line, inline=True)
         embed.add_field(name='In queue', value=str(self.music_queue.qsize()), inline=True)
         embed.add_field(name='Requested by', value=entry.ctx.message.author.mention, inline=True)
@@ -362,38 +371,30 @@ class Music(Cog):
             ) or '—',
             inline=False,
         )
-        webpage_url = self._get_value(entry, 'webpage_url')
-        embed.add_field(name='Link', value=webpage_url, inline=False)
-        thumb = self._get_value(entry, 'thumbnail')
-        if thumb != 'No thumbnail specified':
-            embed.set_thumbnail(url=thumb)
+        if track.uri:
+            embed.add_field(name='Link', value=track.uri, inline=False)
+        if track.artwork:
+            embed.set_thumbnail(url=track.artwork)
         embed.set_footer(text='Use the buttons below to control playback')
         return embed
 
-    def now_playing_ended_embed(self, entry):
-        """Embed shown when playback has ended (buttons removed); static disc."""
+    def now_playing_ended_embed(self, entry: MusicEntry):
+        track = entry.track
         embed = discord.Embed(
             colour=discord.Colour.dark_gray(),
             timestamp=discord.utils.utcnow(),
         )
-        embed.set_author(name='Playback ended', icon_url=STATIC_DISC_URL)
-        embed.set_image(url=STATIC_DISC_URL)
-        embed.add_field(name='Last played', value=entry.player.title, inline=False)
+        disc_url = self.disc_attachment_url(is_playing=False)
+        embed.set_author(name='Playback ended', icon_url=disc_url)
+        embed.set_image(url=disc_url)
+        embed.add_field(name='Last played', value=track.title, inline=False)
         embed.add_field(name='Requested by', value=entry.ctx.message.author.mention, inline=True)
-        thumb = self._get_value(entry, 'thumbnail')
-        if thumb != 'No thumbnail specified':
-            embed.set_thumbnail(url=thumb)
+        if track.artwork:
+            embed.set_thumbnail(url=track.artwork)
         embed.set_footer(text='Queue another track to keep the party going')
         return embed
 
-    def _get_value(self, entry, value):
-        try:
-            return entry.player.data[value]
-        except KeyError:
-            return 'No {} specified'.format(value)
-
     def _same_voice_check(self, interaction):
-        """Returns True if the user is in the same voice channel as the bot."""
         voice_client = interaction.guild.voice_client
         if not voice_client or not voice_client.channel:
             return False
@@ -405,34 +406,37 @@ class Music(Cog):
         if self.repeat_enabled:
             await interaction.response.send_message("Can't skip while Repeat is enabled!", ephemeral=True)
             return
-        voice_client = interaction.guild.voice_client
-        if voice_client and voice_client.is_playing():
-            voice_client.stop()
+        player = self._get_player(interaction.guild)
+        if player and player.playing:
+            await player.skip(force=True)
         await interaction.response.defer()
 
     async def _button_stop(self, interaction):
+        self._stopping = True
         while not self.music_queue.empty():
             self.music_queue.get_nowait()
-        voice_client = interaction.guild.voice_client
-        if voice_client and (voice_client.is_playing() or voice_client.is_paused()):
-            voice_client.stop()
+        player = self._get_player(interaction.guild)
+        if player and (player.playing or player.paused):
+            player.queue.clear()
+            await player.disconnect()
         guild_id = interaction.guild.id
-        await voice_client.disconnect()
         await self.invalidate_current_np(guild_id)
+        self._signal_next_song()
+        self._stopping = False
         await interaction.response.defer()
 
     async def _button_pause(self, interaction):
-        voice_client = interaction.guild.voice_client
-        if voice_client and voice_client.is_playing():
-            voice_client.pause()
+        player = self._get_player(interaction.guild)
+        if player and player.playing:
+            await player.pause(True)
             await interaction.response.defer()
         else:
             await interaction.response.send_message("Nothing is playing.", ephemeral=True)
 
     async def _button_resume(self, interaction):
-        voice_client = interaction.guild.voice_client
-        if voice_client and voice_client.is_paused():
-            voice_client.resume()
+        player = self._get_player(interaction.guild)
+        if player and player.paused:
+            await player.pause(False)
             await interaction.response.defer()
         else:
             await interaction.response.send_message("Player is not paused.", ephemeral=True)
@@ -454,82 +458,138 @@ class Music(Cog):
         self.shuffle_mode = not self.shuffle_mode
         await interaction.response.defer()
 
-    def play_next_entry(self, error):
-        log.warning('Player error: %s' % error) if error else None
-        self.bot.loop.call_soon_threadsafe(self.next_song.set)
-
     @music_player.before_loop
     async def before_music(self):
         await self.bot.wait_until_ready()
 
     @commands.command()
     async def join(self, ctx):
-        """Joins the voice channel. """
+        """Joins the voice channel."""
         pass
 
     @commands.group(invoke_without_command=True)
     async def play(self, ctx, *, url):
-        """Plays a youtube url or spotify playlist/album."""
+        """Plays a URL or search query (YouTube, Spotify, SoundCloud, etc.)."""
         await self._play(ctx, url)
 
     @play.command(name="shuffle")
     async def play_shuffle(self, ctx, *, url):
-        """Plays a youtube url or spotify album/playlist and shuffles before playing."""
-        await self._play(ctx, url, shuffle=True)
+        """Plays and shuffles a playlist or album before queuing."""
+        await self._play(ctx, url, shuffle=True, expand_collection=True)
 
     @play.command(name="playlist")
     async def play_playlist(self, ctx, *, url):
-        """Plays a YouTube playlist or Spotify playlist/album."""
-        await self._play(ctx, url)
+        """Plays a playlist or album from YouTube or Spotify."""
+        await self._play(ctx, url, expand_collection=True)
 
-    def get_from_youtube_playlist(self, url):
-        """Extracts a list of video URLs from a YouTube playlist."""
+    @staticmethod
+    def _is_url(query: str) -> bool:
+        q = query.strip().lower()
+        return q.startswith(("http://", "https://"))
+
+    async def _search(self, query: str, source: Optional[str] = None):
         try:
-            # Configure yt_dlp to extract only info without downloading
-            playlist_info = ytdl.extract_info(url, download=False)
-            if 'entries' not in playlist_info:
-                raise Exception("Not a valid YouTube playlist")
+            if source is None:
+                result = await wavelink.Playable.search(query)
+            else:
+                result = await wavelink.Playable.search(query, source=source)
+        except wavelink.LavalinkLoadException as e:
+            log.warning("Lavalink could not load %r via %s: %s", query, source or "url", e)
+            return None
+        return result if result else None
 
-            # Extract video URLs from playlist entries
-            return_list = [entry['webpage_url'] for entry in playlist_info['entries'] if entry]
-            return return_list
-        except Exception as e:
-            log.warning(f"Failed to parse YouTube playlist: {e}")
+    @staticmethod
+    def _pick_best_track(query: str, tracks: list[wavelink.Playable]) -> wavelink.Playable | None:
+        if not tracks:
+            return None
+        query_lower = query.lower()
+        query_words = {word for word in query_lower.split() if len(word) > 2}
+
+        def score(track: wavelink.Playable) -> int:
+            title = (track.title or "").lower()
+            if title in query_lower or query_lower in title:
+                return 1000
+            title_words = {word for word in title.split() if len(word) > 2}
+            return len(query_words & title_words)
+
+        return max(tracks, key=score)
+
+    async def _resolve_tracks(
+        self,
+        query: str,
+        *,
+        expand_collection: bool = False,
+    ) -> list[wavelink.Playable]:
+        query = query.strip()
+        result = None
+        is_url = self._is_url(query)
+        single_track = not is_url and not expand_collection
+
+        if is_url:
+            result = await self._search(query)
+        else:
+            # Wavelink defaults to ytmsearch, which we do not have enabled.
+            # Try Spotify first (albums/playlists), then YouTube via LavaSrc ytdlp.
+            for source in ("spsearch", "ytsearch"):
+                result = await self._search(query, source=source)
+                if result:
+                    log.info("Resolved %r via %s", query, source)
+                    break
+
+        if not result:
             return []
 
-    async def _play(self, ctx, url, shuffle=False):
+        if isinstance(result, wavelink.Playlist):
+            tracks = list(result.tracks)
+            if single_track:
+                best = self._pick_best_track(query, tracks)
+                return [best] if best else []
+            return tracks
+
+        tracks = list(result)
+        if single_track:
+            best = self._pick_best_track(query, tracks)
+            return [best] if best else []
+        return tracks
+
+    async def _play(self, ctx, url, shuffle=False, expand_collection=False):
+        if not self._lavalink_ready():
+            embed = discord.Embed(
+                title='Music unavailable',
+                description='Lavalink is not connected. Bot owner: `!lavalink start`',
+                colour=discord.Colour.red(),
+            )
+            await ctx.send(embed=embed)
+            return
+
         async with ctx.typing():
-            if 'spotify' in url:
-                music_list = self.get_from_spotify(url)
-            elif 'youtube.com/playlist' in url or 'list=' in url:
-                music_list = self.get_from_youtube_playlist(url)
-                if not music_list:
-                    embed = discord.Embed(
-                        title='Error',
-                        description='Failed to parse YouTube playlist. It may be private, unavailable, or not a valid playlist.',
-                        colour=discord.Colour.red()
-                    )
-                    await ctx.send(embed=embed)
-                    return
-            else:
-                # Single item in music list
-                music_list = list()
-                music_list.append(url)
+            try:
+                tracks = await self._resolve_tracks(url, expand_collection=expand_collection)
+            except Exception as e:
+                log.warning("Failed to resolve tracks for %s: %s", url, e)
+                tracks = []
+
+            if not tracks:
+                embed = discord.Embed(
+                    title='Error',
+                    description='Could not find any playable tracks for that query.',
+                    colour=discord.Colour.red(),
+                )
+                await ctx.send(embed=embed)
+                return
 
             if shuffle:
-                random.shuffle(music_list)
+                random.shuffle(tracks)
 
-            for url in music_list:
-                entry = MusicEntry(url, ctx.voice_client, ctx)
+            for track in tracks:
+                entry = MusicEntry(track, ctx)
                 await self.music_queue.put(entry)
 
-            music_list_length = len(music_list)
-            description = url if music_list_length == 1 else '{} songs'.format(music_list_length)
-
+            description = url if len(tracks) == 1 else '{} songs'.format(len(tracks))
             embed = discord.Embed(
                 title='Queued up',
                 description=description,
-                colour=discord.Colour.blue()
+                colour=discord.Colour.blue(),
             )
 
         await ctx.send(embed=embed)
@@ -550,53 +610,24 @@ class Music(Cog):
 
         await ctx.message.add_reaction('👍')
 
-    def get_from_spotify(self, url):
-        """Use Spotipy to get a list of songs from a spotify. """
-        try:
-            return_list = self._get_playlist_from_spotify(url)
-        except spotipy.SpotifyException:
-            return_list = self._get_playlist_from_album(url)
-
-        return return_list
-
-    def _get_playlist_from_spotify(self, url):
-        fields = 'items.track.name,items.track.artists'
-        music_list = self.spotipy.playlist_items(url, fields=fields, additional_types=['track'])
-        return_list = list()
-        for track in music_list['items']:
-            url_info = ''
-            url_info += '{} '.format(track['track']['name'])
-            for artist in track['track']['artists']:
-                url_info += '{} '.format(artist['name'])
-            url_info += 'song music'
-            return_list.append(url_info)
-        return return_list
-
-    def _get_playlist_from_album(self, url):
-        music_list = self.spotipy.album_tracks(url)
-        return_list = list()
-        for track in music_list['items']:
-            url_info = ''
-            url_info += '{} '.format(track['name'])
-            for artist in track['artists']:
-                url_info += '{} '.format(artist['name'])
-            url_info += 'song music'
-            return_list.append(url_info)
-        return return_list
-
     @commands.command()
     async def volume(self, ctx, volume: int):
-        """Adjust the bot's voice volume (15 is the default)."""
-        original = int(ctx.voice_client.source.volume * 100)
-        ctx.voice_client.source.volume = volume / 100
+        """Adjust the bot's voice volume (0-100, default 100)."""
+        player = self._get_player(ctx.guild)
+        if not player:
+            await ctx.send("Not connected to a voice channel.")
+            return
 
-        description = '{} -> {}'.format(str(original), str(volume))
+        original = player.volume
+        clamped = max(0, min(100, volume))
+        await player.set_volume(clamped)
+
+        description = '{}% -> {}%'.format(str(original), str(clamped))
         embed = discord.Embed(
             title='Player Volume 🔊',
             description=description,
-            colour=discord.Colour.blue()
+            colour=discord.Colour.blue(),
         )
-
         await ctx.send(embed=embed)
 
     @commands.command()
@@ -606,31 +637,40 @@ class Music(Cog):
             await ctx.send("Can't skip while Repeat is enabled!")
             return
 
-        if ctx.voice_client.is_playing():
-            ctx.voice_client.stop()
+        player = self._get_player(ctx.guild)
+        if player and player.playing:
+            await player.skip(force=True)
 
     @commands.command()
     async def stop(self, ctx):
         """Stops what's playing."""
+        self._stopping = True
         while not self.music_queue.empty():
             self.music_queue.get_nowait()
 
-        if ctx.voice_client and (ctx.voice_client.is_playing() or ctx.voice_client.is_paused()):
-            ctx.voice_client.stop()
+        player = self._get_player(ctx.guild)
+        if player and (player.playing or player.paused):
+            player.queue.clear()
+            await player.disconnect()
 
         guild_id = ctx.guild.id
-        await ctx.voice_client.disconnect()
         await self.invalidate_current_np(guild_id)
+        self._signal_next_song()
+        self._stopping = False
 
     @commands.command()
     async def pause(self, ctx):
         """Pauses the current song."""
-        ctx.voice_client.pause()
+        player = self._get_player(ctx.guild)
+        if player:
+            await player.pause(True)
 
     @commands.command()
     async def resume(self, ctx):
-        """Pauses the current song."""
-        ctx.voice_client.resume()
+        """Resumes the current song."""
+        player = self._get_player(ctx.guild)
+        if player:
+            await player.pause(False)
 
     @commands.command()
     async def repeat(self, ctx):
@@ -654,24 +694,28 @@ class Music(Cog):
             await ctx.send(message.format("disabled"))
 
     async def cog_unload(self):
-        """Clear music queue and disconnect from all voice channels when unloading the cog"""
         while not self.music_queue.empty():
             self.music_queue.get_nowait()
 
         for voice_client in self.bot.voice_clients:
             try:
                 await voice_client.disconnect()
-            except:
+            except Exception:
                 pass
-
 
     @play.before_invoke
     @join.before_invoke
     @play_shuffle.before_invoke
     async def ensure_voice(self, ctx):
+        if not self._lavalink_ready():
+            await ctx.send("Lavalink is not connected. Bot owner: `!lavalink start`")
+            raise commands.CommandError("Lavalink not connected.")
+
         if ctx.voice_client is None:
             if ctx.author.voice:
-                await ctx.author.voice.channel.connect(self_deaf=True, self_mute=True)
+                await ctx.author.voice.channel.connect(
+                    cls=wavelink.Player, self_deaf=True, self_mute=True,
+                )
                 await self.reset_player_controls()
             else:
                 await ctx.send("You are not connected to a voice channel.")

@@ -75,17 +75,61 @@ class PooperScooper(commands.AutoShardedBot):
         activity = discord.Activity(name='humans scoop 💩', type=discord.ActivityType.watching)
         await self.change_presence(activity=activity)
 
+    async def close(self) -> None:
+        task = getattr(self, 'lavalink_bootstrap_task', None)
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        if hasattr(self, 'lavalink_server'):
+            await self.lavalink_server.stop()
+        await super().close()
+
+    async def _bootstrap_lavalink(self) -> None:
+        """Start Lavalink and connect Wavelink without blocking bot/cog startup."""
+        from cogs.utils.lavalink_client import connect_lavalink_with_retry
+
+        if not self.lavalink_settings.enabled:
+            return
+
+        if self.lavalink_settings.auto_start:
+            try:
+                started = await self.lavalink_server.start()
+                if not started:
+                    log.warning(
+                        'Lavalink auto-start failed; will still try connecting in case another instance is running.'
+                    )
+            except Exception as e:
+                log.exception('Failed to start Lavalink: %s', e)
+
+        connected = await connect_lavalink_with_retry(self, credentials)
+        if connected:
+            log.info('Lavalink bootstrap finished; music is available.')
+        else:
+            log.warning('Lavalink bootstrap finished without a Wavelink connection; music is unavailable.')
+
     async def setup_hook(self) -> None:
         """Sets up the bot one time."""
         self.bot_app_info = await self.application_info()
         self.owner_id = self.bot_app_info.owner.id
         self.commands_executed = 0
 
+        from cogs.utils.lavalink_server import LavalinkServerManager, load_lavalink_settings
+
+        self.lavalink_settings = load_lavalink_settings(credentials)
+        self.lavalink_server = LavalinkServerManager(self.lavalink_settings, credentials)
+
         for extension in initial_extensions:
             try:
                 await self.load_extension(extension)
             except Exception as e:
                 log.exception('Failed to load extension {}\n{}'.format(extension, e))
+
+        if self.lavalink_settings.enabled:
+            self.lavalink_bootstrap_task = asyncio.create_task(self._bootstrap_lavalink())
+            log.info('Lavalink bootstrap started in background; bot will come online immediately.')
 
 
 async def run_bot():

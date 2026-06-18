@@ -85,6 +85,15 @@ celerybeat-schedule
 # dotenv
 .env
 
+# Local secrets and generated Lavalink runtime files
+config.json
+lavalink/application.yml
+lavalink/yt-dlp-wrapper.bat
+lavalink/yt-dlp-wrapper.sh
+lavalink/Lavalink.jar
+lavalink/logs/
+lavalink/plugins/
+
 # virtualenv
 .venv
 venv/

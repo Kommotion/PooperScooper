@@ -36,6 +36,86 @@ class General(Cog):
 
         return fmt.format(d=days, h=hours, m=minutes, s=seconds)
 
+    @commands.group(name="lavalink", invoke_without_command=True)
+    @commands.is_owner()
+    async def lavalink(self, ctx: commands.Context):
+        """Owner-only: show Lavalink server status."""
+        await self._send_lavalink_status(ctx)
+
+    @lavalink.command(name="status")
+    @commands.is_owner()
+    async def lavalink_status(self, ctx: commands.Context):
+        """Owner-only: show Lavalink server status."""
+        await self._send_lavalink_status(ctx)
+
+    @lavalink.command(name="start")
+    @commands.is_owner()
+    async def lavalink_start(self, ctx: commands.Context):
+        """Owner-only: start the managed Lavalink server and reconnect Wavelink."""
+        server = getattr(self.bot, "lavalink_server", None)
+        if server is None:
+            await ctx.send("Lavalink manager is not initialized.")
+            return
+        if not server.settings.managed:
+            await ctx.send("Lavalink is configured as external (`lavalink.managed: false`). Start it yourself.")
+            return
+        async with ctx.typing():
+            try:
+                started = await server.start()
+            except Exception as e:
+                log.exception("Lavalink start failed: %s", e)
+                await ctx.send(f"Failed to start Lavalink: {e}")
+                return
+            if not started:
+                await ctx.send("Lavalink did not become ready. Check pooperscooper.log and lavalink/logs/.")
+                return
+            from cogs.utils.lavalink_client import reconnect_lavalink
+            from cogs.utils.utils import load_credentials
+            try:
+                await reconnect_lavalink(self.bot, load_credentials())
+            except Exception as e:
+                log.exception("Wavelink reconnect failed: %s", e)
+                await ctx.send(f"Lavalink started but Wavelink reconnect failed: {e}")
+                return
+        await ctx.send(f"Lavalink is online ({server.status_summary()}).")
+
+    @lavalink.command(name="stop")
+    @commands.is_owner()
+    async def lavalink_stop(self, ctx: commands.Context):
+        """Owner-only: stop the Lavalink process started by this bot."""
+        server = getattr(self.bot, "lavalink_server", None)
+        if server is None:
+            await ctx.send("Lavalink manager is not initialized.")
+            return
+        if not server.settings.managed:
+            await ctx.send("Lavalink is configured as external (`lavalink.managed: false`).")
+            return
+        await server.stop()
+        if server.running:
+            await ctx.send(
+                f"Lavalink may still be running on port {server.settings.port}. "
+                "Check pooperscooper.log for details."
+            )
+            return
+        await ctx.send("Stopped Lavalink.")
+
+    async def _send_lavalink_status(self, ctx: commands.Context):
+        server = getattr(self.bot, "lavalink_server", None)
+        if server is None:
+            await ctx.send("Lavalink manager is not initialized.")
+            return
+        settings = server.settings
+        lines = [
+            f"**Status:** {server.status_summary()}",
+            f"**Enabled:** {settings.enabled}",
+            f"**Managed by bot:** {settings.managed}",
+            f"**Auto-start:** {settings.auto_start}",
+            f"**Kill existing on port:** {settings.kill_existing}",
+            f"**Host:** {settings.host}:{settings.port}",
+        ]
+        embed = discord.Embed(title="Lavalink", description="\n".join(lines), colour=discord.Colour.blue())
+        await ctx.send(embed=embed)
+
     @commands.command()
     async def reload_music(self, ctx):
         """Reload the music cog in case of any errors."""

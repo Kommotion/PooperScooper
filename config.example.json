@@ -1,0 +1,21 @@
+{
+    "token": "YOUR_DISCORD_BOT_TOKEN",
+    "client_id": "YOUR_DISCORD_APPLICATION_ID",
+    "spotify_client_id": "YOUR_SPOTIFY_CLIENT_ID",
+    "spotify_secret": "YOUR_SPOTIFY_CLIENT_SECRET",
+    "lavalink": {
+        "enabled": true,
+        "managed": true,
+        "auto_start": true,
+        "kill_existing": true,
+        "host": "localhost",
+        "port": 2333,
+        "password": "choose-a-strong-password",
+        "java_executable": "java",
+        "directory": "lavalink",
+        "ytdlp_executable": "",
+        "spotify_country_code": "US",
+        "deezer_arl": "",
+        "startup_timeout_seconds": 90
+    }
+}

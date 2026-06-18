@@ -19,9 +19,9 @@ your intention is to use this in your own server.
 
 ## Installing
 
-1. **Install Python 3.8 or higher**
+1. **Install Python 3.11 or higher**
 
-This is a requirement for Discord.py
+Required for Wavelink 3 and discord.py 2.7+
    
 2. **Set up venv**
 
@@ -41,22 +41,52 @@ Create your integrations for Spotify and Discord:
 
 5. **Configure Credentials**
 
-Add credentials to config.json from Spotify/Discord. Place in root dir of bot.
-```j
-{
-  "token": "",
-  "client_id": "",
-  "spotify_client_id": "",
-  "spotify_secret": ""
+Copy `config.example.json` to `config.json` and fill in your credentials. **Do not commit `config.json`.**
+
+6. **Configure Lavalink (Music)**
+
+Music uses a local Lavalink server. The bot can **start and stop it automatically** when configured.
+
+Requirements: **Java 17+**, **FFmpeg** on PATH, **yt-dlp** on PATH.
+
+One-time setup (downloads `Lavalink.jar`):
+
+```powershell
+cd lavalink
+.\setup.ps1
+```
+
+`config.json` Lavalink section (see `config.example.json`):
+
+```json
+"lavalink": {
+  "enabled": true,
+  "managed": true,
+  "auto_start": true,
+  "host": "localhost",
+  "port": 2333,
+  "password": "choose-a-strong-password",
+  "java_executable": "java",
+  "directory": "lavalink",
+  "ytdlp_executable": "",
+  "deezer_arl": ""
 }
 ```
 
-6. **Configure FFMPEG**
+- `managed: true` — bot starts/stops Lavalink with itself
+- `managed: false` — you run Lavalink externally (for shared/public deployments)
+- `auto_start: false` — bot owner starts manually with `!lavalink start`
+
+Owner commands: `!lavalink`, `!lavalink start`, `!lavalink stop`
+
+Secrets (Spotify, Lavalink password) are written to `lavalink/application.yml` at runtime from `config.json` — never commit that file.
+
+7. **Configure FFMPEG**
 
 Download FFMPEG and add the executable to your environment variables
 * https://www.ffmpeg.org/download.html
 
-7. **Install Image Diffusion Models**
+8. **Install Image Diffusion Models**
 
 NOTE: This requires a powerful host platform with at least 4GB+ of VRAM recommended. I recommend doing more research on
 OS/hardware requirements before enabling the image diffusion cog. Currently, I have it running on 8GB VRAM GPU and 64GB RAM system
