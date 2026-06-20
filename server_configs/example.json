@@ -1,0 +1,27 @@
+{
+  "enabled": true,
+  "guild_name": "Your Server Name",
+  "image_diffusion": {
+    "allowed_channel_ids": [],
+    "moderator_role_id": null
+  },
+  "reaction_roles": {
+    "channel_id": null,
+    "emoji_map": {}
+  },
+  "birthday": {
+    "announce_channel_id": null,
+    "announce_channel_name": "general",
+    "timezone": "America/Chicago"
+  },
+  "bingo": {
+    "card_title": "BINGO"
+  },
+  "music": {
+    "dj_role_id": null
+  },
+  "palworld": {
+    "enabled": false,
+    "status_channel_id": null
+  }
+}

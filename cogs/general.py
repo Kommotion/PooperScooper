@@ -250,6 +250,67 @@ class General(Cog):
             else:
                 ret += 1
 
+    @commands.command(name="status")
+    async def status(self, ctx: commands.Context):
+        """Show bot health: uptime, services, and subsystem status."""
+        async with ctx.typing():
+            lines = [
+                f"**Uptime:** {self._get_bot_uptime()}",
+                f"**Guilds:** {len(self.bot.guilds)}",
+                f"**Commands processed:** {self.bot.commands_executed}",
+            ]
+
+            lavalink_server = getattr(self.bot, "lavalink_server", None)
+            lavalink_settings = getattr(self.bot, "lavalink_settings", None)
+            if lavalink_settings and lavalink_settings.enabled:
+                if lavalink_server is not None:
+                    lines.append(f"**Lavalink:** {lavalink_server.status_summary()}")
+                else:
+                    lines.append("**Lavalink:** enabled (manager not ready)")
+                try:
+                    import wavelink
+                    wavelink_status = "connected" if wavelink.Pool.nodes else "not connected"
+                except Exception:
+                    wavelink_status = "unknown"
+                lines.append(f"**Wavelink:** {wavelink_status}")
+            else:
+                lines.append("**Lavalink:** disabled")
+
+            image_cog = self.bot.get_cog("ImageDiffusion")
+            if image_cog is not None:
+                from cogs.utils import comfy_client
+                comfy_status = comfy_client.get_comfy_status()
+                queue_depth = image_cog.image_queue.qsize()
+                lines.append(
+                    f"**ComfyUI:** {'running' if comfy_status['running'] else 'down'} "
+                    f"({comfy_status['host']}:{comfy_status['port']})"
+                )
+                lines.append(f"**Image queue:** {queue_depth}/{image_cog.image_queue.maxsize}")
+                if image_cog.comfy_startup_error:
+                    lines.append(f"**ComfyUI error:** {image_cog.comfy_startup_error}")
+            else:
+                lines.append("**ImageDiffusion:** cog not loaded")
+
+            pal_cog = self.bot.get_cog("PalWorld")
+            if pal_cog is not None:
+                online = await pal_cog.is_server_on()
+                players = await pal_cog.get_player_count() if online else 0
+                lines.append(f"**Palworld:** {'online' if online else 'offline'} ({players} players)")
+            else:
+                lines.append("**Palworld:** cog not loaded")
+
+            from cogs.utils.server_config import get_server_config_manager
+            configured_guilds = get_server_config_manager().list_configured_guild_ids()
+            lines.append(f"**Server configs:** {len(configured_guilds)} guild(s)")
+
+            embed = discord.Embed(
+                title="PooperScooper Status",
+                description="\n".join(lines),
+                colour=discord.Colour.blue(),
+            )
+            embed.set_footer(text=f"PooperScooper {VERSION}")
+            await ctx.send(embed=embed)
+
     @commands.command()
     async def stats(self, ctx):
         """Prints out the stats of the bot."""

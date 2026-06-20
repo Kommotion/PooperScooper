@@ -1,0 +1,13 @@
+{
+  "automatic_restart": true,
+  "wait_before_restart_seconds": 60,
+  "automatic_restart_every_x_hours": 6,
+  "backup_on_restart": false,
+  "backup_every_x_hours": 4,
+  "rotate_after_x_backups": 20,
+  "rotate_logs_every_x_runs": 10,
+  "log_level": "INFO",
+  "operating_system": "windows",
+  "loop_sleep": 30,
+  "status_channel_id": null
+}

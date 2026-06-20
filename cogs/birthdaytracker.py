@@ -1,72 +1,60 @@
+from __future__ import annotations
+
+import datetime
+import logging
+from typing import Optional
+
 import discord
+from discord import app_commands
 from discord.ext import commands, tasks
 from discord.ext.commands import Cog
-from cogs.utils.utils import create_json
-from cogs.utils import utils
-from discord import app_commands
-from cogs.utils.constants import *
-from typing import Optional
-import logging
-import datetime
-import os
-import json
-from pprint import pprint
 
+from cogs.utils.constants import BIRTHDAY_JSON
+
+NO_YEAR = 1945
+from cogs.utils.json_store import LockedJsonFile
+from cogs.utils.server_config import get_guild_config
 
 log = logging.getLogger(__name__)
-MIDNIGHT = datetime.time()
+
 FAILED = "failed"
 REPLACED = "replaced"
 ADDED = "added"
-NO_YEAR = 1945
 BIRTHDAY = "birthday"
 BIRTHDAY_ALREADY_ANNOUNCED = "birthday_announced"
 SERVER_REQUESTED = "server_requested"
-GENERAL = "general"
 
 
 class BirthdayData:
-    """A class containing the birthday data of MTS members. """
     def __init__(self):
-        self.birthday_data = None
-        if not os.path.isfile(BIRTHDAY_JSON):
-            create_json(BIRTHDAY_JSON)
-        self.load_json()
+        self._store = LockedJsonFile(BIRTHDAY_JSON, default=dict, indent=2)
+        self.birthday_data = self._store.read()
 
     def load_json(self) -> None:
-        with open(BIRTHDAY_JSON, "r") as f:
-            self.birthday_data = json.load(f)
+        self.birthday_data = self._store.read()
 
     def dump_json(self) -> None:
-        with open(BIRTHDAY_JSON, "w") as f:
-            json.dump(self.birthday_data, f)
+        self._store.write(self.birthday_data)
 
-    def print_game_data(self) -> None:
-        pprint(self.birthday_data)
-
-    def add_birthday_data(self, user_id: discord.User.id, date: datetime.date, server: discord.Guild.id) -> str:
-        log.debug(f"Adding date: {date} from user id:{user_id} in server id: {server}")
-        user_id = str(user_id)
-
+    def add_birthday_data(self, user_id: int, date: datetime.date, server: int) -> str:
+        user_key = str(user_id)
         try:
-            self.birthday_data[user_id][BIRTHDAY] = date.isoformat()
-            self.birthday_data[user_id][BIRTHDAY_ALREADY_ANNOUNCED] = False
-            self.birthday_data[user_id][SERVER_REQUESTED] = server
-            log.debug(f"Replaced user's data in birthday list")
+            self.birthday_data[user_key][BIRTHDAY] = date.isoformat()
+            self.birthday_data[user_key][BIRTHDAY_ALREADY_ANNOUNCED] = False
+            self.birthday_data[user_key][SERVER_REQUESTED] = server
             status = REPLACED
         except KeyError:
-            log.debug(f"User doesn't have a current birthday, adding to dictionary")
-            self.birthday_data[user_id] = dict()
-            self.birthday_data[user_id][BIRTHDAY] = date.isoformat()
-            self.birthday_data[user_id][BIRTHDAY_ALREADY_ANNOUNCED] = False
-            self.birthday_data[user_id][SERVER_REQUESTED] = server
+            self.birthday_data[user_key] = {
+                BIRTHDAY: date.isoformat(),
+                BIRTHDAY_ALREADY_ANNOUNCED: False,
+                SERVER_REQUESTED: server,
+            }
             status = ADDED
 
         self.dump_json()
         return status
 
-    def delete_birthday_data(self, user_id: discord.User.id) -> None:
-        log.debug(f"Deleting birthday data for {user_id}")
+    def delete_birthday_data(self, user_id: int) -> None:
         try:
             self.load_json()
             del self.birthday_data[str(user_id)]
@@ -74,9 +62,20 @@ class BirthdayData:
         except KeyError:
             pass
 
+    def list_for_guild(self, guild_id: int) -> list[tuple[int, datetime.date, bool]]:
+        entries: list[tuple[int, datetime.date, bool]] = []
+        for user_key, record in self.birthday_data.items():
+            if int(record.get(SERVER_REQUESTED, 0)) != guild_id:
+                continue
+            birthday = datetime.date.fromisoformat(record[BIRTHDAY])
+            announced = bool(record.get(BIRTHDAY_ALREADY_ANNOUNCED, False))
+            entries.append((int(user_key), birthday, announced))
+        entries.sort(key=lambda item: (item[1].month, item[1].day))
+        return entries
+
 
 class BirthdayTracker(Cog):
-    """Commands and loop for tracking birthdays. """
+    """Opt-in birthday tracking and announcements."""
 
     def __init__(self, bot: commands.AutoShardedBot):
         self.bot = bot
@@ -85,102 +84,128 @@ class BirthdayTracker(Cog):
 
     birthday_group = app_commands.Group(name="birthday", description="Track your birthday.")
 
-    @tasks.loop(hours=8)
-    async def check_for_birthdays(self):
-        """Checks if there's any birthdays and sends a message if there is. """
-        log.info("Checking for birthdays")
+    @tasks.loop(hours=1)
+    async def check_for_birthdays(self) -> None:
         self.birthdays.load_json()
-        today = datetime.date.today()
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
 
-        for user in self.birthdays.birthday_data:
-            birthday = datetime.date.fromisoformat(self.birthdays.birthday_data[user][BIRTHDAY])
+        for guild in self.bot.guilds:
+            config = get_guild_config(guild.id)
+            if config is None or not config.enabled:
+                continue
 
-            if birthday.day == today.day and birthday.month == today.month:
-                if self.birthdays.birthday_data[user][BIRTHDAY_ALREADY_ANNOUNCED]:
-                    log.debug(f"It's {user}'s birthday but we've already said happy birthday")
-                    continue
+            local_now = now_utc.astimezone(config.get_birthday_zone())
+            if local_now.hour != 0:
+                continue
 
-                # Find the proper guild
-                requested_guild_id = int(self.birthdays.birthday_data[user][SERVER_REQUESTED])
-                bday_guild = discord.utils.get(self.bot.guilds, id=requested_guild_id)
-                if not bday_guild:
-                    log.warning(f"We've somehow found a guild ID that is not in the bot's list: {requested_guild_id}")
-                    continue
-
-                log.debug(f"Found guild: {bday_guild.name}, {bday_guild.id}")
-
-                # Find the proper channel from the guild
-                bday_channel = discord.utils.get(bday_guild.text_channels, name=GENERAL)
-                if not bday_channel:
-                    bday_channel = bday_guild.system_channel
-
-                log.debug(f"Found channel: {bday_channel.name}, {bday_channel.id}")
-
-                # Find the person that we're mentioning
-                bday_user = discord.utils.get(bday_guild.members, id=int(user))
-                if not bday_user:
-                    log.warning(f"We've somehow found a guild member that's not in the targeted guild")
-                    continue
-
-                # Find out if the person has given their year as a birthday
-                bday_message = f"EVERYBODY WISH {bday_user.mention} A HAPPY BIRTHDAY!"
-                if birthday.year != NO_YEAR:
-                    years_old = today.year - birthday.year
-                    bday_message += f"\nWelcome to being {years_old} years old 😊"
-
-                # Sending out the happy birthday
-                embed = discord.Embed(title=f"HAPPY BIRTHDAY {bday_user.name} 🎉🎂".upper(), description=bday_message,
-                                      colour=discord.Colour.blue())
-                await bday_channel.send(embed=embed)
-                self.birthdays.birthday_data[user][BIRTHDAY_ALREADY_ANNOUNCED] = True
-
-            # Birthday is not today, let's make sure we reset birthday announcement
-            else:
-                self.birthdays.birthday_data[user][BIRTHDAY_ALREADY_ANNOUNCED] = False
+            await self._announce_guild_birthdays(guild, local_now.date())
 
         self.birthdays.dump_json()
         log.info("Finished checking for birthdays")
 
+    async def _announce_guild_birthdays(self, guild: discord.Guild, today: datetime.date) -> None:
+        config = get_guild_config(guild.id)
+        if config is None:
+            return
+
+        bday_channel = config.resolve_birthday_channel(guild)
+        if bday_channel is None:
+            log.warning("No birthday announce channel configured for guild %s", guild.id)
+            return
+
+        for user_key, record in self.birthdays.birthday_data.items():
+            if int(record.get(SERVER_REQUESTED, 0)) != guild.id:
+                continue
+
+            birthday = datetime.date.fromisoformat(record[BIRTHDAY])
+            if birthday.day != today.day or birthday.month != today.month:
+                record[BIRTHDAY_ALREADY_ANNOUNCED] = False
+                continue
+
+            if record.get(BIRTHDAY_ALREADY_ANNOUNCED):
+                continue
+
+            bday_user = guild.get_member(int(user_key))
+            if bday_user is None:
+                log.warning("Birthday user %s not found in guild %s", user_key, guild.id)
+                continue
+
+            bday_message = f"EVERYBODY WISH {bday_user.mention} A HAPPY BIRTHDAY!"
+            if birthday.year != NO_YEAR:
+                years_old = today.year - birthday.year
+                bday_message += f"\nWelcome to being {years_old} years old 😊"
+
+            embed = discord.Embed(
+                title=f"HAPPY BIRTHDAY {bday_user.name} 🎉🎂".upper(),
+                description=bday_message,
+                colour=discord.Colour.blue(),
+            )
+            await bday_channel.send(embed=embed)
+            record[BIRTHDAY_ALREADY_ANNOUNCED] = True
+
     @check_for_birthdays.before_loop
-    async def before_birthday(self):
+    async def before_birthday(self) -> None:
         await self.bot.wait_until_ready()
 
     @birthday_group.command(name="add")
-    async def birthday_add(self, interaction: discord.Interaction, month: int, day: int,
-                           year: Optional[int] = NO_YEAR) -> None:
-        """Adds your birthday to the birthday tracker. If it's your birthday, the server will be reminded (LIMITED TO
-        ONE SERVER).
-
-        Parameters
-        -----------
-        month: int
-            The month of your birthday
-        day: int
-            The day of your birthday
-        year: Optional[int]
-            The year of your birthday (optional)
-        """
+    async def birthday_add(
+        self,
+        interaction: discord.Interaction,
+        month: int,
+        day: int,
+        year: Optional[int] = NO_YEAR,
+    ) -> None:
         birthday = datetime.date(year=year, month=month, day=day)
         if birthday.year != NO_YEAR:
             birthday_string = f"{birthday.month}-{birthday.day}-{birthday.year}"
         else:
             birthday_string = f"{birthday.month}-{birthday.day}"
-        status = self.birthdays.add_birthday_data(interaction.user.id, birthday, interaction.guild.id)
 
+        status = self.birthdays.add_birthday_data(interaction.user.id, birthday, interaction.guild.id)
         if status == ADDED:
             response = f"Your birthday has been added to the tracker as {birthday_string}"
         elif status == REPLACED:
             response = f"Your previous birthday has been replaced in the tracker as {birthday_string}"
         else:
-            response = "Honestly, I have no clue how you got to this point of the flow, wtf did you do?"
+            response = "Something went wrong adding your birthday."
 
         await interaction.response.send_message(response, ephemeral=True)
 
     @birthday_group.command(name="delete")
     async def birthday_delete(self, interaction: discord.Interaction) -> None:
-        """Deletes your birthday from the birthday tracker if it exists."""
         self.birthdays.delete_birthday_data(interaction.user.id)
         await interaction.response.send_message("Your birthday has been removed from the tracker", ephemeral=True)
+
+    @birthday_group.command(name="list", description="List registered birthdays for this server.")
+    @app_commands.default_permissions(manage_guild=True)
+    async def birthday_list(self, interaction: discord.Interaction) -> None:
+        if not interaction.user.guild_permissions.manage_guild:
+            await interaction.response.send_message("You need Manage Server to view the birthday list.", ephemeral=True)
+            return
+
+        entries = self.birthdays.list_for_guild(interaction.guild_id)
+        if not entries:
+            await interaction.response.send_message("No birthdays registered for this server.", ephemeral=True)
+            return
+
+        lines = []
+        for user_id, birthday, _announced in entries:
+            member = interaction.guild.get_member(user_id)
+            name = member.display_name if member else f"User {user_id}"
+            if birthday.year != NO_YEAR:
+                date_text = birthday.strftime("%B %d, %Y")
+            else:
+                date_text = birthday.strftime("%B %d")
+            lines.append(f"**{name}** — {date_text}")
+
+        embed = discord.Embed(
+            title="Registered Birthdays 🎂",
+            description="\n".join(lines[:25]),
+            colour=discord.Colour.blurple(),
+        )
+        if len(lines) > 25:
+            embed.set_footer(text=f"Showing 25 of {len(lines)} entries")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 async def setup(bot):

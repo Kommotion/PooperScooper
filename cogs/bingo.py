@@ -1,375 +1,188 @@
 from __future__ import annotations
 
-import pandas as pd
+import logging
 import random
-import matplotlib.pyplot as plt
-from matplotlib.patches import Rectangle
+
 import matplotlib.patheffects as path_effects
+import matplotlib.pyplot as plt
+import pandas as pd
+from matplotlib.patches import Rectangle
+
 import discord
-from discord.ext import commands, tasks
+from discord import app_commands
+from discord.ext import commands
 from discord.ext.commands import Cog
 
-from cogs.utils.utils import create_json
-from discord import app_commands
-import logging
-import os
-import json
-from pprint import pprint
-from difflib import SequenceMatcher
+from cogs.utils.guild_prompt_list import GuildPromptList, build_list_embeds
+from cogs.utils.server_config import get_guild_config
 
 log = logging.getLogger(__name__)
-BINGO_JSON = 'bingo.json'
-SIMILARITY_THRESHOLD = 0.85
+BINGO_JSON = "bingo.json"
+BINGO_CARD_SIZE = 16
+BINGO_GRID_COLS = 4
 
 
-def wrap_text(text, max_line_length):
+def wrap_text(text: str, max_line_length: int) -> str:
     words = text.split()
-    wrapped_text = ""
+    lines: list[str] = []
     line = ""
 
     for word in words:
         if len(line) + len(word) + 1 <= max_line_length:
-            line += (word + " ")
+            line += f"{word} "
         else:
-            wrapped_text += line.strip() + "\n"
-            line = word + " "
+            lines.append(line.strip())
+            line = f"{word} "
 
-    wrapped_text += line.strip()
-    return wrapped_text
-
-
-class BingoData:
-    """Utility class for accessing Bingo data."""
-    def __init__(self):
-        self.bingo_data = None
-        if not os.path.isfile(BINGO_JSON):
-            create_json(BINGO_JSON)
-        self.load_json()
-
-    def load_json(self) -> None:
-        with open(BINGO_JSON, "r") as f:
-            self.bingo_data = json.load(f)
-
-    def dump_json(self) -> None:
-        with open(BINGO_JSON, "w") as f:
-            json.dump(self.bingo_data, f)
-
-    def print_bingo_data(self) -> None:
-        pprint(self.bingo_data)
-
-
-    async def get_bingo_list(self, guild_id: discord.Guild.id) -> list | None:
-        try:
-            return self.bingo_data[str(guild_id)]
-        except KeyError:
-            return None
-
-    async def _prompt_already_exists(self, bingo_data_lowercase: list, new_prompt: str) -> (bool, str):
-        """
-        :param bingo_data_lowercase: The bingo data in lowercase
-        :param new_prompt: The prompt that is going to be added
-        :return: True if already exists else False, Prompt that matches if True else None
-        """
-        for existing_prompt in bingo_data_lowercase:
-            similarity_ratio = SequenceMatcher(None, existing_prompt, new_prompt).ratio()
-            if similarity_ratio >= SIMILARITY_THRESHOLD:
-                return True, existing_prompt
-        return False, None
-
-    async def add_bingo_data(self, guild_id: discord.Guild.id, prompt: str) -> (bool, str|None):
-        guild_id = str(guild_id)
-        prompt = prompt.strip()
-        lowercase_prompt = prompt.lower()
-        reason = ''
-
-        try:
-            bingo_data_lowercase = [string.lower() for string in self.bingo_data[guild_id]]
-            # If prompt already exists, don't add it
-            already_exists, matching_prompt = await self._prompt_already_exists(bingo_data_lowercase, lowercase_prompt)
-            if already_exists:
-                reason = f"A matching prompt already exists:\n{matching_prompt}"
-                return False, reason
-            self.bingo_data[guild_id].append(prompt)
-        except KeyError:
-            # This is the first time that a prompt has been added to the guild
-            # Therefore we don't need to check for duplicates
-            new_bingo = {
-                guild_id: [prompt]
-            }
-            self.bingo_data.update(new_bingo)
-        except Exception as e:
-            log.debug(f"Unable to add bingo card because: {e}")
-            reason = "An unknown error occurred."
-            return False, reason
-
-        self.dump_json()
-        log.debug("bingo added")
-        return True, reason
-
-    async def remove_bingo_data(self, guild_id: discord.Guild.id, prompt: str) -> bool:
-        guild_id = str(guild_id)
-        prompt = prompt.strip()
-        lowercase_prompt = prompt.lower()
-        log.debug(f"Deleting bingo data for prompt: {prompt}")
-
-        try:
-            bingo_data_lowercase = [string.lower() for string in self.bingo_data[guild_id]]
-            prompt_index = bingo_data_lowercase.index(lowercase_prompt)
-            del self.bingo_data[guild_id][prompt_index]
-        except KeyError:
-            log.warning(f"guild_id is not currently in bingo data: {guild_id}")
-            return False
-        except ValueError:
-            log.warning(f"The prompt was not found in the bingo list:\n {prompt}")
-            return False
-
-        self.dump_json()
-        log.debug("bingo data succesfully removed")
-        return True
+    if line.strip():
+        lines.append(line.strip())
+    return "\n".join(lines)
 
 
 class Bingo(Cog):
-    """Bingo commands. """
+    """Server bingo card commands."""
 
     def __init__(self, bot: commands.AutoShardedBot):
         self.bot = bot
-        self.bingo_data = BingoData()
+        self.prompt_list = GuildPromptList(BINGO_JSON)
 
     bingo_group = app_commands.Group(name="bingo", description="MTS Bingo Card commands.")
 
-    @bingo_group.command(name="add")
+    @bingo_group.command(name="add", description="Add a prompt to the bingo list.")
+    @app_commands.describe(prompt="Bingo prompt to add.")
     async def add_bingo(self, interaction: discord.Interaction, prompt: str) -> None:
-        """Add to the list of bingo cards.
-
-        Parameters
-        -----------
-        prompt: str
-            The Bingo prompt to add to the list of bingo prompts. Example: Angel in a Queen Avi
-        """
-        log.debug(f"Adding bingo from {interaction.user.name} from {interaction.guild.name}")
-        result, reason = await self.bingo_data.add_bingo_data(interaction.guild_id, prompt)
+        result, reason = self.prompt_list.add(interaction.guild_id, prompt)
         if result:
-            title = 'Added your prompt to the bingo list'
+            title = "Added your prompt to the bingo list"
             message = prompt
         else:
-            title = 'ERROR'
-            message = f'Unable to add your prompt to the list because:\n{reason}'
+            title = "ERROR"
+            message = f"Unable to add your prompt because:\n{reason}"
 
-        embed = discord.Embed(
-            title=title,
-            description=message,
-            colour=discord.Colour.blue()
-        )
-
+        embed = discord.Embed(title=title, description=message, colour=discord.Colour.blue())
         await interaction.response.send_message(embed=embed)
 
-    @bingo_group.command(name="list")
+    @bingo_group.command(name="list", description="List bingo prompts for this server.")
     async def list_bingo(self, interaction: discord.Interaction) -> None:
-        """Returns the list of the bingo cards for the server. """
-        bingo_list = await self.bingo_data.get_bingo_list(interaction.guild_id)
-        if not bingo_list:
-            await interaction.response.send_message(f'**No Bingo options exist for your server.**')
+        prompts = self.prompt_list.get_list(interaction.guild_id)
+        if not prompts:
+            await interaction.response.send_message("**No bingo options exist for your server.**")
             return
 
-        log.debug(f'Prompts from {interaction.guild_id}: {bingo_list}')
-        MAX_CHARS = 4096
-        embed_title = 'Prompts for your server\'s Bingo Card'
-        embed_color = discord.Color.blue()
-        embeds = []
-        current_description = ""
-
-        sorted_bingo_list = sorted(bingo_list, key=str.lower)
-
-        for prompt in sorted_bingo_list:
-            new_description = f'{current_description}{prompt}\n'
-
-            if len(new_description) > MAX_CHARS:
-                embed = discord.Embed(title=embed_title, description=current_description, color=embed_color)
-                embeds.append(embed)
-                current_description = f'{prompt}\n'
-            else:
-                current_description = new_description
-
-        # create a new embed with the remaining description (if any)
-        if current_description:
-            embed = discord.Embed(title=embed_title, description=current_description, color=embed_color)
-            embeds.append(embed)
-
-        # reply to the interaction with the first embed
+        embeds = build_list_embeds("Prompts for your server's Bingo Card", prompts)
         await interaction.response.send_message(embed=embeds[0])
-
-        # send the remaining embeds as followups
         for embed in embeds[1:]:
             await interaction.followup.send(embed=embed)
 
-    @bingo_group.command(name="remove")
+    @bingo_group.command(name="remove", description="Remove a prompt from the bingo list.")
+    @app_commands.describe(prompt="Bingo prompt to remove.")
     async def remove_bingo(self, interaction: discord.Interaction, prompt: str) -> None:
-        """Returns the list of the bingo cards for the server.
-
-        Parameters
-        -----------
-        prompt: str
-            The Bingo prompt to remove from the list of bingo prompts. Example: Angel rapping
-        """
-        log.debug(f"Removing bingo from {interaction.user.name} from {interaction.guild.name}")
-        result = await self.bingo_data.remove_bingo_data(interaction.guild_id, prompt)
+        result = self.prompt_list.remove(interaction.guild_id, prompt)
         if result:
             title = "Removed your prompt from the bingo list"
             message = prompt
         else:
             title = "Unable to remove your prompt"
-            message = "Use my /list_bingo command to see if it even exists."
+            message = "Use `/bingo list` to see what exists."
 
-        embed = discord.Embed(
-            title=title,
-            description=message,
-            colour=discord.Colour.blue()
-        )
-
+        embed = discord.Embed(title=title, description=message, colour=discord.Colour.blue())
         await interaction.response.send_message(embed=embed)
 
-    @bingo_group.command(name="generate")
+    @remove_bingo.autocomplete("prompt")
+    async def remove_bingo_autocomplete(
+        self,
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[str]]:
+        return self.prompt_list.autocomplete_choices(interaction.guild_id, current)
+
+    @bingo_group.command(name="generate", description="Generate a 4x4 bingo card.")
     async def generate_bingo_card(self, interaction: discord.Interaction) -> None:
-        """Generates a 4x4 Bingo card. """
-        full_bingo_list = await self.bingo_data.get_bingo_list(interaction.guild_id)
-        if not full_bingo_list:
-            await interaction.response.send_message(f'**No Bingo options exist for your server.**', ephemeral=True)
+        prompts = self.prompt_list.get_list(interaction.guild_id)
+        if not prompts:
+            await interaction.response.send_message(
+                "**No bingo options exist for your server.**",
+                ephemeral=True,
+            )
             return
-        elif len(full_bingo_list) < 16:
-            await interaction.response.send_message("**There are not at least 16 options for a 4x4 Bingo card.**",
-                                                    ephemeral=True)
+        if len(prompts) < BINGO_CARD_SIZE:
+            await interaction.response.send_message(
+                f"**Need at least {BINGO_CARD_SIZE} prompts for a 4x4 bingo card.**",
+                ephemeral=True,
+            )
             return
 
-        # Generate the Bingo card from the full bingo list
-        bingo_card = await self._generate_bingo_card(full_bingo_list)
+        config = get_guild_config(interaction.guild_id)
+        card_title = config.bingo_card_title if config else "BINGO"
+        bingo_card = self._generate_bingo_card(prompts)
+        filename = self._save_bingo_card_as_image(bingo_card, title=card_title)
+        await interaction.response.send_message(file=discord.File(filename), ephemeral=True)
 
-        # Print the Bingo card as a table
-        bingo_card_name = await self.save_bingo_card_as_image(bingo_card)
-        await interaction.response.send_message(file=discord.File(bingo_card_name), ephemeral=True)
-
-    async def _generate_bingo_card(self, full_bingo_list: list) -> list:
-        # Randomly select 25 items from the list
-        selected_items = random.sample(full_bingo_list, 16)
-
-        # Wrap text by inserting newlines at spaces near the max_line_length
+    def _generate_bingo_card(self, prompts: list[str]) -> list[list[str]]:
+        selected_items = random.sample(prompts, BINGO_CARD_SIZE)
         wrapped_items = [wrap_text(item, 20) for item in selected_items]
+        return [wrapped_items[i:i + BINGO_GRID_COLS] for i in range(0, BINGO_CARD_SIZE, BINGO_GRID_COLS)]
 
-        # Arrange items in a 5x5 grid
-        bingo_card = [wrapped_items[i:i + 4] for i in range(0, 16, 4)]
-
-        return bingo_card
-
-    async def save_bingo_card_as_image(self, card, filename="bingo_card.png") -> str:
-        """
-        Generate a visually appealing 4x4 bingo card image without column headers and save it as a PNG.
-
-        Args:
-            card: A 4x4 array or list of lists containing the bingo card entries.
-            filename: The name of the file to save the image as (default: "bingo_card.png").
-
-        Returns:
-            The filename of the saved image.
-        """
-        # Convert the card to a DataFrame (no column headers needed)
+    def _save_bingo_card_as_image(
+        self,
+        card: list[list[str]],
+        *,
+        title: str = "BINGO",
+        filename: str = "bingo_card.png",
+    ) -> str:
         df = pd.DataFrame(card)
+        background_color = "#1e1e2f"
+        title_color = "#bdb722"
 
-        background_color = '#1e1e2f'
-        title_color = '#bdb722'
+        fig, ax = plt.subplots(figsize=(10, 10), facecolor=background_color)
+        plt.title(
+            title,
+            fontsize=36,
+            color=title_color,
+            weight="bold",
+            pad=20,
+            backgroundcolor=background_color,
+            alpha=0.9,
+        )
 
-        # Set up the figure and axis with a slightly smaller size for a 4x4 card
-        fig, ax = plt.subplots(figsize=(10, 10), facecolor=background_color)  # Dark background for contrast
-
-        # Add a title above the table
-        plt.title("MENACES TO SOBRIETY BINGO", fontsize=36, color=title_color, weight='bold',
-                  pad=20, backgroundcolor=background_color, alpha=0.9)
-
-        # Add a table to the plot without column headers
-        table = ax.table(cellText=df.values, cellLoc='center', loc='center', edges='closed')
-
-        # Customize table appearance
+        table = ax.table(cellText=df.values, cellLoc="center", loc="center", edges="closed")
         table.auto_set_font_size(False)
-        table.set_fontsize(21)  # Font size for cell text
-        table.scale(2.1, 10)  # Adjust scale for readability and spacing in a 4x4 grid
+        table.set_fontsize(21)
+        table.scale(2.1, 10)
 
-        # Define a vibrant color palette
-        background_colors = ['#f0f8ff', '#e6f0fa']  # Alternating Alice Blue and lighter blue for cells
-        edge_color = '#2c2f33'  # Dark gray for cell borders
-        text_color = '#000000'  # Black for cell text
+        background_colors = ["#f0f8ff", "#e6f0fa"]
+        edge_color = "#2c2f33"
+        text_color = "#000000"
 
-        # Style the cells with alternating colors and shadows
         for i in range(len(df)):
             for j in range(len(df.columns)):
-                cell = table[i, j]  # No header row, so start at i=0
-                # Alternate background colors for a checkerboard effect
-                cell_color = background_colors[(i + j) % 2]
-                cell.set_facecolor(cell_color)
+                cell = table[i, j]
+                cell.set_facecolor(background_colors[(i + j) % 2])
                 cell.set_edgecolor(edge_color)
-                cell.set_linewidth(2)  # Thicker borders for emphasis
-                cell.set_text_props(fontsize=21, color=text_color, weight='bold', ha='center', va='center')
-                # Add a slight shadow effect to cells
+                cell.set_linewidth(2)
+                cell.set_text_props(fontsize=21, color=text_color, weight="bold", ha="center", va="center")
                 cell.get_text().set_path_effects([
-                    path_effects.withStroke(linewidth=3, foreground='#696969', alpha=0.3)
+                    path_effects.withStroke(linewidth=3, foreground="#696969", alpha=0.3)
                 ])
 
-        # Add a border around the entire table
-        table.set_zorder(10)  # Ensure table is on top
+        table.set_zorder(10)
         table_bbox = table.get_window_extent().transformed(ax.transData.inverted())
         border = Rectangle(
             (table_bbox.x0 - 0.05, table_bbox.y0 - 0.05),
-            table_bbox.width + 0.1, table_bbox.height + 0.1,
-            fill=False, edgecolor=title_color, linewidth=4, zorder=5
+            table_bbox.width + 0.1,
+            table_bbox.height + 0.1,
+            fill=False,
+            edgecolor=title_color,
+            linewidth=4,
+            zorder=5,
         )
         ax.add_patch(border)
+        ax.axis("off")
+        ax.set_facecolor(background_color)
 
-        # Hide axes for a clean look
-        ax.axis('off')
-
-        # Add a subtle background to the figure
-        ax.set_facecolor('#1e1e2f')  # Matches figure background
-
-        # Save the figure with high quality
-        plt.savefig(filename, bbox_inches='tight', pad_inches=0.2, dpi=300, facecolor=fig.get_facecolor())
+        plt.savefig(filename, bbox_inches="tight", pad_inches=0.2, dpi=300, facecolor=fig.get_facecolor())
         plt.close()
         return filename
-
-        # # Set up the plot
-        # fig, ax = plt.subplots(figsize=(10, 10))
-        #
-        # # Add a table
-        # table = ax.table(cellText=df.values, colLabels=df.columns, cellLoc='center', loc='center', edges='closed')
-        #
-        # # Customize table appearance
-        # table.auto_set_font_size(False)
-        # table.set_fontsize(16)
-        # table.scale(2, 9)  # Adjust scale to make the table bigger and more readable
-        #
-        # # Use a color palette for the cells
-        # background_color = '#f0f8ff'  # Alice Blue
-        # header_color = '#ff4500'  # Orange Red
-        # edge_color = '#696969'  # Dim Gray
-        # text_color = '#000000'  # Black
-        #
-        # # Color cells
-        # for i in range(len(df)):
-        #     for j in range(len(df.columns)):
-        #         cell = table[i + 1, j]
-        #         cell.set_text_props(fontsize=16, color=text_color, weight='bold')
-        #         cell.set_facecolor(background_color)
-        #         cell.set_edgecolor(edge_color)
-        #
-        # # Color header
-        # for j in range(len(df.columns)):
-        #     header_cell = table[0, j]
-        #     header_cell.set_facecolor(header_color)
-        #     header_cell.set_text_props(color='white', weight='bold', fontsize=20)
-        #
-        # # Hide axes
-        # ax.axis('off')
-        #
-        # # Save the figure
-        # plt.savefig(filename, bbox_inches='tight', pad_inches=0.1, dpi=300)
-        # plt.close()
-        # return filename
 
 
 async def setup(bot) -> None:

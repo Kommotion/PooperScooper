@@ -11,6 +11,9 @@ import wavelink
 from discord.ext import commands, tasks
 from discord.ext.commands import Cog
 
+from cogs.utils.lavalink_server import LavalinkServerManager, load_lavalink_settings
+from cogs.utils.utils import load_credentials
+
 log = logging.getLogger(__name__)
 
 ONE_MEMBER = 1
@@ -167,6 +170,8 @@ class Music(Cog):
         self.shuffle_mode = False
         self.current_np_message = {}
         self._stopping = False
+        self._lavalink_bootstrap_task: asyncio.Task | None = None
+        self._lavalink_shutdown_done = False
 
     @staticmethod
     def _verify_disc_assets() -> None:
@@ -204,6 +209,44 @@ class Music(Cog):
         if isinstance(vc, wavelink.Player):
             return vc
         return None
+
+    async def _connect_to_author(self, ctx: commands.Context) -> wavelink.Player | None:
+        """Join the command author's voice channel if not already connected."""
+        player = self._get_player(ctx.guild)
+        if player:
+            return player
+
+        if not ctx.author.voice or not ctx.author.voice.channel:
+            return None
+
+        channel = ctx.author.voice.channel
+        try:
+            player = await channel.connect(cls=wavelink.Player, self_deaf=True, self_mute=True)
+            log.info("Joined voice channel %s in %s", channel.name, ctx.guild.name)
+            return player
+        except Exception as e:
+            log.error("Failed to join voice channel %s: %s", channel.name, e)
+            return None
+
+    async def _ensure_connected_for_entry(self, entry: MusicEntry) -> bool:
+        """Ensure the bot is in a voice channel before playing a queued track."""
+        ctx = entry.ctx
+        player = self._get_player(ctx.guild)
+        if player:
+            if ctx.author.voice and ctx.author.voice.channel and player.channel != ctx.author.voice.channel:
+                await player.move_to(ctx.author.voice.channel)
+            return True
+
+        player = await self._connect_to_author(ctx)
+        if player:
+            return True
+
+        log.warning(
+            "Skipping queued track %r; could not join a voice channel (requester left VC?)",
+            entry.track.title,
+        )
+        self._signal_next_song()
+        return False
 
     async def invalidate_current_np(self, guild_id: int, entry: MusicEntry = None):
         message = self.current_np_message.pop(guild_id, None)
@@ -254,8 +297,6 @@ class Music(Cog):
         player = payload.player
         if not player or not player.guild:
             return
-        if self.current_np_message.get(player.guild.id) is None and not self.repeat_enabled:
-            return
         self._signal_next_song()
 
     @commands.Cog.listener()
@@ -265,11 +306,27 @@ class Music(Cog):
 
     @tasks.loop(seconds=1)
     async def music_player(self):
+        try:
+            await self._run_music_player()
+        except Exception:
+            log.exception("Unhandled error in music_player; task will continue")
+
+    async def _run_music_player(self):
         self.next_song.clear()
+        if self.music_queue.empty() and not self.repeat_enabled:
+            connected = [vc for vc in self.bot.voice_clients if vc.channel]
+            if connected:
+                log.info(
+                    "Music queue empty; waiting for next !play (%s voice channel(s) connected)",
+                    len(connected),
+                )
         entry = await self.get_entry()
 
         if self.loop_enabled and not self.repeat_enabled:
             await self.music_queue.put(entry)
+
+        if not await self._ensure_connected_for_entry(entry):
+            return
 
         if await self.bot_is_alone(entry.ctx):
             return
@@ -318,7 +375,11 @@ class Music(Cog):
         await self.bot.wait_until_ready()
 
     async def bot_is_alone(self, ctx):
-        number_of_members = len(ctx.voice_client.channel.voice_states)
+        vc = ctx.voice_client
+        if vc is None or vc.channel is None:
+            return False
+
+        number_of_members = len(vc.channel.voice_states)
         if number_of_members <= ONE_MEMBER:
             while not self.music_queue.empty():
                 self.music_queue.get_nowait()
@@ -395,6 +456,13 @@ class Music(Cog):
         return embed
 
     def _same_voice_check(self, interaction):
+        from cogs.utils.server_config import get_guild_config
+
+        config = get_guild_config(interaction.guild.id)
+        if config and config.music_dj_role_id:
+            if any(role.id == config.music_dj_role_id for role in interaction.user.roles):
+                return True
+
         voice_client = interaction.guild.voice_client
         if not voice_client or not voice_client.channel:
             return False
@@ -693,7 +761,63 @@ class Music(Cog):
         else:
             await ctx.send(message.format("disabled"))
 
+    async def cog_load(self) -> None:
+        settings = getattr(self.bot, "lavalink_settings", None)
+        if settings and settings.enabled:
+            self._lavalink_bootstrap_task = asyncio.create_task(self._bootstrap_lavalink())
+            log.info("Lavalink bootstrap deferred until Discord is ready (music cog only).")
+
+    async def shutdown_lavalink(self) -> None:
+        if self._lavalink_shutdown_done:
+            return
+        self._lavalink_shutdown_done = True
+
+        task = self._lavalink_bootstrap_task
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        server = getattr(self.bot, "lavalink_server", None)
+        if server is not None:
+            await server.stop()
+
+    async def _bootstrap_lavalink(self) -> None:
+        from cogs.utils.lavalink_client import connect_lavalink_with_retry
+
+        await self.bot.wait_until_ready()
+
+        settings = getattr(self.bot, "lavalink_settings", None)
+        if settings is None or not settings.enabled:
+            return
+
+        server = getattr(self.bot, "lavalink_server", None)
+        if server is None:
+            log.warning("Lavalink manager missing; skipping music bootstrap.")
+            return
+
+        if settings.auto_start:
+            try:
+                started = await server.start(wait=False)
+                if not started:
+                    log.warning(
+                        "Lavalink auto-start did not spawn a process; "
+                        "will still try connecting in case another instance is running."
+                    )
+            except Exception as e:
+                log.exception("Failed to start Lavalink: %s", e)
+
+        connected = await connect_lavalink_with_retry(self.bot, load_credentials())
+        if connected:
+            log.info("Lavalink bootstrap finished; music is available.")
+        else:
+            log.warning("Lavalink bootstrap finished without a Wavelink connection; music is unavailable.")
+
     async def cog_unload(self):
+        await self.shutdown_lavalink()
+
         while not self.music_queue.empty():
             self.music_queue.get_nowait()
 
@@ -712,14 +836,13 @@ class Music(Cog):
             raise commands.CommandError("Lavalink not connected.")
 
         if ctx.voice_client is None:
-            if ctx.author.voice:
-                await ctx.author.voice.channel.connect(
-                    cls=wavelink.Player, self_deaf=True, self_mute=True,
-                )
-                await self.reset_player_controls()
-            else:
+            if not ctx.author.voice or not ctx.author.voice.channel:
                 await ctx.send("You are not connected to a voice channel.")
                 raise commands.CommandError("Author not connected to a voice channel.")
+            if not await self._connect_to_author(ctx):
+                await ctx.send("Failed to join your voice channel.")
+                raise commands.CommandError("Failed to join voice channel.")
+            await self.reset_player_controls()
         elif ctx.author.voice:
             if ctx.author.voice.channel != ctx.voice_client.channel:
                 await ctx.voice_client.move_to(ctx.author.voice.channel)
@@ -753,4 +876,7 @@ class Music(Cog):
 
 
 async def setup(bot):
+    credentials = load_credentials()
+    bot.lavalink_settings = load_lavalink_settings(credentials)
+    bot.lavalink_server = LavalinkServerManager(bot.lavalink_settings, credentials)
     await bot.add_cog(Music(bot))

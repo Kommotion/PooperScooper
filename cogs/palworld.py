@@ -1,49 +1,44 @@
-from discord.ext import tasks
-from discord.ext.commands import Cog
+from __future__ import annotations
+
+import asyncio
+import datetime
+import json
 import logging
 import os
-import asyncio
-import psutil
-import subprocess
+import time
 from enum import Enum
-from cogs.utils.checks import *
-from cogs.utils.utils import load_credentials
-from cogs.utils.utils import *
+from pathlib import Path
 
-# Palworld utils related imports
+import discord
+from discord import app_commands
+from discord.ext import commands, tasks
+from discord.ext.commands import Cog
+from loguru import logger
+
+from cogs.utils.checks import is_menace_guild
+from cogs.utils.constants import (
+    MENACES_TO_SOBRIETY_SERVER_ID,
+    ONE_HOUR_IN_SECONDS,
+    PALWORLD_JSON,
+    PALWORLD_UTIL_PATH,
+    SECONDS_IN_HOUR,
+    THIRTY_SECONDS,
+    THUMBS_UP_EMOJI,
+)
+from cogs.utils.json_store import LockedJsonFile
+from cogs.utils.palworld_settings import load_palworld_settings
 from cogs.utils.palworld_utils.palworld_util import PalworldUtil
 from cogs.utils.palworld_utils.util import check_for_process
-import sys
-import time
-import json
-import datetime
-from pathlib import Path
-from loguru import logger
+from cogs.utils.server_config import get_guild_config
+from cogs.utils.utils import calculate_hours_elapsed
 
 log = logging.getLogger(__name__)
 
-SERVER_WATCHER_IDENTIFIER = "palworld"
-
-# User variables
-AUTOMATIC_RESTART = True  # Automatically restart the server if the process isn't found.
-WAIT_BEFORE_RESTART_SECONDS = 60  # Seconds to wait/warn before restart process.
-AUTOMATIC_RESTART_EVERY_X_HOURS = 6  # -1 if you don't want to restart on a timer.
-BACKUP_ON_RESTART = False  # Save a backup when the server restarts.
-BACKUP_EVERY_X_HOURS = 4  # -1 if you don't want to backup on a timer.
-ROTATE_AFTER_X_BACKUPS = 20  # -1 if you don't want to rotate backups.
-ROTATE_LOGS_EVERY_X_RUNS = 10  # -1 if you don't want to log to file.
-LOG_LEVEL = "INFO"
-base_dir = os.path.dirname(os.path.abspath(__file__))
-LOGS_DIR = os.path.join(base_dir, "utils", "palworld_utils", "logs")
-OPERATING_SYSTEM = "windows"  # Change to "linux" if needed.
-SECONDS_IN_HOUR = 3600
-LOOP_SLEEP = 30
-
-base_dir = os.path.dirname(os.path.abspath(__file__))
-SERVER_TIMES_FILENAME = os.path.join(PALWORLD_UTIL_PATH, 'server_times.json')
+LOGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "utils", "palworld_utils", "logs")
+SERVER_TIMES_FILENAME = os.path.join(PALWORLD_UTIL_PATH, "server_times.json")
 PALWORLD_JSON_WITH_PATH = os.path.join(PALWORLD_UTIL_PATH, PALWORLD_JSON)
-LAST_RESTART = 'last_restart'
-LAST_BACKUP = 'last_backup'
+LAST_RESTART = "last_restart"
+LAST_BACKUP = "last_backup"
 
 
 class State(Enum):
@@ -52,14 +47,15 @@ class State(Enum):
     UNKNOWN = 2
 
 class ServerTimes:
-    def __init__(self):
-        self.last_restart = None
-        self.last_backup = None
+    def __init__(self, settings):
+        self._store = LockedJsonFile(SERVER_TIMES_FILENAME, default=dict, indent=2)
+        self.last_restart: float | None = None
+        self.last_backup: float | None = None
         self.read_from_json()
         self.verify_valid_times()
-        self.log_initial_timers()
+        self.log_initial_timers(settings)
 
-    def verify_valid_times(self):
+    def verify_valid_times(self) -> None:
         bad_data = False
         if not self.last_restart:
             self.last_restart = time.time()
@@ -72,35 +68,26 @@ class ServerTimes:
         if bad_data:
             self.dump_server_times()
 
-    def dump_server_times(self):
-        with open(SERVER_TIMES_FILENAME, 'w') as server_file:
-            data = dict()
-            data[LAST_RESTART] = self.last_restart
-            data[LAST_BACKUP] = self.last_backup
-            json.dump(data, server_file)
-            logger.info("Finished updating the server JSON")
+    def dump_server_times(self) -> None:
+        self._store.write({
+            LAST_RESTART: self.last_restart,
+            LAST_BACKUP: self.last_backup,
+        })
+        logger.info("Finished updating the server JSON")
 
-    def read_from_json(self):
-        try:
-            with open(SERVER_TIMES_FILENAME, 'r') as file:
-                data = json.load(file)
-                self.last_restart = data.get(LAST_RESTART, None)
-                self.last_backup = data.get(LAST_BACKUP, None)
-                # Convert to integers if data was valid
-                self.last_restart = int(self.last_restart) if self.last_restart else None
-                self.last_backup = int(self.last_backup) if self.last_backup else None
-        except (FileNotFoundError, json.JSONDecodeError) as e:
-            print(f'Error reading Server times JSON file: {e}')
-            raise e
+    def read_from_json(self) -> None:
+        data = self._store.read()
+        self.last_restart = float(data[LAST_RESTART]) if data.get(LAST_RESTART) else None
+        self.last_backup = float(data[LAST_BACKUP]) if data.get(LAST_BACKUP) else None
 
-    def log_initial_timers(self) -> None:
-        last_restart = datetime.datetime.fromtimestamp(self.last_restart).strftime('%c')
-        last_backup = datetime.datetime.fromtimestamp(self.last_restart).strftime('%c')
-        logger.info(f"Last Restart: {last_restart} Last Backup: {last_backup}")
-        if AUTOMATIC_RESTART:
-            logger.info(f"Server configured to restart every: {AUTOMATIC_RESTART_EVERY_X_HOURS} hours")
-        if BACKUP_EVERY_X_HOURS > 0:
-            logger.info(f"Server configured to backup every: {BACKUP_EVERY_X_HOURS} hours")
+    def log_initial_timers(self, settings) -> None:
+        last_restart = datetime.datetime.fromtimestamp(self.last_restart).strftime("%c")
+        last_backup = datetime.datetime.fromtimestamp(self.last_backup).strftime("%c")
+        logger.info("Last Restart: %s Last Backup: %s", last_restart, last_backup)
+        if settings.automatic_restart:
+            logger.info("Server configured to restart every: %s hours", settings.automatic_restart_every_x_hours)
+        if settings.backup_every_x_hours > 0:
+            logger.info("Server configured to backup every: %s hours", settings.backup_every_x_hours)
 
     async def update_last_restart(self) -> None:
         self.last_restart = time.time()
@@ -114,9 +101,16 @@ class ServerTimes:
 class PalWorld(Cog):
     """PalWorld Server commands for MTS Server. """
 
+    palworld_app = app_commands.Group(
+        name="palworld",
+        description="Palworld server info",
+        guild_ids=[MENACES_TO_SOBRIETY_SERVER_ID],
+    )
+
     def __init__(self, bot: commands.AutoShardedBot):
         self.bot = bot
         self.last_idle_check = time.time()
+        self.settings = load_palworld_settings()
 
         try:
             palworld_credentials = self.get_json()
@@ -126,40 +120,38 @@ class PalWorld(Cog):
             rcon_password = palworld_credentials["RCON_PASSWORD"]
             rcon_port = int(palworld_credentials["RCON_PORT"])
         except KeyError as e:
-            log.error(f"Palworld JSON config is not detected!. Requirements within: ")
+            log.error("Palworld JSON config is missing required keys.")
             raise e
 
-        if ROTATE_LOGS_EVERY_X_RUNS > 0:
+        if self.settings.rotate_logs_every_x_runs > 0:
             logs_path = Path(LOGS_DIR)
             if not os.path.exists(logs_path):
-                logger.info(f"Creating logs dir: {logs_path}")
+                logger.info("Creating logs dir: %s", logs_path)
                 logs_path.mkdir(exist_ok=True)
-            # Add log sink to file and rotate every ROTATE_LOGS_EVERY_X_RUNS runs/logs.
             logger.add(
                 logs_path / "log_{time}.txt",
-                level=LOG_LEVEL,
+                level=self.settings.log_level,
                 colorize=False,
                 backtrace=True,
                 diagnose=True,
-                retention=ROTATE_LOGS_EVERY_X_RUNS,
+                retention=self.settings.rotate_logs_every_x_runs,
             )
 
-        # Create PalworldUtil instance with required vars only.
         self.pal = PalworldUtil(
             steamcmd_dir,
             server_name,
             server_ip,
             rcon_port,
             rcon_password,
-            operating_system=OPERATING_SYSTEM,
+            operating_system=self.settings.operating_system,
         )
 
-        if ROTATE_AFTER_X_BACKUPS > 0:
-            self.pal.rotate_after_x_backups = ROTATE_AFTER_X_BACKUPS
+        if self.settings.rotate_after_x_backups > 0:
+            self.pal.rotate_after_x_backups = self.settings.rotate_after_x_backups
         else:
             self.pal.rotate_backups = False
-        self.pal.wait_before_restart_seconds = WAIT_BEFORE_RESTART_SECONDS
-        self.server_times = ServerTimes()
+        self.pal.wait_before_restart_seconds = self.settings.wait_before_restart_seconds
+        self.server_times = ServerTimes(self.settings)
 
         # Default server state should be whatever state the server is in, whether it's on or off
         # If someone starts server, set the desired state to ON
@@ -181,29 +173,34 @@ class PalWorld(Cog):
             logger.info(f"Server process not found while server should be on, restarting...")
             await self.pal.launch_server()
             await self.server_times.update_last_restart()
-            logger.info(f"Next server restart in: {AUTOMATIC_RESTART_EVERY_X_HOURS} hours")
+            logger.info("Next server restart in: %s hours", self.settings.automatic_restart_every_x_hours)
 
-        # Automatic Backups
-        if 0 < BACKUP_EVERY_X_HOURS <= calculate_hours_elapsed(self.server_times.last_backup) and self.desired_server_state == State.ON:
+        settings = self.settings
+
+        if (
+            0 < settings.backup_every_x_hours <= calculate_hours_elapsed(self.server_times.last_backup)
+            and self.desired_server_state == State.ON
+        ):
             logger.info("Taking server backup...")
             await self.pal.take_server_backup()
             await self.server_times.update_last_backup()
-            logger.info(f"Next backup in: {BACKUP_EVERY_X_HOURS} hours")
+            logger.info("Next backup in: %s hours", settings.backup_every_x_hours)
 
-        # Automatic restart
-        if AUTOMATIC_RESTART and self.desired_server_state == State.ON:
+        if settings.automatic_restart and self.desired_server_state == State.ON:
             hours_since_last_restart = calculate_hours_elapsed(self.server_times.last_restart)
-            if hours_since_last_restart >= AUTOMATIC_RESTART_EVERY_X_HOURS:
+            if hours_since_last_restart >= settings.automatic_restart_every_x_hours:
                 await self.pal.log_and_broadcast(f"Restarting server after {hours_since_last_restart} hours...")
                 if not check_for_process(self.pal.palworld_server_proc_name):
-                    logger.info(f"Server process not found, restarting...")
+                    logger.info("Server process not found, restarting...")
                     await self.pal.launch_server()
                     await self.server_times.update_last_restart()
-                    logger.info(f"Next server restart in: {AUTOMATIC_RESTART_EVERY_X_HOURS} hours")
+                    logger.info("Next server restart in: %s hours", settings.automatic_restart_every_x_hours)
                 else:
-                    await self.pal.restart_server(backup_server=BACKUP_ON_RESTART)
+                    await self.pal.restart_server(backup_server=settings.backup_on_restart)
                     await self.server_times.update_last_restart()
-                    await self.pal.log_and_broadcast(f"Next server restart in: {AUTOMATIC_RESTART_EVERY_X_HOURS} hours")
+                    await self.pal.log_and_broadcast(
+                        f"Next server restart in: {settings.automatic_restart_every_x_hours} hours"
+                    )
 
         # Stop the server if the server is idle (And it has been 8 hours). The function already checks if the
         # Server is on or not before doing anything
@@ -318,6 +315,30 @@ class PalWorld(Cog):
         else:
             await ctx.send("The server is currently off.")
 
+    @palworld.command(name="status")
+    @is_menace_guild()
+    async def palworld_status(self, ctx: commands.Context):
+        """Shows a detailed Palworld server status embed."""
+        embed = await self.build_status_embed()
+        await ctx.send(embed=embed)
+
+    @palworld_app.command(name="players", description="Show players currently on the Palworld server.")
+    async def app_palworld_players(self, interaction: discord.Interaction):
+        msg = await self.show_players()
+        await interaction.response.send_message(msg)
+
+    @palworld_app.command(name="state", description="Show whether the Palworld server is on or off.")
+    async def app_palworld_state(self, interaction: discord.Interaction):
+        online = await self.is_server_on()
+        await interaction.response.send_message(
+            "The server is currently **on**." if online else "The server is currently **off**.",
+        )
+
+    @palworld_app.command(name="status", description="Detailed Palworld server status.")
+    async def app_palworld_status(self, interaction: discord.Interaction):
+        embed = await self.build_status_embed()
+        await interaction.response.send_message(embed=embed)
+
     @palworld.command(name="save")
     @is_menace_guild()
     async def palworld_save(self, ctx: commands.Context):
@@ -344,6 +365,40 @@ class PalWorld(Cog):
         lines = response.strip().split("\n")
         # If there are more than 1 lines, that means that there are players in the server
         return True if len(lines) <= 1 else False
+
+    async def get_player_count(self) -> int:
+        if not await self.is_server_on():
+            return 0
+        response = await self.pal.rcon.send_command("ShowPlayers", [])
+        lines = response.strip().split("\n")
+        return max(0, len(lines) - 1)
+
+    async def build_status_embed(self) -> discord.Embed:
+        settings = self.settings
+        online = await self.is_server_on()
+        player_count = await self.get_player_count() if online else 0
+        hours_since_restart = calculate_hours_elapsed(self.server_times.last_restart)
+        hours_since_backup = calculate_hours_elapsed(self.server_times.last_backup)
+        restart_in = max(0, settings.automatic_restart_every_x_hours - hours_since_restart)
+        backup_in = max(0, settings.backup_every_x_hours - hours_since_backup) if settings.backup_every_x_hours > 0 else None
+
+        colour = discord.Colour.green() if online else discord.Colour.red()
+        embed = discord.Embed(
+            title="Palworld Server Status",
+            colour=colour,
+        )
+        embed.add_field(name="Process", value="Online" if online else "Offline", inline=True)
+        embed.add_field(name="Desired state", value=self.desired_server_state.name, inline=True)
+        embed.add_field(name="Players", value=str(player_count), inline=True)
+        embed.add_field(
+            name="Next scheduled restart",
+            value=f"~{restart_in:.1f}h" if settings.automatic_restart else "Disabled",
+            inline=True,
+        )
+        if backup_in is not None:
+            embed.add_field(name="Next scheduled backup", value=f"~{backup_in:.1f}h", inline=True)
+        embed.set_footer(text=f"Auto-restart every {settings.automatic_restart_every_x_hours}h")
+        return embed
 
     async def show_players(self) -> str:
         """Returns the output of the ShowPlayers RCON command. """
@@ -387,7 +442,7 @@ class PalWorld(Cog):
             return
 
         # Shut down the Palworld Server
-        wait_time = 60
+        wait_time = self.settings.wait_before_restart_seconds
         shutdown_warning_msg = f"SERVER SHUTDOWN INCOMING. Waiting {wait_time} seconds before starting shutdown process."
         await self.pal.log_and_broadcast(shutdown_warning_msg)
         await asyncio.sleep(wait_time)

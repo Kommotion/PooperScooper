@@ -1,6 +1,5 @@
 discord.py[voice]>=2.7.0
 wavelink>=3.5
-language_tool_python
 yt-dlp
 setuptools
 numpy

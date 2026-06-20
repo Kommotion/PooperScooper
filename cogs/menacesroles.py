@@ -1,75 +1,98 @@
+import logging
+
 import discord
 from discord.ext import commands
 from discord.ext.commands import Cog
-from cogs.utils import utils
-from cogs.utils.constants import *
-import logging
 
-MENACES_TO_SOBRIETY = 932057681307512922
-ROLES_SELECTION = 1039778596836868208
+from cogs.utils.server_config import get_guild_config
+
 log = logging.getLogger(__name__)
 
 
 class MenacesRoles(Cog):
-    """Commands and event listener for granting roles on the Menaces to Sobriety server. """
+    """Reaction-role assignment driven by per-guild server_configs."""
 
     def __init__(self, bot):
         self.bot = bot
-        self.reaction_role_map = {
-            '🧼': 1037114560961851553,  # CoD
-            '🍻': 1040117797084213248,  # VRChat
-            '🤓': 1040118067579076628,  # League of Legends
-            '📺': 1040118203554205716,  # Jackbox
-            '👻': 1040118299314356294,  # Phasmophobia
-            '👟': 1040149691297443871,  # "Kick it" in voice chat
-            '🔫': 1040149753121480725,  # Squad
-            '🛒': 1026082898098540544,  # Mario Kart
-            '🥳': 1040474269836128266,  # Mario Party
-            '🍙': 1042655669955866664,  # Pokemon
-            'he': 1043434842999750706,
-            'she': 1043434950222938172,
-            'they': 1043435084331614279,
-            'nb': 1043435221313388554,
-            '❓': 1044064871148429312,
-            '🎲': 1061747191879843890,  # Dungeons and Dragons
-            '❌': 1082501622405550260,  # Opt-out Confessions
-            '🎥': 1075620515571564556,  # Menace TV
-            '🕹️': 1181439853326503946,  # Game of the Month
-            '🏥': 1199055432275210251  # Overwatch
-        }
 
-    def _ensure_guild_and_channel(self, guild_id, channel_id) -> bool:
-        if guild_id != MENACES_TO_SOBRIETY or channel_id != ROLES_SELECTION:
-            return False
-        return True
+    def _get_reaction_role_config(self, guild_id: int):
+        config = get_guild_config(guild_id)
+        if config is None or not config.enabled:
+            return None, None
+        channel_id = config.reaction_roles_channel_id
+        role_map = config.reaction_role_map
+        if channel_id is None or not role_map:
+            return None, None
+        return channel_id, role_map
 
-    @commands.Cog.listener('on_raw_reaction_add')
-    async def add_role(self, payload) -> None:
-        if not self._ensure_guild_and_channel(payload.guild_id, payload.channel_id):
+    @commands.Cog.listener("on_raw_reaction_add")
+    async def add_role(self, payload: discord.RawReactionActionEvent) -> None:
+        channel_id, role_map = self._get_reaction_role_config(payload.guild_id)
+        if channel_id is None or payload.channel_id != channel_id:
+            return
+
+        emoji_name = payload.emoji.name
+        if emoji_name is None:
+            return
+
+        target_role_id = role_map.get(emoji_name)
+        if target_role_id is None:
+            return
+
+        member = payload.member
+        if member is None:
+            guild = self.bot.get_guild(payload.guild_id)
+            if guild is None:
+                return
+            member = guild.get_member(payload.user_id)
+        if member is None or member.bot:
+            return
+
+        target_role = member.guild.get_role(target_role_id)
+        if target_role is None:
+            log.warning("Reaction role %s not found in guild %s", target_role_id, payload.guild_id)
             return
 
         try:
-            target_role_id = self.reaction_role_map[payload.emoji.name]
-        except KeyError:
+            await member.add_roles(target_role, reason=f"User reacted with {emoji_name}")
+        except discord.Forbidden:
+            log.warning("Missing permissions to add role %s in guild %s", target_role_id, payload.guild_id)
+        except discord.HTTPException as e:
+            log.error("Failed to add role %s for user %s: %s", target_role_id, payload.user_id, e)
+
+    @commands.Cog.listener("on_raw_reaction_remove")
+    async def remove_role(self, payload: discord.RawReactionActionEvent) -> None:
+        channel_id, role_map = self._get_reaction_role_config(payload.guild_id)
+        if channel_id is None or payload.channel_id != channel_id:
             return
 
-        target_role = payload.member.guild.get_role(target_role_id)
-        await payload.member.add_roles(target_role, reason=f'User reacted with {payload.emoji.name}')
-
-    @commands.Cog.listener('on_raw_reaction_remove')
-    async def remove_role(self, payload) -> None:
-        if not self._ensure_guild_and_channel(payload.guild_id, payload.channel_id):
+        emoji_name = payload.emoji.name
+        if emoji_name is None:
             return
 
-        try:
-            target_role_id = self.reaction_role_map[payload.emoji.name]
-        except KeyError:
+        target_role_id = role_map.get(emoji_name)
+        if target_role_id is None:
             return
 
         guild = self.bot.get_guild(payload.guild_id)
+        if guild is None:
+            return
+
         member = guild.get_member(payload.user_id)
-        target_role = member.guild.get_role(target_role_id)
-        await member.remove_roles(target_role, reason=f'User reacted with {payload.emoji.name}')
+        if member is None or member.bot:
+            return
+
+        target_role = guild.get_role(target_role_id)
+        if target_role is None:
+            log.warning("Reaction role %s not found in guild %s", target_role_id, payload.guild_id)
+            return
+
+        try:
+            await member.remove_roles(target_role, reason=f"User removed reaction {emoji_name}")
+        except discord.Forbidden:
+            log.warning("Missing permissions to remove role %s in guild %s", target_role_id, payload.guild_id)
+        except discord.HTTPException as e:
+            log.error("Failed to remove role %s for user %s: %s", target_role_id, payload.user_id, e)
 
 
 async def setup(bot):

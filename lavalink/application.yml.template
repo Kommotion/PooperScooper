@@ -13,8 +13,8 @@ plugins:
       clientId: "{{SPOTIFY_CLIENT_ID}}"
       clientSecret: "{{SPOTIFY_SECRET}}"
       countryCode: "{{SPOTIFY_COUNTRY_CODE}}"
-      playlistLoadLimit: 6
-      albumLoadLimit: 6
+      playlistLoadLimit: 1000
+      albumLoadLimit: 1000
     deezer:
       arl: "{{DEEZER_ARL}}"
       formats: ["MP3_128", "MP3_64"]

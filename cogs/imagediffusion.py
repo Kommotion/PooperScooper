@@ -1,11 +1,7 @@
 import asyncio
-import typing
 import functools
-from ftplib import error_perm
 from io import BytesIO
-import gc
 import time
-import os
 import typing
 from typing import Literal, Optional
 import discord
@@ -13,7 +9,7 @@ import logging
 from enum import Enum, StrEnum
 from discord.ext import commands, tasks
 from discord.ext.commands import Cog
-from discord import app_commands, ui, NSFWLevel
+from discord import app_commands, ui
 from cogs.utils.constants import *
 from cogs.utils.image_models import (
     Models,
@@ -24,14 +20,9 @@ from cogs.utils.image_models import (
     ComfyWaiAnimaModel,
 )
 from cogs.utils import comfy_client
+from cogs.utils.server_config import get_guild_config
 
 log = logging.getLogger(__name__)
-
-NSFW_IMAGE_DIFFUSION_CHANNEL = 1373140173067653120
-IMAGE_DIFFUSION_CHANNEL = 1365847564196249620
-TEST_CHANNEL = 1045149015756521493
-SHEPHERD_CHANNEL = 1061073360999698483
-ALlOWED_CHANNELS = [NSFW_IMAGE_DIFFUSION_CHANNEL, TEST_CHANNEL, IMAGE_DIFFUSION_CHANNEL, SHEPHERD_CHANNEL]
 
 
 class PromptType(StrEnum):
@@ -217,7 +208,7 @@ def to_thread(func: typing.Callable) -> typing.Coroutine:
 
 class PromptDetailButton(ui.View):
     def __init__(self, user_prompt: str, user_negative: str, positive: str, negative: str,
-                 image: ImageCreation, author_id: int, gen_time: float):
+                 image: ImageCreation, author_id: int, gen_time: float, guild_id: int):
         super().__init__(timeout=900)
 
         self.user_prompt = user_prompt
@@ -231,10 +222,10 @@ class PromptDetailButton(ui.View):
         self.nsfw_level = image.nsfw
         self.author_id = author_id
         self.gen_time = gen_time
+        self.guild_id = guild_id
         self.already_clicked_prompt_details = set()
         self._cooldown = {}
         self._cooldown_seconds = 30
-        self.moderator_role_id = 1083514560155222086
 
     async def on_timeout(self) -> None:
         for item in self.children:
@@ -327,7 +318,14 @@ class PromptDetailButton(ui.View):
     @ui.button(label="Delete", style=discord.ButtonStyle.red)
     async def delete_button(self, interaction: discord.Interaction, button: ui.Button):
         is_author = interaction.user.id == self.author_id
-        is_moderator = self.moderator_role_id and any(role.id == self.moderator_role_id for role in interaction.user.roles)
+        moderator_role_id = None
+        guild_config = get_guild_config(self.guild_id)
+        if guild_config is not None:
+            moderator_role_id = guild_config.image_diffusion_moderator_role_id
+        is_moderator = (
+            moderator_role_id is not None
+            and any(role.id == moderator_role_id for role in interaction.user.roles)
+        )
 
         if not (is_author or is_moderator):
             await interaction.response.send_message("You don't have permission to delete this message.", ephemeral=True)
@@ -365,6 +363,12 @@ class ImageDiffusion(Cog):
         self.bot.loop.create_task(self._startup())
         self.image_generation.start()
         self.comfy_health_watcher.start()
+
+    def _is_allowed_channel(self, guild_id: int, channel_id: int) -> bool:
+        config = get_guild_config(guild_id)
+        if config is None or not config.enabled:
+            return False
+        return config.is_image_diffusion_channel(channel_id)
 
     async def _startup(self):
         await self.bot.wait_until_ready()
@@ -418,7 +422,7 @@ class ImageDiffusion(Cog):
                              prompt_type: PromptType
         ) -> None:
 
-        if interaction.channel_id not in ALlOWED_CHANNELS:
+        if not self._is_allowed_channel(interaction.guild_id, interaction.channel_id):
             await interaction.response.send_message("This command is not allowed in this channel!", ephemeral=True)
             return
 
@@ -453,7 +457,7 @@ class ImageDiffusion(Cog):
                        add_default_positive: Optional[DefaultChoice] = DefaultChoice.YES,
                        nsfw_level: Optional[NsfwLevel] = NsfwLevel.NOT_SPECIFIED
                        ) -> None:
-        if interaction.channel_id not in ALlOWED_CHANNELS:
+        if not self._is_allowed_channel(interaction.guild_id, interaction.channel_id):
             await interaction.response.send_message("This command is not allowed in this channel!", ephemeral=True)
             return
 
@@ -501,14 +505,6 @@ class ImageDiffusion(Cog):
     async def schedule_generation(self, prompt: str, model: Models,
                                   interaction: discord.Interaction =None, negative_prompt='', use_default_negative=True,
                                   use_default_positive=True, nsfw: NsfwLevel=NsfwLevel.NOT_SPECIFIED) -> None:
-        # Non-nsfw channels will default to less nsfw and explicit things
-        channel_id = interaction.channel.id
-        if channel_id in [IMAGE_DIFFUSION_CHANNEL, SHEPHERD_CHANNEL] and nsfw == NsfwLevel.NOT_SPECIFIED:
-            if negative_prompt:
-                negative_prompt += ', '
-            negative_prompt += 'nsfw, nude, nudity, naked, lingerie, underwear, cleavage, erotic, lewd, sexual,'\
-                                ' exposed, suggestive, inappropriate, skimpy, pornographic, uncensored'
-
         image_entry = ImageCreation(prompt, model, interaction=interaction, negative_prompt=negative_prompt,
                               use_default_negative=use_default_negative, use_default_positive=use_default_positive,
                               nsfw=nsfw)
@@ -617,7 +613,8 @@ class ImageDiffusion(Cog):
             negative=negative,
             image=image,
             author_id=author_id,
-            gen_time=gen_time
+            gen_time=gen_time,
+            guild_id=image.interaction.guild_id,
         )
 
         try:
