@@ -15,9 +15,8 @@ from discord.ext import commands, tasks
 from discord.ext.commands import Cog
 from loguru import logger
 
-from cogs.utils.checks import is_menace_guild
+from cogs.utils.checks import ensure_palworld_guild, is_palworld_guild
 from cogs.utils.constants import (
-    MENACES_TO_SOBRIETY_SERVER_ID,
     ONE_HOUR_IN_SECONDS,
     PALWORLD_JSON,
     PALWORLD_UTIL_PATH,
@@ -75,6 +74,13 @@ class ServerTimes:
         })
         logger.info("Finished updating the server JSON")
 
+    async def adump_server_times(self) -> None:
+        await self._store.awrite({
+            LAST_RESTART: self.last_restart,
+            LAST_BACKUP: self.last_backup,
+        })
+        logger.info("Finished updating the server JSON")
+
     def read_from_json(self) -> None:
         data = self._store.read()
         self.last_restart = float(data[LAST_RESTART]) if data.get(LAST_RESTART) else None
@@ -91,11 +97,11 @@ class ServerTimes:
 
     async def update_last_restart(self) -> None:
         self.last_restart = time.time()
-        self.dump_server_times()
+        await self.adump_server_times()
 
     async def update_last_backup(self) -> None:
         self.last_backup = time.time()
-        self.dump_server_times()
+        await self.adump_server_times()
 
 
 class PalWorld(Cog):
@@ -104,7 +110,6 @@ class PalWorld(Cog):
     palworld_app = app_commands.Group(
         name="palworld",
         description="Palworld server info",
-        guild_ids=[MENACES_TO_SOBRIETY_SERVER_ID],
     )
 
     def __init__(self, bot: commands.AutoShardedBot):
@@ -244,13 +249,13 @@ class PalWorld(Cog):
         log.info(f"Current Palworld Server State: {self.desired_server_state}")
 
     @commands.group(invoke_without_command=True)
-    @is_menace_guild()
+    @is_palworld_guild()
     async def palworld(self, ctx: commands.Context) -> None:
         """Do "!help palworld" for subcommands. """
         await ctx.send('Do "!help palworld" for subcommands.')
 
     @palworld.command(name="start")
-    @is_menace_guild()
+    @is_palworld_guild()
     async def palworld_start(self, ctx: commands.Context):
         """Starts the Palworld server if it is off. """
         await ctx.send('Attempting to start Palworld server... this might take a minute.')
@@ -269,7 +274,7 @@ class PalWorld(Cog):
 
 
     @palworld.command(name="stop")
-    @is_menace_guild()
+    @is_palworld_guild()
     async def palworld_stop(self, ctx: commands.Context):
         """Stops the Palworld server if it is on. """
         await ctx.send('Attempting to stop Palworld server... this might take a minute.')
@@ -287,7 +292,7 @@ class PalWorld(Cog):
             await ctx.message.add_reaction(THUMBS_UP_EMOJI)
 
     @palworld.command(name="restart")
-    @is_menace_guild()
+    @is_palworld_guild()
     async def palworld_restart(self, ctx: commands.Context):
         """Restarts the Palworld Server. """
         await ctx.send("Initiating server restart process... this might take a minute.")
@@ -299,14 +304,14 @@ class PalWorld(Cog):
         await ctx.message.add_reaction(THUMBS_UP_EMOJI)
 
     @palworld.command(name="players")
-    @is_menace_guild()
+    @is_palworld_guild()
     async def palworld_players(self, ctx: commands.Context):
         """Shows the output of the players connected to the server. """
         msg = await self.show_players()
         await ctx.send(msg)
 
     @palworld.command(name="state")
-    @is_menace_guild()
+    @is_palworld_guild()
     async def palworld_state(self, ctx: commands.Context):
         """Shows if the Palworld server is currently on or off. """
         state = await self.is_server_on()
@@ -316,7 +321,7 @@ class PalWorld(Cog):
             await ctx.send("The server is currently off.")
 
     @palworld.command(name="status")
-    @is_menace_guild()
+    @is_palworld_guild()
     async def palworld_status(self, ctx: commands.Context):
         """Shows a detailed Palworld server status embed."""
         embed = await self.build_status_embed()
@@ -324,11 +329,15 @@ class PalWorld(Cog):
 
     @palworld_app.command(name="players", description="Show players currently on the Palworld server.")
     async def app_palworld_players(self, interaction: discord.Interaction):
+        if not await ensure_palworld_guild(interaction):
+            return
         msg = await self.show_players()
         await interaction.response.send_message(msg)
 
     @palworld_app.command(name="state", description="Show whether the Palworld server is on or off.")
     async def app_palworld_state(self, interaction: discord.Interaction):
+        if not await ensure_palworld_guild(interaction):
+            return
         online = await self.is_server_on()
         await interaction.response.send_message(
             "The server is currently **on**." if online else "The server is currently **off**.",
@@ -336,11 +345,13 @@ class PalWorld(Cog):
 
     @palworld_app.command(name="status", description="Detailed Palworld server status.")
     async def app_palworld_status(self, interaction: discord.Interaction):
+        if not await ensure_palworld_guild(interaction):
+            return
         embed = await self.build_status_embed()
         await interaction.response.send_message(embed=embed)
 
     @palworld.command(name="save")
-    @is_menace_guild()
+    @is_palworld_guild()
     async def palworld_save(self, ctx: commands.Context):
         """Saves the current state of the server. """
         response = await self.save()

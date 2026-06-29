@@ -33,10 +33,16 @@ class BirthdayData:
     def load_json(self) -> None:
         self.birthday_data = self._store.read()
 
+    async def aload_json(self) -> None:
+        self.birthday_data = await self._store.aread()
+
     def dump_json(self) -> None:
         self._store.write(self.birthday_data)
 
-    def add_birthday_data(self, user_id: int, date: datetime.date, server: int) -> str:
+    async def adump_json(self) -> None:
+        await self._store.awrite(self.birthday_data)
+
+    async def add_birthday_data(self, user_id: int, date: datetime.date, server: int) -> str:
         user_key = str(user_id)
         try:
             self.birthday_data[user_key][BIRTHDAY] = date.isoformat()
@@ -51,14 +57,14 @@ class BirthdayData:
             }
             status = ADDED
 
-        self.dump_json()
+        await self.adump_json()
         return status
 
-    def delete_birthday_data(self, user_id: int) -> None:
+    async def delete_birthday_data(self, user_id: int) -> None:
         try:
-            self.load_json()
+            await self.aload_json()
             del self.birthday_data[str(user_id)]
-            self.dump_json()
+            await self.adump_json()
         except KeyError:
             pass
 
@@ -86,7 +92,7 @@ class BirthdayTracker(Cog):
 
     @tasks.loop(hours=1)
     async def check_for_birthdays(self) -> None:
-        self.birthdays.load_json()
+        await self.birthdays.aload_json()
         now_utc = datetime.datetime.now(datetime.timezone.utc)
 
         for guild in self.bot.guilds:
@@ -100,7 +106,7 @@ class BirthdayTracker(Cog):
 
             await self._announce_guild_birthdays(guild, local_now.date())
 
-        self.birthdays.dump_json()
+        await self.birthdays.adump_json()
         log.info("Finished checking for birthdays")
 
     async def _announce_guild_birthdays(self, guild: discord.Guild, today: datetime.date) -> None:
@@ -161,7 +167,7 @@ class BirthdayTracker(Cog):
         else:
             birthday_string = f"{birthday.month}-{birthday.day}"
 
-        status = self.birthdays.add_birthday_data(interaction.user.id, birthday, interaction.guild.id)
+        status = await self.birthdays.add_birthday_data(interaction.user.id, birthday, interaction.guild.id)
         if status == ADDED:
             response = f"Your birthday has been added to the tracker as {birthday_string}"
         elif status == REPLACED:
@@ -173,7 +179,7 @@ class BirthdayTracker(Cog):
 
     @birthday_group.command(name="delete")
     async def birthday_delete(self, interaction: discord.Interaction) -> None:
-        self.birthdays.delete_birthday_data(interaction.user.id)
+        await self.birthdays.delete_birthday_data(interaction.user.id)
         await interaction.response.send_message("Your birthday has been removed from the tracker", ephemeral=True)
 
     @birthday_group.command(name="list", description="List registered birthdays for this server.")

@@ -6,8 +6,10 @@ __pycache__/
 # C extensions
 *.so
 
-#palworld logs
+#palworld logs and secrets
 cogs/utils/palworld_utils/logs/*
+cogs/utils/palworld_utils/palworld.json
+cogs/utils/palworld_utils/server_times.json
 
 # Distribution / packaging
 .Python
@@ -84,6 +86,10 @@ celerybeat-schedule
 
 # dotenv
 .env
+
+# Runtime bot data (per-guild lists, trackers)
+data/*.json
+!data/.gitkeep
 
 # Local secrets and generated Lavalink runtime files
 config.json

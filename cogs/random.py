@@ -7,7 +7,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from cogs.gamepicker import GAME_PICKER_JSON
+from cogs.utils.constants import GAME_PICKER_JSON
 from cogs.utils.guild_prompt_list import GuildPromptList
 
 DICE_PATTERN = re.compile(r"^(\d{1,2})[dD](\d{1,4})$")
@@ -302,8 +302,11 @@ class RandomGroup(app_commands.Group):
 class RandomCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.bot.tree.add_command(RandomGroup(bot))
+        self.random_group = RandomGroup(bot)
+        self.bot.tree.add_command(self.random_group)
 
 
 async def setup(bot: commands.Bot):
-    await bot.add_cog(RandomCog(bot))
+    cog = RandomCog(bot)
+    await cog.random_group._game_list.load()
+    await bot.add_cog(cog)

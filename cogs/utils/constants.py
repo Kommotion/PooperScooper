@@ -2,6 +2,7 @@
 Constants file
 """
 import os
+from pathlib import Path
 
 VERSION = '2.5.0'
 BOT_AUTHOR = 'kommotion'
@@ -9,10 +10,22 @@ POOPERSCOOPER_PICTURE = 'pooperscooper.jpg'
 COOKS_AND_MOCHA = 'cooksandmocha.jpg'
 COOKS = 'cooks.jpg'
 GOOD_BOYS_AND_GIRLS = 'goodboysandgirls.jpg'
-GAMETIME_JSON = 'gametime.json'
-BIRTHDAY_JSON = 'birthday.json'
-MENACES_TO_SOBRIETY_SERVER_ID = 932057681307512922
-POOPER_SCOOPER_SUPPORT_SERVER_ID = 1045144253627637830
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DATA_DIR = PROJECT_ROOT / "data"
+
+GAMETIME_JSON = str(DATA_DIR / "gametime.json")
+BIRTHDAY_JSON = str(DATA_DIR / "birthday.json")
+BINGO_JSON = str(DATA_DIR / "bingo.json")
+GAME_PICKER_JSON = str(DATA_DIR / "game_picker.json")
+
+LEGACY_DATA_FILES = {
+    "gametime.json": Path(GAMETIME_JSON),
+    "birthday.json": Path(BIRTHDAY_JSON),
+    "bingo.json": Path(BINGO_JSON),
+    "game_picker.json": Path(GAME_PICKER_JSON),
+}
+
 SECONDS_IN_HOUR = 3600
 MINUTES_IN_HOUR = 60
 THIRTY_SECONDS = 30

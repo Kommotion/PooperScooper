@@ -6,6 +6,8 @@ Feel free to use this as a reference for your own bot.
 
 Per-guild settings use `server_configs/<guild_id>.json`. See [docs/SERVER_CONFIGS.md](docs/SERVER_CONFIGS.md).
 
+Runtime JSON data (gametime, birthdays, bingo, game picker) is stored under `data/`.
+
 ## Key Features
 1. Music (Lavalink / Wavelink)
 2. Gametime tracking (shared playtime across servers)
@@ -20,15 +22,37 @@ Per-guild settings use `server_configs/<guild_id>.json`. See [docs/SERVER_CONFIG
 
 1. **Install Python 3.11 or higher**
 
-Required for Wavelink 3 and discord.py 2.7+
-   
+Required for Wavelink 3 and discord.py 2.7+.
+
 2. **Set up venv**
 
-` python3.8 -m venv venv`
+```powershell
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+```
 
 3. **Install dependencies**
 
-`pip install -U -r requirements.txt`
+Core only:
+
+```powershell
+pip install -U -r requirements.txt
+```
+
+Full install (bingo, image helpers, palworld logging):
+
+```powershell
+pip install -U -r requirements-all.txt
+```
+
+Or install optional sets from `pyproject.toml`:
+
+```powershell
+pip install -e ".[bingo]"
+pip install -e ".[image]"
+pip install -e ".[palworld]"
+pip install -e ".[all]"
+```
 
 4. **Create Spotify and Discord integrations**
 
@@ -41,6 +65,18 @@ Create your integrations for Spotify and Discord:
 5. **Configure Credentials**
 
 Copy `config.example.json` to `config.json` and fill in your credentials. **Do not commit `config.json`.**
+
+Environment variables override `config.json` when set (useful for Docker):
+
+| Variable | Overrides |
+|----------|-----------|
+| `DISCORD_TOKEN` | `token` |
+| `DISCORD_CLIENT_ID` | `client_id` |
+| `SPOTIFY_CLIENT_ID` | `spotify_client_id` |
+| `SPOTIFY_SECRET` | `spotify_secret` |
+| `LAVALINK_HOST` | `lavalink.host` |
+| `LAVALINK_PORT` | `lavalink.port` |
+| `LAVALINK_PASSWORD` | `lavalink.password` |
 
 6. **Configure Lavalink (Music)**
 
@@ -73,7 +109,7 @@ cd lavalink
 ```
 
 - `managed: true` — bot starts/stops Lavalink with itself
-- `managed: false` — you run Lavalink externally (for shared/public deployments)
+- `managed: false` — you run Lavalink externally (for Docker or shared deployments)
 - `auto_start: false` — bot owner starts manually with `!lavalink start`
 
 Owner commands: `!lavalink`, `!lavalink start`, `!lavalink stop`
@@ -105,15 +141,36 @@ otherwise the huggingface library will download a model if it is not cached whic
 Copy `server_configs/example.json` to `server_configs/<your_guild_id>.json` and fill in channel/role IDs. Full reference: [docs/SERVER_CONFIGS.md](docs/SERVER_CONFIGS.md).
 
 For Palworld auto-restart/backup timers, copy `palworld_config.example.json` to `palworld_config.json`.
+Enable Palworld commands per guild with `"palworld": { "enabled": true }` in that guild's server config.
 
 ## Running
-Run the following with administrator privileges
 
-`python PooperScooper.py`
+```powershell
+python PooperScooper.py
+```
 
-Add `-d` switch to set logging level to debug
+Add `-d` for debug logging.
+
+Logs rotate automatically: `pooperscooper.log` plus up to 9 older backups (10 files total, 5 MB each).
 
 Owner/admin: `!status` shows bot health (Lavalink, ComfyUI, Palworld, etc.).
+
+## Docker (bot + Lavalink)
+
+See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). Docker is a good fit for the bot and Lavalink; Palworld and ComfyUI still typically run on the Windows host.
+
+```bash
+docker compose up -d --build
+```
+
+Set `lavalink.managed: false` and `lavalink.host: lavalink` in `config.json` when using Compose.
+
+## Tests
+
+```powershell
+pip install pytest
+pytest tests/test_smoke.py -q
+```
 
 ## Links
 * [Discord.py](https://github.com/Rapptz/discord.py)

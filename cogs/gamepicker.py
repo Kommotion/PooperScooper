@@ -8,10 +8,10 @@ from discord import app_commands
 from discord.ext import commands
 from discord.ext.commands import Cog
 
+from cogs.utils.constants import GAME_PICKER_JSON
 from cogs.utils.guild_prompt_list import GuildPromptList, build_list_embeds
 
 log = logging.getLogger(__name__)
-GAME_PICKER_JSON = "game_picker.json"
 
 
 class GamePicker(Cog):
@@ -26,7 +26,7 @@ class GamePicker(Cog):
     @gamepicker_group.command(name="add", description="Add a game to the picker list.")
     @app_commands.describe(prompt="Game to add.")
     async def add_gamepicker(self, interaction: discord.Interaction, prompt: str) -> None:
-        result, reason = self.prompt_list.add(interaction.guild_id, prompt)
+        result, reason = await self.prompt_list.add(interaction.guild_id, prompt)
         if result:
             title = "Added your game to the gamepicker list"
             message = prompt
@@ -52,7 +52,7 @@ class GamePicker(Cog):
     @gamepicker_group.command(name="remove", description="Remove a game from the picker list.")
     @app_commands.describe(prompt="Choose a game to remove.")
     async def game_picker_remove(self, interaction: discord.Interaction, prompt: str) -> None:
-        result = self.prompt_list.remove(interaction.guild_id, prompt)
+        result = await self.prompt_list.remove(interaction.guild_id, prompt)
         if result:
             title = "Removed your game from the game list"
             message = prompt
@@ -93,4 +93,6 @@ class GamePicker(Cog):
 
 
 async def setup(bot) -> None:
-    await bot.add_cog(GamePicker(bot))
+    cog = GamePicker(bot)
+    await cog.prompt_list.load()
+    await bot.add_cog(cog)

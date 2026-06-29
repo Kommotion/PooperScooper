@@ -1,11 +1,13 @@
+# Core bot dependencies. Install with:
+#   pip install -r requirements.txt
+# Optional feature sets (see pyproject.toml):
+#   pip install -e ".[bingo]"      # bingo card generation
+#   pip install -e ".[image]"      # image diffusion helpers
+#   pip install -e ".[palworld]"    # palworld logging
+#   pip install -e ".[all]"          # everything above
 discord.py[voice]>=2.7.0
 wavelink>=3.5
 yt-dlp
-setuptools
-numpy
-scipy
-safetensors
-pandas
-matplotlib
 requests
 Pillow
+pydantic>=2.0

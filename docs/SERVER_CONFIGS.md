@@ -70,7 +70,7 @@ Used by `cogs/music.py` for Now Playing button permissions.
 
 ### `palworld`
 
-Used by `cogs/palworld.py` for guild enablement (commands remain MTS-only via code checks).
+Used by `cogs/palworld.py` to gate both `!palworld` prefix commands and `/palworld` slash commands.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -83,7 +83,7 @@ Server process settings (auto-restart, backups, log rotation) are in **`palworld
 
 Copy `palworld_config.example.json` → `palworld_config.json`.
 
-RCON/Steam credentials remain in `cogs/utils/palworld_utils/palworld.json`.
+RCON/Steam credentials remain in `cogs/utils/palworld_utils/palworld.json` (copy from `palworld.example.json`; never commit).
 
 ## Adding a new guild
 
@@ -91,6 +91,17 @@ RCON/Steam credentials remain in `cogs/utils/palworld_utils/palworld.json`.
 2. Set `enabled: true` and fill in channel/role IDs.
 3. Restart the bot (or `!reload_cog` for cogs that read config at runtime — most cache on load).
 4. Run `!sync_commands` if you added slash commands scoped to that guild.
+
+## Runtime data files
+
+Per-guild prompt lists and global trackers are stored under `data/`:
+
+- `data/gametime.json`
+- `data/birthday.json`
+- `data/bingo.json`
+- `data/game_picker.json`
+
+Legacy files in the repo root are moved into `data/` automatically on bot startup.
 
 ## Bot status
 

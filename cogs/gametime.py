@@ -38,10 +38,21 @@ class GameData:
         if self.game_data is not raw:
             self.dump_json()
 
+    async def aload_json(self) -> None:
+        raw = await self._store.aread()
+        self.game_data = self._migrate_if_needed(raw)
+        if self.game_data is not raw:
+            await self.adump_json()
+
     def dump_json(self) -> None:
         if self.game_data is None:
             return
         self._store.write(self.game_data)
+
+    async def adump_json(self) -> None:
+        if self.game_data is None:
+            return
+        await self._store.awrite(self.game_data)
 
     @staticmethod
     def _is_global_format(data: dict) -> bool:
@@ -114,14 +125,14 @@ class GameData:
             return {}
         return dict(self.game_data.get(str(member_id), {}))
 
-    def reset_member_data(self, member_id: int) -> bool:
+    async def reset_member_data(self, member_id: int) -> bool:
         if self.game_data is None:
             return False
         member_key = str(member_id)
         if member_key not in self.game_data:
             return False
         del self.game_data[member_key]
-        self.dump_json()
+        await self.adump_json()
         return True
 
     def get_guild_leaderboard(
@@ -200,7 +211,7 @@ class Gametime(Cog):
 
         self.last_update_time = now
         log.debug("Finished updating gametime data")
-        self.save_game_data()
+        await self.save_game_data()
 
     @update_gametime.before_loop
     async def before_gametime(self) -> None:
@@ -208,13 +219,13 @@ class Gametime(Cog):
 
     @update_gametime.after_loop
     async def save_gametime(self) -> None:
-        self.save_game_data(force=True)
+        await self.save_game_data(force=True)
 
-    def save_game_data(self, force: bool = False) -> None:
+    async def save_game_data(self, force: bool = False) -> None:
         now = time.time()
         if now - self.last_save_time >= SAVE_FREQUENCY or force:
             log.debug("Saving gametime data to storage")
-            self.game_data.dump_json()
+            await self.game_data.adump_json()
             self.last_save_time = now
 
     @staticmethod
@@ -400,7 +411,7 @@ class Gametime(Cog):
             await interaction.response.send_message("You need Manage Server to reset gametime.", ephemeral=True)
             return
 
-        removed = self.game_data.reset_member_data(user.id)
+        removed = await self.game_data.reset_member_data(user.id)
         if not removed:
             await interaction.response.send_message(
                 f"No gametime data found for {user.display_name}.",
@@ -420,7 +431,7 @@ class Gametime(Cog):
     @commands.command(name="save", hidden=True)
     @commands.is_owner()
     async def save_legacy(self, ctx: commands.Context) -> None:
-        self.save_game_data(force=True)
+        await self.save_game_data(force=True)
         await ctx.message.add_reaction("👍")
 
 

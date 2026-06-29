@@ -4,8 +4,11 @@ import logging
 import argparse
 import pathlib
 import os
+from logging.handlers import RotatingFileHandler
 from discord.ext import commands
-from cogs.utils.utils import load_credentials
+from cogs.utils.config import load_config
+from cogs.utils.constants import LEGACY_DATA_FILES, PROJECT_ROOT
+from cogs.utils.json_store import migrate_legacy_data_files
 
 
 description = """
@@ -25,18 +28,37 @@ initial_extensions = [
     'cogs.music',
 ]
 
-# Set up logging
-base_file_path = pathlib.Path(__file__).parent.resolve()
-os.chdir(base_file_path)
-log = logging.getLogger()
-log.setLevel(logging.INFO)
-handler = logging.FileHandler(filename='pooperscooper.log', encoding='utf-8', mode='w')
-handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
-log.addHandler(handler)
+LOG_FILE = "pooperscooper.log"
+LOG_MAX_BYTES = 5 * 1024 * 1024
+LOG_BACKUP_COUNT = 9
+
+
+def configure_logging(*, debug: bool = False) -> logging.Logger:
+    """Configure rotating file logs (10 files max) and console output."""
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.setLevel(logging.DEBUG if debug else logging.INFO)
+
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+    file_handler = RotatingFileHandler(
+        filename=LOG_FILE,
+        encoding='utf-8',
+        maxBytes=LOG_MAX_BYTES,
+        backupCount=LOG_BACKUP_COUNT,
+    )
+    file_handler.setFormatter(formatter)
+    root.addHandler(file_handler)
+
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    root.addHandler(console_handler)
+
+    return root
 
 
 class PooperScooper(commands.AutoShardedBot):
-    def __init__(self):
+    def __init__(self, *, client_id: str):
         allowed_mentions = discord.AllowedMentions(roles=False, everyone=False, users=True)
         intents = discord.Intents(
             guilds=True,
@@ -59,7 +81,7 @@ class PooperScooper(commands.AutoShardedBot):
             help_command=commands.DefaultHelpCommand(show_parameter_descriptions=False)
         )
 
-        self.client_id: str = credentials['client_id']
+        self.client_id: str = client_id
         self.commands_executed = None
 
     async def on_ready(self) -> None:
@@ -92,8 +114,8 @@ class PooperScooper(commands.AutoShardedBot):
                 log.exception('Failed to load extension {}\n{}'.format(extension, e))
 
 
-async def run_bot():
-    async with PooperScooper() as bot:
+async def run_bot(token: str, *, client_id: str):
+    async with PooperScooper(client_id=client_id) as bot:
         await bot.start(token, reconnect=True)
 
 
@@ -103,14 +125,19 @@ if __name__ == '__main__':
     args.add_argument('-d', '--debug', action='store_true', default=False, help=msg, required=False)
     parsed_args = args.parse_args()
 
-    if parsed_args.debug is True:
-        log.setLevel(logging.DEBUG)
+    base_file_path = pathlib.Path(__file__).parent.resolve()
+    os.chdir(base_file_path)
+
+    log = configure_logging(debug=parsed_args.debug)
+    if parsed_args.debug:
         logging.debug('Enabling Debug Level Logging')
 
-    credentials = load_credentials()
-    token = credentials['token']
+    migrate_legacy_data_files(PROJECT_ROOT, LEGACY_DATA_FILES)
 
-    asyncio.run(run_bot())
+    config = load_config()
+    token = config.token.get_secret_value()
+
+    asyncio.run(run_bot(token, client_id=config.client_id))
 
     handlers = log.handlers[:]
     for hdlr in handlers:

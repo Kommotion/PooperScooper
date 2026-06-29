@@ -1,0 +1,7 @@
+{
+  "STEAMCMD_DIR": "C:\\SteamCMD",
+  "SERVER_NAME": "YourServerName",
+  "SERVER_IP": "127.0.0.1",
+  "RCON_PASSWORD": "your-rcon-password",
+  "RCON_PORT": "25575"
+}

@@ -1,22 +1,16 @@
 from __future__ import annotations
-from typing import TYPE_CHECKING, Callable, TypeVar
-from discord import app_commands
-from cogs.utils.constants import *
 
+from typing import TYPE_CHECKING, Callable, TypeVar
+
+from discord import app_commands
 from discord.ext import commands
+
+from cogs.utils.server_config import get_guild_config
 
 if TYPE_CHECKING:
     from .context import GuildContext
 
 T = TypeVar('T')
-
-# The permission system of the bot is based on a "just works" basis
-# You have permissions and the bot has permissions. If you meet the permissions
-# required to execute the command (and the bot does as well) then it goes through
-# and you can execute the command.
-# Certain permissions signify if the person is a moderator or an
-# admin (Administrator). Having these signify certain bypasses.
-# Of course, the owner will always be able to execute commands.
 
 
 async def check_permissions(ctx: GuildContext, perms: dict[str, bool], *, check=all):
@@ -54,9 +48,6 @@ def has_guild_permissions(*, check=all, **perms: bool):
     return commands.check(pred)
 
 
-# These do not take channel overrides into account
-
-
 def hybrid_permissions_check(**perms: bool) -> Callable[[T], T]:
     async def pred(ctx: GuildContext):
         return await check_guild_permissions(ctx, perms)
@@ -91,25 +82,40 @@ def is_in_guilds(*guild_ids: int):
     return commands.check(predicate)
 
 
-def is_lounge_cpp():
-    return is_in_guilds(145079846832308224)
+def _guild_has_palworld_enabled(guild_id: int | None) -> bool:
+    if guild_id is None:
+        return False
+    config = get_guild_config(guild_id)
+    return config is not None and config.enabled and config.palworld_enabled
 
 
-def is_menace_guild():
-    def predicate(ctx) -> bool:
-        guild = ctx.guild
-        if guild is None:
+def is_palworld_guild():
+    """Restrict prefix commands to guilds with palworld.enabled in server_configs."""
+
+    async def predicate(ctx: commands.Context) -> bool:
+        if ctx.guild is None:
             return False
-        return guild.id == MENACES_TO_SOBRIETY_SERVER_ID
+        if await ctx.bot.is_owner(ctx.author):
+            return True
+        return _guild_has_palworld_enabled(ctx.guild.id)
 
     return commands.check(predicate)
 
 
-def is_pooper_support_guild():
-    def predicate(ctx) -> bool:
-        guild = ctx.guild
-        if guild is None:
-            return False
-        return guild.id == POOPER_SCOOPER_SUPPORT_SERVER_ID
+async def ensure_palworld_guild(interaction) -> bool:
+    """Return True when the interaction guild has Palworld enabled in server_configs."""
+    if interaction.guild is None:
+        await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+        return False
 
-    return commands.check(predicate)
+    if await interaction.client.is_owner(interaction.user):
+        return True
+
+    if not _guild_has_palworld_enabled(interaction.guild.id):
+        await interaction.response.send_message(
+            "Palworld is not enabled for this server. Set `palworld.enabled` in server_configs.",
+            ephemeral=True,
+        )
+        return False
+
+    return True

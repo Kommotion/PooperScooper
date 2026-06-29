@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
+import shutil
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -93,3 +95,27 @@ class LockedJsonFile:
             return data
         finally:
             self._release_lock()
+
+    async def aread(self) -> Any:
+        return await asyncio.to_thread(self.read)
+
+    async def awrite(self, data: Any) -> None:
+        await asyncio.to_thread(self.write, data)
+
+    async def aupdate(self, mutator: Callable[[Any], Any]) -> Any:
+        return await asyncio.to_thread(self.update, mutator)
+
+
+def migrate_legacy_data_files(project_root: Path, mappings: dict[str, Path]) -> None:
+    """Move JSON data files from the repo root into data/ on first run."""
+    for legacy_name, target_path in mappings.items():
+        legacy_path = project_root / legacy_name
+        if not legacy_path.is_file():
+            continue
+        if target_path.is_file():
+            log.info("Keeping existing %s; not overwriting with legacy %s.", target_path, legacy_path)
+            continue
+
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(legacy_path), str(target_path))
+        log.info("Migrated %s -> %s", legacy_path, target_path)

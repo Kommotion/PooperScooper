@@ -168,3 +168,13 @@ def get_server_config_manager() -> ServerConfigManager:
 
 def get_guild_config(guild_id: int) -> Optional[ServerConfig]:
     return get_server_config_manager().load(guild_id)
+
+
+def list_palworld_enabled_guild_ids() -> list[int]:
+    """Guild IDs with palworld.enabled in server_configs."""
+    enabled: list[int] = []
+    for guild_id in get_server_config_manager().list_configured_guild_ids():
+        config = get_guild_config(guild_id)
+        if config is not None and config.enabled and config.palworld_enabled:
+            enabled.append(guild_id)
+    return enabled

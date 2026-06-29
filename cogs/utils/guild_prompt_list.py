@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 from difflib import SequenceMatcher
-from typing import Optional
 
 import discord
 from discord import app_commands
@@ -21,24 +20,24 @@ MAX_AUTOCOMPLETE_CHOICES = 25
 class GuildPromptList:
     def __init__(self, json_path: str, *, indent: int | None = 4):
         self._store = LockedJsonFile(json_path, default=dict, indent=indent)
-        self.data: dict[str, list[str]] = self._store.read()
+        self.data: dict[str, list[str]] = {}
 
-    def load(self) -> None:
-        self.data = self._store.read()
+    async def load(self) -> None:
+        self.data = await self._store.aread()
 
-    def dump(self) -> None:
-        self._store.write(self.data)
+    async def dump(self) -> None:
+        await self._store.awrite(self.data)
 
     def get_list(self, guild_id: int) -> list[str]:
         return list(self.data.get(str(guild_id), []))
 
-    def _prompt_already_exists(self, existing_lowercase: list[str], new_prompt: str) -> tuple[bool, Optional[str]]:
+    def _prompt_already_exists(self, existing_lowercase: list[str], new_prompt: str) -> tuple[bool, str | None]:
         for existing_prompt in existing_lowercase:
             if SequenceMatcher(None, existing_prompt, new_prompt).ratio() >= SIMILARITY_THRESHOLD:
                 return True, existing_prompt
         return False, None
 
-    def add(self, guild_id: int, prompt: str) -> tuple[bool, str]:
+    async def add(self, guild_id: int, prompt: str) -> tuple[bool, str]:
         guild_key = str(guild_id)
         prompt = prompt.strip()
         if not prompt:
@@ -57,10 +56,10 @@ class GuildPromptList:
             log.exception("Unable to add prompt: %s", e)
             return False, "An unknown error occurred."
 
-        self.dump()
+        await self.dump()
         return True, ""
 
-    def remove(self, guild_id: int, prompt: str) -> bool:
+    async def remove(self, guild_id: int, prompt: str) -> bool:
         guild_key = str(guild_id)
         prompt = prompt.strip()
         lowercase_prompt = prompt.lower()
@@ -74,7 +73,7 @@ class GuildPromptList:
         except ValueError:
             return False
 
-        self.dump()
+        await self.dump()
         return True
 
     def autocomplete_choices(self, guild_id: int, current: str) -> list[app_commands.Choice[str]]:

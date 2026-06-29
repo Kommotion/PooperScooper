@@ -1,0 +1,30 @@
+services:
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      LAVALINK_HOST: lavalink
+    volumes:
+      - ./config.json:/app/config.json:ro
+      - ./server_configs:/app/server_configs:ro
+      - ./data:/app/data
+      - ./logs:/app/logs
+    depends_on:
+      lavalink:
+        condition: service_healthy
+
+  lavalink:
+    image: ghcr.io/lavalink-devs/lavalink:4
+    restart: unless-stopped
+    volumes:
+      - ./lavalink/application.yml:/opt/Lavalink/application.yml:ro
+    ports:
+      - "2333:2333"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:2333/version"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s

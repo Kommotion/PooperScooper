@@ -2,16 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass
-from pathlib import Path
+
+from cogs.utils.config import PalworldConfig, load_palworld_config
 
 log = logging.getLogger(__name__)
-
-_BASE_DIR = Path(__file__).resolve().parents[2]
-PALWORLD_CONFIG_PATH = _BASE_DIR / "palworld_config.json"
-PALWORLD_CONFIG_EXAMPLE_PATH = _BASE_DIR / "palworld_config.example.json"
 
 
 @dataclass(frozen=True)
@@ -29,36 +25,21 @@ class PalworldSettings:
     status_channel_id: int | None = None
 
     @classmethod
-    def from_dict(cls, data: dict) -> "PalworldSettings":
+    def from_config(cls, config: PalworldConfig) -> "PalworldSettings":
         return cls(
-            automatic_restart=bool(data.get("automatic_restart", True)),
-            wait_before_restart_seconds=int(data.get("wait_before_restart_seconds", 60)),
-            automatic_restart_every_x_hours=int(data.get("automatic_restart_every_x_hours", 6)),
-            backup_on_restart=bool(data.get("backup_on_restart", False)),
-            backup_every_x_hours=int(data.get("backup_every_x_hours", 4)),
-            rotate_after_x_backups=int(data.get("rotate_after_x_backups", 20)),
-            rotate_logs_every_x_runs=int(data.get("rotate_logs_every_x_runs", 10)),
-            log_level=str(data.get("log_level", "INFO")),
-            operating_system=str(data.get("operating_system", "windows")),
-            loop_sleep=int(data.get("loop_sleep", 30)),
-            status_channel_id=(
-                int(data["status_channel_id"])
-                if data.get("status_channel_id") is not None
-                else None
-            ),
+            automatic_restart=config.automatic_restart,
+            wait_before_restart_seconds=config.wait_before_restart_seconds,
+            automatic_restart_every_x_hours=config.automatic_restart_every_x_hours,
+            backup_on_restart=config.backup_on_restart,
+            backup_every_x_hours=config.backup_every_x_hours,
+            rotate_after_x_backups=config.rotate_after_x_backups,
+            rotate_logs_every_x_runs=config.rotate_logs_every_x_runs,
+            log_level=config.log_level,
+            operating_system=config.operating_system,
+            loop_sleep=config.loop_sleep,
+            status_channel_id=config.status_channel_id,
         )
 
 
-def load_palworld_settings(path: Path = PALWORLD_CONFIG_PATH) -> PalworldSettings:
-    if not path.is_file():
-        log.warning("Missing %s; using default Palworld settings.", path)
-        return PalworldSettings()
-
-    try:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, OSError) as e:
-        log.error("Failed to load %s (%s); using defaults.", path, e)
-        return PalworldSettings()
-
-    return PalworldSettings.from_dict(data)
+def load_palworld_settings() -> PalworldSettings:
+    return PalworldSettings.from_config(load_palworld_config())
