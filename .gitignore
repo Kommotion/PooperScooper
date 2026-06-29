@@ -90,6 +90,17 @@ celerybeat-schedule
 # Runtime bot data (per-guild lists, trackers)
 data/*.json
 !data/.gitkeep
+gametime.json
+birthday.json
+bingo.json
+game_picker.json
+grammarpolice.json
+poll.json
+bingo_card.png
+
+# Palworld runtime config and backups
+palworld_config.json
+palworld_backups/
 
 # Local secrets and generated Lavalink runtime files
 config.json
@@ -99,6 +110,14 @@ lavalink/yt-dlp-wrapper.sh
 lavalink/Lavalink.jar
 lavalink/logs/
 lavalink/plugins/
+lavalink/load_test.json
+
+# IDE / local tooling / generated assets
+.idea/
+agent-tools/
+terminals/
+task_scheduler_xmls/
+ComfyUI_New/
 
 # virtualenv
 .venv
