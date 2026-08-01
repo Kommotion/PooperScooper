@@ -38,12 +38,34 @@ class LavalinkConfig(BaseModel):
         return str(value).strip() or "lavalink"
 
 
+class ComfyUIConfig(BaseModel):
+    """Single ComfyUI backend shared by the Discord bot and Comfy Desktop UI."""
+
+    host: str = "127.0.0.1"
+    port: int = Field(default=8188, ge=1, le=65535)
+    # Relative to project root, or absolute. Default is the unified install.
+    root: str = "ComfyUI_New"
+    auto_start: bool = True
+
+    @field_validator("root", mode="before")
+    @classmethod
+    def _strip_root(cls, value: Any) -> str:
+        return str(value).strip() or "ComfyUI_New"
+
+    def resolved_root(self) -> Path:
+        path = Path(self.root)
+        if not path.is_absolute():
+            path = PROJECT_ROOT / path
+        return path.resolve()
+
+
 class BotConfig(BaseModel):
     token: SecretStr
     client_id: str
     spotify_client_id: str = ""
     spotify_secret: SecretStr = SecretStr("")
     lavalink: LavalinkConfig = Field(default_factory=LavalinkConfig)
+    comfyui: ComfyUIConfig = Field(default_factory=ComfyUIConfig)
 
     def to_credentials_dict(self) -> dict[str, Any]:
         """Legacy dict shape used by Lavalink helpers and Wavelink bootstrap."""
@@ -68,7 +90,8 @@ class PalworldConfig(BaseModel):
 
 
 def _read_json_file(path: Path) -> dict[str, Any]:
-    with open(path, encoding="utf-8") as handle:
+    # utf-8-sig tolerates a BOM (common when editors save as "UTF-8 with BOM" on Windows)
+    with open(path, encoding="utf-8-sig") as handle:
         return json.load(handle)
 
 
@@ -96,6 +119,10 @@ def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:
         "LAVALINK_SPOTIFY_COUNTRY_CODE": ("lavalink", "spotify_country_code"),
         "LAVALINK_DEEZER_ARL": ("lavalink", "deezer_arl"),
         "LAVALINK_STARTUP_TIMEOUT_SECONDS": ("lavalink", "startup_timeout_seconds"),
+        "COMFYUI_HOST": ("comfyui", "host"),
+        "COMFYUI_PORT": ("comfyui", "port"),
+        "COMFYUI_ROOT": ("comfyui", "root"),
+        "COMFYUI_AUTO_START": ("comfyui", "auto_start"),
     }
 
     for env_name, location in env_map.items():

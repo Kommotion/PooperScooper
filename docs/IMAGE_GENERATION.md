@@ -9,16 +9,45 @@ This document explains how PooperScooper's Discord image generation works, how t
 | `cogs/imagediffusion.py` | Discord commands, queue, UI modals, health watcher |
 | `cogs/utils/image_models.py` | Model enum, workflow classes, prompt patching, generation |
 | `cogs/utils/comfy_client.py` | ComfyUI process management, API calls, `/free` memory |
-| `ComfyUI_New/` | ComfyUI install (port **8188** by default) |
-| `ComfyUI_New/user/default/workflows/` | API-format workflow JSON files |
+| `ComfyUI_New/` | **Unified** ComfyUI install (port **8188**) for Discord bot + Comfy Desktop |
+| `ComfyUI_New/models/` | Single model store (checkpoints, diffusion_models, text_encoders, vae, …) |
+| `ComfyUI_New/user/default/workflows/` | UI + API workflow JSON (Desktop workflows junction here too) |
+| `config.json` → `comfyui` | `host`, `port`, `root`, `auto_start` for the bot |
+
+### One ComfyUI, two clients
+
+```
+ComfyUI_New (server on :8188)
+  ├── models/          ← only place to put weights
+  └── user/.../workflows/  ← Desktop + bot both use this folder
+
+Discord bot  ──HTTP──►  :8188   (starts server if down, or attaches if up)
+Comfy Desktop ────────►  :8188   (launchArgs --port 8188; modelsDirs → ComfyUI_New/models)
+Browser UI   ─────────►  http://127.0.0.1:8188
+```
+
+- **Do not** maintain a second model tree under `Documents\ComfyUI\models` for daily use.
+- Desktop’s workflow list is a **junction** to `ComfyUI_New\user\default\workflows`.
+- If Desktop rewrites `shared_model_paths.yaml`, set models dir back to `ComfyUI_New\models` only.
+- Env overrides: `COMFYUI_HOST`, `COMFYUI_PORT`, `COMFYUI_ROOT`, `COMFYUI_AUTO_START`.
 
 **Current models:**
 
-| Enum value | Class | Workflow JSON |
-|------------|-------|---------------|
-| `anime_wai_illustrious` | `ComfyWaiIllustriousModel` | `WAI-ILLUSTRIOUS-SDXL_API.json` |
-| `z_image_turbo_fp8` | `ComfyZImageTurboModel` | `Z_IMAGE_TURBO_FP8_API.json` |
-| `anime_wai_anima` | `ComfyWaiAnimaModel` | `WAI-ANIMA_API.json` |
+| Enum value | Class | Workflow JSON | Notes |
+|------------|-------|---------------|--------|
+| `anime_wai_illustrious` | `ComfyWaiIllustriousModel` | `WAI-ILLUSTRIOUS-SDXL_API.json` | SDXL |
+| `z_image_turbo_fp8` | `ComfyZImageTurboModel` | `Z_IMAGE_TURBO_FP8_API.json` | |
+| `anima_aesthetic` | `ComfyAnimaAestheticModel` | `ANIMA_AESTHETIC_API.json` | Base Anima aesthetic v1.1 |
+| `one_obsession_illustrious` | `ComfyOneObsessionIllustriousModel` | `ONE_OBSESSION_ILLUSTRIOUS_API.json` | Label **(NSFW)** |
+| `one_obsession_anima` | `ComfyOneObsessionAnimaModel` | `ONE_OBSESSION_ANIMA_API.json` | Label **(NSFW)** |
+| `krea2_turbo` | `ComfyKrea2TurboModel` | `KREA2_TURBO_INT8_API.json` / `_ENHANCE` | INT8 Turbo |
+| `redcraft` | `ComfyRedCraftModel` | `REDCRAFT_KREA2_API.json` / `_ENHANCE` | RedCraft 2.3 Krea2 INT8/INT4/FP8 |
+
+**Removed from Discord:** WAI ANIMA (`anime_wai_anima`) — replaced by base **Anima Aesthetic**.
+
+**Krea LLM enhance:** slash `/imagegen generate` option `llm_prompt_enhance` (default **No**). Pref-view button still available for regenerate flow. When Yes + Krea-family (Krea 2 Turbo, RedCraft), uses `TextGenerate` before sampling.
+
+**RedCraft weights:** `ComfyUI_New/models/diffusion_models/redcraft23INT8INT4FP8_30Krea2.safetensors` (same CLIP/VAE as Krea 2: `qwen3vl_4b_fp8_scaled` + `qwen_image_vae`).
 
 ---
 

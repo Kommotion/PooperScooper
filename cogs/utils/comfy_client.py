@@ -5,24 +5,55 @@ import json
 import logging
 import subprocess
 from enum import StrEnum
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 
 import requests
 
 log = logging.getLogger(__name__)
 
 
-DEFAULT_COMFY_HOST = "127.0.0.1"
-DEFAULT_COMFY_PORT = 8188
+# Fallbacks used when config.json is missing or incomplete.
+_FALLBACK_COMFY_HOST = "127.0.0.1"
+_FALLBACK_COMFY_PORT = 8188
 READINESS_TIMEOUT_SEC = 120.0
 READINESS_POLL_INTERVAL_SEC = 2.0
 
 
-def comfy_base_url(host: str = DEFAULT_COMFY_HOST, port: int = DEFAULT_COMFY_PORT) -> str:
+def _settings_from_config() -> Tuple[str, int, str, bool]:
+    """Return (host, port, root, auto_start) from config.json when available."""
+    try:
+        from cogs.utils.config import load_config
+
+        cfg = load_config().comfyui
+        return cfg.host, int(cfg.port), str(cfg.resolved_root()), bool(cfg.auto_start)
+    except Exception as exc:
+        log.debug("ComfyUI settings falling back to defaults (%s)", exc)
+        root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "ComfyUI_New"))
+        return _FALLBACK_COMFY_HOST, _FALLBACK_COMFY_PORT, root, True
+
+
+def get_comfy_settings() -> Tuple[str, int, str, bool]:
+    return _settings_from_config()
+
+
+# Back-compat names; prefer get_comfy_settings() / resolve inside call sites.
+DEFAULT_COMFY_HOST = _FALLBACK_COMFY_HOST
+DEFAULT_COMFY_PORT = _FALLBACK_COMFY_PORT
+
+
+def comfy_base_url(host: str = None, port: int = None) -> str:
+    if host is None or port is None:
+        cfg_host, cfg_port, _, _ = _settings_from_config()
+        host = host if host is not None else cfg_host
+        port = port if port is not None else cfg_port
     return f"http://{host}:{port}"
 
 
-def is_comfy_running(host: str = DEFAULT_COMFY_HOST, port: int = DEFAULT_COMFY_PORT, timeout: float = 2.0) -> bool:
+def is_comfy_running(host: str = None, port: int = None, timeout: float = 2.0) -> bool:
+    if host is None or port is None:
+        cfg_host, cfg_port, _, _ = _settings_from_config()
+        host = host if host is not None else cfg_host
+        port = port if port is not None else cfg_port
     try:
         r = requests.get(f"{comfy_base_url(host, port)}/system_stats", timeout=timeout)
         return r.status_code == 200
@@ -37,7 +68,8 @@ class ComfySource(StrEnum):
 
 
 def default_comfy_root() -> str:
-    return os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'ComfyUI_New'))
+    _, _, root, _ = _settings_from_config()
+    return root
 
 
 def comfy_log_path(comfy_root: Optional[str] = None) -> str:
@@ -46,12 +78,16 @@ def comfy_log_path(comfy_root: Optional[str] = None) -> str:
 
 
 def wait_until_ready(
-    host: str = DEFAULT_COMFY_HOST,
-    port: int = DEFAULT_COMFY_PORT,
+    host: str = None,
+    port: int = None,
     timeout_sec: float = READINESS_TIMEOUT_SEC,
     poll_interval_sec: float = READINESS_POLL_INTERVAL_SEC,
 ) -> bool:
     """Poll /system_stats until ComfyUI responds or timeout."""
+    if host is None or port is None:
+        cfg_host, cfg_port, _, _ = _settings_from_config()
+        host = host if host is not None else cfg_host
+        port = port if port is not None else cfg_port
     deadline = time.time() + timeout_sec
     while time.time() < deadline:
         if is_comfy_running(host=host, port=port):
@@ -74,11 +110,19 @@ class ComfyManager:
     def ensure_comfy_running(
         self,
         comfy_root: Optional[str] = None,
-        host: str = DEFAULT_COMFY_HOST,
-        port: int = DEFAULT_COMFY_PORT,
+        host: str = None,
+        port: int = None,
         extra_args: Optional[list] = None,
         readiness_timeout_sec: float = READINESS_TIMEOUT_SEC,
+        auto_start: Optional[bool] = None,
     ) -> ComfySource:
+        cfg_host, cfg_port, cfg_root, cfg_auto = _settings_from_config()
+        host = host if host is not None else cfg_host
+        port = port if port is not None else cfg_port
+        comfy_root = comfy_root if comfy_root is not None else cfg_root
+        if auto_start is None:
+            auto_start = cfg_auto
+
         self._host = host
         self._port = port
         self._last_health_check = time.time()
@@ -90,6 +134,13 @@ class ComfyManager:
                 self._source = ComfySource.EXTERNAL
             log.info(f"ComfyUI already running on {host}:{port} (source={self._source})")
             return self._source
+
+        if not auto_start:
+            self._source = ComfySource.DOWN
+            raise RuntimeError(
+                f"ComfyUI is not running on {host}:{port} and comfyui.auto_start is false. "
+                "Start Comfy Desktop / ComfyUI_New first, or set comfyui.auto_start true."
+            )
 
         process = start_comfy(comfy_root=comfy_root, host=host, port=port, extra_args=extra_args)
         if process is None:
@@ -115,7 +166,11 @@ class ComfyManager:
         return self._source
 
     def get_status(self) -> Dict[str, Any]:
-        running = is_comfy_running(host=self._host, port=self._port)
+        cfg_host, cfg_port, cfg_root, _ = _settings_from_config()
+        # Prefer last known host/port; fall back to config.
+        host = self._host or cfg_host
+        port = self._port or cfg_port
+        running = is_comfy_running(host=host, port=port)
         self._last_health_check = time.time()
         pid = self._process.pid if self._process is not None else None
         if running and self._source == ComfySource.DOWN:
@@ -126,8 +181,9 @@ class ComfyManager:
             "running": running,
             "ready": running,
             "source": self._source.value,
-            "host": self._host,
-            "port": self._port,
+            "host": host,
+            "port": port,
+            "root": cfg_root,
             "pid": pid,
             "bot_owns_process": self.bot_owns_process(),
             "last_health_check": self._last_health_check,
@@ -157,6 +213,17 @@ class ComfyManager:
 manager = ComfyManager()
 
 
+def apply_config_defaults() -> None:
+    """Reload host/port defaults from config into module globals and the manager."""
+    global DEFAULT_COMFY_HOST, DEFAULT_COMFY_PORT
+    host, port, root, _auto = _settings_from_config()
+    DEFAULT_COMFY_HOST = host
+    DEFAULT_COMFY_PORT = port
+    manager._host = host
+    manager._port = port
+    log.info("ComfyUI config: host=%s port=%s root=%s", host, port, root)
+
+
 def ensure_comfy_running(**kwargs) -> ComfySource:
     return manager.ensure_comfy_running(**kwargs)
 
@@ -169,22 +236,49 @@ def shutdown_if_bot_started() -> None:
     manager.shutdown_if_bot_started()
 
 
-def start_comfy(comfy_root: str = None, host: str = DEFAULT_COMFY_HOST, port: int = DEFAULT_COMFY_PORT, extra_args: Optional[list] = None) -> Optional[subprocess.Popen]:
+def start_comfy(comfy_root: str = None, host: str = None, port: int = None, extra_args: Optional[list] = None) -> Optional[subprocess.Popen]:
     """
     Start ComfyUI as a background process. Returns subprocess.Popen or None on error.
 
-    comfy_root: path to the ComfyUI folder (where `main.py` lives). If None the code will try to find it relative to this file.
+    comfy_root: path to the ComfyUI folder (where `main.py` lives). If None, uses config.comfyui.root.
     extra_args: list of additional CLI args to pass, e.g. ['--disable-auto-launch', '--fp8_e4m3fn-unet']
     """
+    cfg_host, cfg_port, cfg_root, _ = _settings_from_config()
     if comfy_root is None:
-        comfy_root = default_comfy_root()
+        comfy_root = cfg_root
+    if host is None:
+        host = cfg_host
+    if port is None:
+        port = cfg_port
 
     main_py = os.path.join(comfy_root, 'main.py')
     if not os.path.isfile(main_py):
         log.error(f"ComfyUI main.py not found at: {main_py}")
         return None
 
-    cmd = [os.sys.executable, main_py, '--port', str(port), '--disable-auto-launch', '--dont-print-server']
+    # Prefer ComfyUI's own venv (CUDA torch) over the bot process interpreter.
+    comfy_python = os.sys.executable
+    if os.name == "nt":
+        candidate = os.path.join(comfy_root, ".venv", "Scripts", "python.exe")
+    else:
+        candidate = os.path.join(comfy_root, ".venv", "bin", "python")
+    if os.path.isfile(candidate):
+        comfy_python = candidate
+
+    # Listen on the configured host/port so Desktop and the bot share one server.
+    cmd = [
+        comfy_python,
+        main_py,
+        "--listen",
+        host if host not in ("127.0.0.1", "localhost") else "127.0.0.1",
+        "--port",
+        str(port),
+        "--disable-auto-launch",
+        "--dont-print-server",
+    ]
+    extra_paths = os.path.join(comfy_root, "extra_model_paths.yaml")
+    if os.path.isfile(extra_paths):
+        cmd.extend(["--extra-model-paths-config", extra_paths])
     if extra_args:
         cmd.extend(extra_args)
 

@@ -17,12 +17,54 @@ from cogs.utils.image_models import (
     ImageCreation,
     ComfyWaiIllustriousModel,
     ComfyZImageTurboModel,
-    ComfyWaiAnimaModel,
+    ComfyAnimaAestheticModel,
+    ComfyOneObsessionIllustriousModel,
+    ComfyOneObsessionAnimaModel,
+    ComfyKrea2TurboModel,
+    ComfyRedCraftModel,
 )
 from cogs.utils import comfy_client
 from cogs.utils.server_config import get_guild_config
 
 log = logging.getLogger(__name__)
+
+# asyncio / Comfy wait budgets (seconds). LLM TextGenerate on Krea-family can run long.
+GENERATION_TIMEOUT_SEC = 600
+GENERATION_TIMEOUT_LLM_ENHANCE_SEC = 1800  # 30 min — enhance + sample
+# Max chars of the user prompt shown above the image (full text is in "See prompt details").
+PROMPT_PREVIEW_MAX_CHARS = 160
+# Discord embed field value limit.
+DISCORD_EMBED_FIELD_MAX = 1024
+
+
+def _preview_prompt(text: str, max_chars: int = PROMPT_PREVIEW_MAX_CHARS) -> str:
+    """Short one-line-ish preview for the public channel message."""
+    text = (text or "").replace("\n", " ").strip()
+    if len(text) <= max_chars:
+        return text
+    return text[: max(1, max_chars - 1)].rstrip() + "…"
+
+
+def _add_long_embed_field(embed: discord.Embed, name: str, value: str, *, max_total: int = 4000) -> None:
+    """Add a field, splitting long text across continuation fields (Discord 1024/field)."""
+    value = value if value else "None"
+    if len(value) <= DISCORD_EMBED_FIELD_MAX:
+        embed.add_field(name=name, value=value, inline=False)
+        return
+    clipped = value[:max_total]
+    chunks = [
+        clipped[i : i + DISCORD_EMBED_FIELD_MAX]
+        for i in range(0, len(clipped), DISCORD_EMBED_FIELD_MAX)
+    ]
+    for i, chunk in enumerate(chunks):
+        field_name = name if i == 0 else f"{name} (cont. {i + 1})"
+        embed.add_field(name=field_name, value=chunk, inline=False)
+    if len(value) > max_total:
+        embed.add_field(
+            name=f"{name} (truncated)",
+            value=f"…and {len(value) - max_total} more characters not shown.",
+            inline=False,
+        )
 
 
 class PromptType(StrEnum):
@@ -48,6 +90,7 @@ class ImageGenPrefView(ui.View):
                  default_pos: DefaultChoice = DefaultChoice.YES,
                  default_neg: DefaultChoice = DefaultChoice.YES,
                  nsfw_level: NsfwLevel = NsfwLevel.NOT_SPECIFIED,
+                 llm_prompt_enhance: DefaultChoice = DefaultChoice.NO,
                  initial_prompt: str = "",
                  initial_negative_prompt: str = ""):
         super().__init__(timeout=300)
@@ -57,21 +100,55 @@ class ImageGenPrefView(ui.View):
         self.default_pos = default_pos
         self.default_neg = default_neg
         self.nsfw = nsfw_level
+        self.llm_prompt_enhance = llm_prompt_enhance
         self.initial_prompt = initial_prompt
         self.initial_negative_prompt = initial_negative_prompt
 
         self.model_select = ui.Select(
             placeholder="Select a model (required)",
             options=[
-                discord.SelectOption(label="Anime WAI Illustrious", value=Models.ANIME_WAI_ILLUSTRIOUS,
-                                     description="WAI Illustrious anime-style images",
-                                     default=(default_model == Models.ANIME_WAI_ILLUSTRIOUS)),
-                discord.SelectOption(label="Z Image Turbo", value=Models.Z_IMAGE_TURBO_FP8,
-                                     description="Z Image Turbo Model",
-                                     default=(default_model == Models.Z_IMAGE_TURBO_FP8)),
-                discord.SelectOption(label="WAI ANIMA", value=Models.WAI_ANIMA,
-                                     description="WAI ANIMA anime-style model",
-                                     default=(default_model == Models.WAI_ANIMA)),
+                discord.SelectOption(
+                    label="Anime WAI Illustrious",
+                    value=Models.ANIME_WAI_ILLUSTRIOUS,
+                    description="WAI Illustrious SDXL anime",
+                    default=(default_model == Models.ANIME_WAI_ILLUSTRIOUS),
+                ),
+                discord.SelectOption(
+                    label="Z Image Turbo",
+                    value=Models.Z_IMAGE_TURBO_FP8,
+                    description="Z-Image Turbo FP8",
+                    default=(default_model == Models.Z_IMAGE_TURBO_FP8),
+                ),
+                discord.SelectOption(
+                    label="Anima Aesthetic",
+                    value=Models.ANIMA_AESTHETIC,
+                    description="Base Anima aesthetic v1.1",
+                    default=(default_model == Models.ANIMA_AESTHETIC),
+                ),
+                discord.SelectOption(
+                    label="One Obsession Illustrious (NSFW)",
+                    value=Models.ONE_OBSESSION_ILLUSTRIOUS,
+                    description="One Obsession v23 Illustrious",
+                    default=(default_model == Models.ONE_OBSESSION_ILLUSTRIOUS),
+                ),
+                discord.SelectOption(
+                    label="One Obsession Anima (NSFW)",
+                    value=Models.ONE_OBSESSION_ANIMA,
+                    description="One Obsession Anima v2.0",
+                    default=(default_model == Models.ONE_OBSESSION_ANIMA),
+                ),
+                discord.SelectOption(
+                    label="Krea 2 Turbo",
+                    value=Models.KREA2_TURBO,
+                    description="Krea 2 Turbo INT8 (~8 steps)",
+                    default=(default_model == Models.KREA2_TURBO),
+                ),
+                discord.SelectOption(
+                    label="RedCraft",
+                    value=Models.REDCRAFT,
+                    description="RedCraft 2.3 Krea2 INT8/INT4/FP8",
+                    default=(default_model == Models.REDCRAFT),
+                ),
             ]
         )
         self.model_select.callback = self.model_callback
@@ -114,6 +191,28 @@ class ImageGenPrefView(ui.View):
         self.nsfw_select.callback = self.nsfw_callback
         self.add_item(self.nsfw_select)
 
+        # Discord allows 5 action rows: 4 selects above + 1 button row with Continue + LLM toggle.
+        self._llm_enhance_on = llm_prompt_enhance == DefaultChoice.YES
+        self.llm_toggle_button = ui.Button(
+            label=self._llm_enhance_label(),
+            style=discord.ButtonStyle.secondary if not self._llm_enhance_on else discord.ButtonStyle.primary,
+            row=4,
+        )
+        self.llm_toggle_button.callback = self.llm_toggle_callback
+        self.add_item(self.llm_toggle_button)
+
+        self.continue_button = ui.Button(
+            label="Continue",
+            style=discord.ButtonStyle.green,
+            row=4,
+        )
+        self.continue_button.callback = self.continue_callback
+        self.add_item(self.continue_button)
+
+    def _llm_enhance_label(self) -> str:
+        state = "ON" if self._llm_enhance_on else "OFF"
+        return f"LLM prompt enhance: {state}"
+
     async def model_callback(self, interaction: discord.Interaction):
         self.model = self.model_select.values[0]
         await interaction.response.defer()
@@ -130,8 +229,16 @@ class ImageGenPrefView(ui.View):
         self.nsfw = self.nsfw_select.values[0]
         await interaction.response.defer()
 
-    @ui.button(label="Continue", style=discord.ButtonStyle.green)
-    async def continue_button(self, interaction: discord.Interaction, button: ui.Button):
+    async def llm_toggle_callback(self, interaction: discord.Interaction):
+        self._llm_enhance_on = not self._llm_enhance_on
+        self.llm_prompt_enhance = DefaultChoice.YES if self._llm_enhance_on else DefaultChoice.NO
+        self.llm_toggle_button.label = self._llm_enhance_label()
+        self.llm_toggle_button.style = (
+            discord.ButtonStyle.primary if self._llm_enhance_on else discord.ButtonStyle.secondary
+        )
+        await interaction.response.edit_message(view=self)
+
+    async def continue_callback(self, interaction: discord.Interaction):
         if not self.model:
             await interaction.response.send_message("Please select a model before continuing.", ephemeral=True)
             return
@@ -141,30 +248,34 @@ class ImageGenPrefView(ui.View):
             add_default_positive=self.default_pos,
             add_default_negative=self.default_neg,
             nsfw_level=self.nsfw,
+            llm_prompt_enhance=self._llm_enhance_on,
             initial_prompt=self.initial_prompt,
             initial_negative_prompt=self.initial_negative_prompt,
         )
         await interaction.response.send_modal(image_gen_modal)
         await image_gen_modal.wait()
-        # Disable all buttons in the view
         for child in self.children:
-            if isinstance(child, ui.Button):
+            if isinstance(child, (ui.Button, ui.Select)):
                 child.disabled = True
-            if isinstance(child, ui.Select):
-                child.disabled = True
-        await interaction.edit_original_response(view=self)
+        try:
+            await interaction.edit_original_response(view=self)
+        except Exception:
+            pass
+
 
 class ImageGenPromptModal(ui.Modal, title="🖼️ Enter Prompt for Image Generation"):
     def __init__(self, cog: 'ImageDiffusion', model: Models, add_default_positive: DefaultChoice,
                  add_default_negative: DefaultChoice, nsfw_level: NsfwLevel,
-                 initial_prompt: str = "", initial_negative_prompt: str = "", view: ui.View=None,
-                 original_response = None):
+                 llm_prompt_enhance: bool = False,
+                 initial_prompt: str = "", initial_negative_prompt: str = "", view: ui.View = None,
+                 original_response=None):
         super().__init__()
         self.cog = cog
         self.model = model
         self.add_default_positive = add_default_positive
         self.add_default_negative = add_default_negative
         self.nsfw_level = nsfw_level
+        self.llm_prompt_enhance = llm_prompt_enhance
         self.view = view
         self.ephemeral_message = original_response
 
@@ -174,7 +285,7 @@ class ImageGenPromptModal(ui.Modal, title="🖼️ Enter Prompt for Image Genera
             required=True,
             max_length=1000,
             style=discord.TextStyle.paragraph,
-            default=initial_prompt
+            default=initial_prompt,
         )
 
         self.negative_prompt = ui.TextInput(
@@ -182,7 +293,7 @@ class ImageGenPromptModal(ui.Modal, title="🖼️ Enter Prompt for Image Genera
             placeholder="e.g., blurry, out of focus",
             required=False,
             max_length=1000,
-            default=initial_negative_prompt
+            default=initial_negative_prompt,
         )
         self.add_item(self.prompt)
         self.add_item(self.negative_prompt)
@@ -195,7 +306,8 @@ class ImageGenPromptModal(ui.Modal, title="🖼️ Enter Prompt for Image Genera
             negative_prompt=self.negative_prompt.value,
             use_default_positive=self.add_default_positive == DefaultChoice.YES,
             use_default_negative=self.add_default_negative == DefaultChoice.YES,
-            nsfw=self.nsfw_level
+            nsfw=self.nsfw_level,
+            llm_prompt_enhance=self.llm_prompt_enhance,
         )
 
 
@@ -220,6 +332,7 @@ class PromptDetailButton(ui.View):
         self.use_default_positive = image.use_default_positive
         self.use_default_negative = image.use_default_negative
         self.nsfw_level = image.nsfw
+        self.llm_prompt_enhance = image.llm_prompt_enhance
         self.author_id = author_id
         self.gen_time = gen_time
         self.guild_id = guild_id
@@ -245,11 +358,13 @@ class PromptDetailButton(ui.View):
             color=discord.Color.blurple()
         )
 
-        embed.add_field(name="Positive Prompt", value=self.positive[:1024], inline=False)
-        embed.add_field(name="Negative Prompt", value=self.negative[:1024] or 'None', inline=False)
-        embed.add_field(name="Added default positive prompt", value=self.use_default_positive, inline=False)
-        embed.add_field(name="Added default negative prompt", value=self.use_default_negative, inline=False)
-        embed.add_field(name="Nsfw Level", value=self.nsfw_level, inline=False)
+        _add_long_embed_field(embed, "User Prompt", self.user_prompt)
+        _add_long_embed_field(embed, "Positive Prompt", self.positive)
+        _add_long_embed_field(embed, "Negative Prompt", self.negative or "None")
+        embed.add_field(name="Added default positive prompt", value=str(self.use_default_positive), inline=False)
+        embed.add_field(name="Added default negative prompt", value=str(self.use_default_negative), inline=False)
+        embed.add_field(name="Nsfw Level", value=str(self.nsfw_level), inline=False)
+        embed.add_field(name="LLM prompt enhance", value=str(self.llm_prompt_enhance), inline=False)
         embed.add_field(name="Generation time", value=f"{self.gen_time:.2f} seconds", inline=False)
         self.already_clicked_prompt_details.add(interaction.user.id)
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -274,6 +389,7 @@ class PromptDetailButton(ui.View):
             default_pos=DefaultChoice.YES if self.use_default_positive else DefaultChoice.NO,
             default_neg=DefaultChoice.YES if self.use_default_negative else DefaultChoice.NO,
             nsfw_level=self.nsfw_level,
+            llm_prompt_enhance=DefaultChoice.YES if self.llm_prompt_enhance else DefaultChoice.NO,
             initial_prompt=self.user_prompt,
             initial_negative_prompt=self.user_negative
         )
@@ -304,7 +420,8 @@ class PromptDetailButton(ui.View):
             negative_prompt=self.user_negative,
             use_default_negative=self.use_default_negative,
             use_default_positive=self.use_default_positive,
-            nsfw=self.nsfw_level
+            nsfw=self.nsfw_level,
+            llm_prompt_enhance=self.llm_prompt_enhance,
         )
 
         cog = interaction.client.get_cog("ImageDiffusion")
@@ -346,14 +463,22 @@ class ImageDiffusion(Cog):
         self.models_to_load_on_boot = [
             Models.ANIME_WAI_ILLUSTRIOUS,
             Models.Z_IMAGE_TURBO_FP8,
-            Models.WAI_ANIMA,
+            Models.ANIMA_AESTHETIC,
+            Models.ONE_OBSESSION_ILLUSTRIOUS,
+            Models.ONE_OBSESSION_ANIMA,
+            Models.KREA2_TURBO,
+            Models.REDCRAFT,
         ]
 
         # Map front-end choices to ComfyUI workflows
         self.models = {
             Models.ANIME_WAI_ILLUSTRIOUS: ComfyWaiIllustriousModel(),
             Models.Z_IMAGE_TURBO_FP8: ComfyZImageTurboModel(),
-            Models.WAI_ANIMA: ComfyWaiAnimaModel(),
+            Models.ANIMA_AESTHETIC: ComfyAnimaAestheticModel(),
+            Models.ONE_OBSESSION_ILLUSTRIOUS: ComfyOneObsessionIllustriousModel(),
+            Models.ONE_OBSESSION_ANIMA: ComfyOneObsessionAnimaModel(),
+            Models.KREA2_TURBO: ComfyKrea2TurboModel(),
+            Models.REDCRAFT: ComfyRedCraftModel(),
         }
 
         self.comfy_ready = asyncio.Event()
@@ -373,6 +498,7 @@ class ImageDiffusion(Cog):
     async def _startup(self):
         await self.bot.wait_until_ready()
         try:
+            comfy_client.apply_config_defaults()
             await asyncio.to_thread(comfy_client.ensure_comfy_running)
             await self.load_pipelines()
         except Exception as e:
@@ -404,6 +530,7 @@ class ImageDiffusion(Cog):
             f"Running: {status['running']}",
             f"Source: {status['source']}",
             f"Address: {status['host']}:{status['port']}",
+            f"Root: {status.get('root', 'n/a')}",
             f"PID (bot-started): {status['pid'] or 'n/a'}",
             f"Queue depth: {queue_depth}/{self.image_queue.maxsize}",
         ]
@@ -441,33 +568,57 @@ class ImageDiffusion(Cog):
 
     @imagegen_group.command(name="generate", description='Generate an image using text to image model.')
     @app_commands.describe(
-        model=f'Choose one of these model models.',
+        model='Choose the generation model.',
         prompt='Prompt to generate the image.',
         negative_prompt="(Optional) Avoid these elements in the image.",
         add_default_negative="(Optional) Whether to include the default negative prompt (default: Yes).",
         add_default_positive="(Optional) Whether to include the default positive prompt (default: Yes).",
-        nsfw_level='(Optional) General, sensitive, explicit, nsfw, or Not Specified (default: Not Specified).'
+        nsfw_level='(Optional) General, sensitive, explicit, nsfw, or Not Specified (default: Not Specified).',
+        llm_prompt_enhance='(Optional) Expand prompt with LLM first — Krea family only (default: No).',
     )
+    @app_commands.choices(model=[
+        app_commands.Choice(name="Anime WAI Illustrious", value=Models.ANIME_WAI_ILLUSTRIOUS.value),
+        app_commands.Choice(name="Z Image Turbo", value=Models.Z_IMAGE_TURBO_FP8.value),
+        app_commands.Choice(name="Anima Aesthetic", value=Models.ANIMA_AESTHETIC.value),
+        app_commands.Choice(name="One Obsession Illustrious (NSFW)", value=Models.ONE_OBSESSION_ILLUSTRIOUS.value),
+        app_commands.Choice(name="One Obsession Anima (NSFW)", value=Models.ONE_OBSESSION_ANIMA.value),
+        app_commands.Choice(name="Krea 2 Turbo", value=Models.KREA2_TURBO.value),
+        app_commands.Choice(name="RedCraft", value=Models.REDCRAFT.value),
+    ])
     @app_commands.guild_only()
     async def generate(self, interaction: discord.Interaction,
-                       model: Models,
+                       model: str,
                        prompt: str,
                        negative_prompt: Optional[str] = '',
                        add_default_negative: Optional[DefaultChoice] = DefaultChoice.YES,
                        add_default_positive: Optional[DefaultChoice] = DefaultChoice.YES,
-                       nsfw_level: Optional[NsfwLevel] = NsfwLevel.NOT_SPECIFIED
+                       nsfw_level: Optional[NsfwLevel] = NsfwLevel.NOT_SPECIFIED,
+                       llm_prompt_enhance: Optional[DefaultChoice] = DefaultChoice.NO,
                        ) -> None:
         if not self._is_allowed_channel(interaction.guild_id, interaction.channel_id):
             await interaction.response.send_message("This command is not allowed in this channel!", ephemeral=True)
             return
 
+        try:
+            model_enum = Models(model)
+        except ValueError:
+            await interaction.response.send_message("Invalid model selection.", ephemeral=True)
+            return
+
         add_default_positive = True if add_default_positive == DefaultChoice.YES else False
         add_default_negative = True if add_default_negative == DefaultChoice.YES else False
+        enhance = True if llm_prompt_enhance == DefaultChoice.YES else False
 
-        await self.schedule_generation(prompt, model, interaction=interaction, negative_prompt=negative_prompt,
-                                       use_default_negative=add_default_negative,
-                                       use_default_positive=add_default_positive,
-                                       nsfw=nsfw_level)
+        await self.schedule_generation(
+            prompt,
+            model_enum,
+            interaction=interaction,
+            negative_prompt=negative_prompt,
+            use_default_negative=add_default_negative,
+            use_default_positive=add_default_positive,
+            nsfw=nsfw_level,
+            llm_prompt_enhance=enhance,
+        )
 
     async def enqueue_image(
         self,
@@ -503,14 +654,34 @@ class ImageDiffusion(Cog):
         return True
 
     async def schedule_generation(self, prompt: str, model: Models,
-                                  interaction: discord.Interaction =None, negative_prompt='', use_default_negative=True,
-                                  use_default_positive=True, nsfw: NsfwLevel=NsfwLevel.NOT_SPECIFIED) -> None:
-        image_entry = ImageCreation(prompt, model, interaction=interaction, negative_prompt=negative_prompt,
-                              use_default_negative=use_default_negative, use_default_positive=use_default_positive,
-                              nsfw=nsfw)
+                                  interaction: discord.Interaction = None, negative_prompt='', use_default_negative=True,
+                                  use_default_positive=True, nsfw: NsfwLevel = NsfwLevel.NOT_SPECIFIED,
+                                  llm_prompt_enhance: bool = False) -> None:
+        # LLM enhance is only implemented for Krea-family graphs (Krea 2 Turbo, RedCraft).
+        krea_family = {Models.KREA2_TURBO, Models.REDCRAFT}
+        if llm_prompt_enhance and model not in krea_family:
+            log.info(
+                "llm_prompt_enhance requested for %s but only Krea-family models support it; ignoring",
+                model,
+            )
+            llm_prompt_enhance = False
+
+        image_entry = ImageCreation(
+            prompt,
+            model,
+            interaction=interaction,
+            negative_prompt=negative_prompt,
+            use_default_negative=use_default_negative,
+            use_default_positive=use_default_positive,
+            nsfw=nsfw,
+            llm_prompt_enhance=llm_prompt_enhance,
+        )
 
         if await self.enqueue_image(image_entry, interaction):
-            log.info(f"Added prompt to queue: {prompt} for model: {model}")
+            log.info(
+                f"Added prompt to queue: {prompt} for model: {model} "
+                f"(llm_prompt_enhance={llm_prompt_enhance})"
+            )
 
     @tasks.loop(seconds=1)
     async def image_generation(self) -> None:
@@ -563,7 +734,12 @@ class ImageDiffusion(Cog):
 
     async def _image_generation_interaction(self, image: ImageCreation) -> None:
         """Handles image generation but with an interaction."""
-        timeout = 600
+        # LLM enhance needs a longer budget (TextGenerate + sampling).
+        timeout = (
+            GENERATION_TIMEOUT_LLM_ENHANCE_SEC
+            if image.llm_prompt_enhance
+            else GENERATION_TIMEOUT_SEC
+        )
         model = self.models[image.model]
 
         async def _send_generation_error(message: str):
@@ -586,13 +762,20 @@ class ImageDiffusion(Cog):
                 return
 
         try:
-            output, positive, negative, gen_time = await asyncio.wait_for(model.generate(image), timeout=timeout)
+            output, positive, negative, gen_time = await asyncio.wait_for(
+                model.generate(image), timeout=timeout
+            )
         except asyncio.TimeoutError:
-            log.error("Image generation timed out")
-            await _send_generation_error("Image generation timed out. Try again with a simpler prompt.")
+            log.error("Image generation timed out after %ss (llm_enhance=%s)", timeout, image.llm_prompt_enhance)
+            await _send_generation_error(
+                f"Image generation timed out after {timeout // 60} minutes. "
+                "Try again without LLM enhance or with a simpler prompt."
+            )
             return
         except discord.HTTPException:
-            await _send_generation_error(f"Error generating prompt: {image.prompt}.")
+            await _send_generation_error(
+                f"Error generating prompt: {_preview_prompt(image.prompt, 200)}."
+            )
             return
         except Exception as e:
             log.error(f"Generation failed: {str(e)}")
@@ -617,9 +800,15 @@ class ImageDiffusion(Cog):
             guild_id=image.interaction.guild_id,
         )
 
+        raw_prompt = (image.prompt or "").strip()
+        preview = _preview_prompt(raw_prompt)
+        content = f"**{preview} — `{image.model}` — {image.interaction.user.mention}**"
+        if len(raw_prompt) > PROMPT_PREVIEW_MAX_CHARS:
+            content += "\n-# Full prompt in **See prompt details**"
+
         try:
             prompt_details.message = await image.interaction.channel.send(
-                content=f"**{image.prompt} - {image.model} model - {image.interaction.user.mention}**",
+                content=content,
                 file=file,
                 view=prompt_details,
                 allowed_mentions=discord.AllowedMentions(users=True, replied_user=True)

@@ -17,5 +17,11 @@
         "spotify_country_code": "US",
         "deezer_arl": "",
         "startup_timeout_seconds": 90
+    },
+    "comfyui": {
+        "host": "127.0.0.1",
+        "port": 8188,
+        "root": "ComfyUI_New",
+        "auto_start": true
     }
 }
