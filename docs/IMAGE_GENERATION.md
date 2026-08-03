@@ -42,12 +42,17 @@ Browser UI   ─────────►  http://127.0.0.1:8188
 | `one_obsession_anima` | `ComfyOneObsessionAnimaModel` | `ONE_OBSESSION_ANIMA_API.json` | Label **(NSFW)** |
 | `krea2_turbo` | `ComfyKrea2TurboModel` | `KREA2_TURBO_INT8_API.json` / `_ENHANCE` | INT8 Turbo |
 | `redcraft` | `ComfyRedCraftModel` | `REDCRAFT_KREA2_API.json` / `_ENHANCE` | RedCraft 2.3 Krea2 INT8/INT4/FP8 |
+| `krea2_identity_edit` | `ComfyKrea2IdentityEditModel` | `KREA2_IDENTITY_EDIT_API.json` | Instruction edit + source image |
 
 **Removed from Discord:** WAI ANIMA (`anime_wai_anima`) — replaced by base **Anima Aesthetic**.
 
 **Krea LLM enhance:** slash `/imagegen generate` option `llm_prompt_enhance` (default **No**). Pref-view button still available for regenerate flow. When Yes + Krea-family (Krea 2 Turbo, RedCraft), uses `TextGenerate` before sampling.
 
 **RedCraft weights:** `ComfyUI_New/models/diffusion_models/redcraft23INT8INT4FP8_30Krea2.safetensors` (same CLIP/VAE as Krea 2: `qwen3vl_4b_fp8_scaled` + `qwen_image_vae`).
+
+**Identity Edit:** `/imagegen edit` — attach image + instruction. Needs custom node pack `comfyui-krea2edit` and LoRA `models/loras/Krea2/krea2_identity_edit_v1_2.safetensors`. Bot uploads the attachment to ComfyUI `/upload/image`, then runs Turbo INT8 + Identity Edit LoRA (10 steps, CFG 1). See `docs/KREA2_IDENTITY_EDIT_GUIDE.md`.
+
+**Privacy / retention:** User edit uploads and all bot-generated Comfy `input`/`output` files are **deleted from disk** after the job (download → Discord). Unique temp upload names (`bot_edit_<uuid>.png`). Source bytes are not kept for Identity Edit regenerate — re-upload via `/imagegen edit`. Images live on Discord only after send.
 
 ---
 

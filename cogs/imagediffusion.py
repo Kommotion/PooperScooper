@@ -22,7 +22,9 @@ from cogs.utils.image_models import (
     ComfyOneObsessionAnimaModel,
     ComfyKrea2TurboModel,
     ComfyRedCraftModel,
+    ComfyKrea2IdentityEditModel,
 )
+from PIL import Image as PILImage
 from cogs.utils import comfy_client
 from cogs.utils.server_config import get_guild_config
 
@@ -333,6 +335,10 @@ class PromptDetailButton(ui.View):
         self.use_default_negative = image.use_default_negative
         self.nsfw_level = image.nsfw
         self.llm_prompt_enhance = image.llm_prompt_enhance
+        self.source_image_bytes = image.source_image_bytes
+        self.source_image_filename = image.source_image_filename
+        self.edit_width = image.edit_width
+        self.edit_height = image.edit_height
         self.author_id = author_id
         self.gen_time = gen_time
         self.guild_id = guild_id
@@ -383,6 +389,14 @@ class PromptDetailButton(ui.View):
 
         self._cooldown[interaction.user.id] = now
 
+        if self.model == Models.KREA2_IDENTITY_EDIT:
+            await interaction.response.send_message(
+                "Option editing isn’t available for Identity Edit. "
+                "Use **Regenerate** for a new seed, or `/imagegen edit` with a new instruction.",
+                ephemeral=True,
+            )
+            return
+
         view = ImageGenPrefView(
             cog=interaction.client.get_cog("ImageDiffusion"),
             default_model=self.model,
@@ -412,6 +426,14 @@ class PromptDetailButton(ui.View):
 
         self._cooldown[interaction.user.id] = now
 
+        if self.model == Models.KREA2_IDENTITY_EDIT and not self.source_image_bytes:
+            await interaction.response.send_message(
+                "Cannot regenerate this edit — source image is no longer available. "
+                "Run `/imagegen edit` again with the attachment.",
+                ephemeral=True,
+            )
+            return
+
         # Reuse the exact same creation parameters
         image_entry = ImageCreation(
             prompt=self.user_prompt,
@@ -422,6 +444,10 @@ class PromptDetailButton(ui.View):
             use_default_positive=self.use_default_positive,
             nsfw=self.nsfw_level,
             llm_prompt_enhance=self.llm_prompt_enhance,
+            source_image_bytes=self.source_image_bytes,
+            source_image_filename=self.source_image_filename,
+            edit_width=self.edit_width,
+            edit_height=self.edit_height,
         )
 
         cog = interaction.client.get_cog("ImageDiffusion")
@@ -468,6 +494,7 @@ class ImageDiffusion(Cog):
             Models.ONE_OBSESSION_ANIMA,
             Models.KREA2_TURBO,
             Models.REDCRAFT,
+            Models.KREA2_IDENTITY_EDIT,
         ]
 
         # Map front-end choices to ComfyUI workflows
@@ -479,6 +506,7 @@ class ImageDiffusion(Cog):
             Models.ONE_OBSESSION_ANIMA: ComfyOneObsessionAnimaModel(),
             Models.KREA2_TURBO: ComfyKrea2TurboModel(),
             Models.REDCRAFT: ComfyRedCraftModel(),
+            Models.KREA2_IDENTITY_EDIT: ComfyKrea2IdentityEditModel(),
         }
 
         self.comfy_ready = asyncio.Event()
@@ -619,6 +647,113 @@ class ImageDiffusion(Cog):
             nsfw=nsfw_level,
             llm_prompt_enhance=enhance,
         )
+
+    @imagegen_group.command(
+        name="edit",
+        description="Edit an image with an instruction (Krea 2 Identity Edit LoRA).",
+    )
+    @app_commands.describe(
+        image="Source image to edit (attach a PNG/JPG).",
+        instruction="Plain-English edit instruction, e.g. 'Change her jacket to red leather'.",
+    )
+    @app_commands.guild_only()
+    async def edit_image(
+        self,
+        interaction: discord.Interaction,
+        image: discord.Attachment,
+        instruction: str,
+    ) -> None:
+        if not self._is_allowed_channel(interaction.guild_id, interaction.channel_id):
+            await interaction.response.send_message(
+                "This command is not allowed in this channel!", ephemeral=True
+            )
+            return
+
+        if not instruction or not instruction.strip():
+            await interaction.response.send_message(
+                "Please provide an edit instruction.", ephemeral=True
+            )
+            return
+
+        content_type = (image.content_type or "").lower()
+        name_lower = (image.filename or "").lower()
+        is_image = content_type.startswith("image/") or name_lower.endswith(
+            (".png", ".jpg", ".jpeg", ".webp", ".gif")
+        )
+        if not is_image:
+            await interaction.response.send_message(
+                "Please attach an image file (PNG/JPG/WEBP).", ephemeral=True
+            )
+            return
+
+        # Discord attachment size limit is already enforced by Discord; still guard empty.
+        if image.size is not None and image.size <= 0:
+            await interaction.response.send_message("Empty attachment.", ephemeral=True)
+            return
+
+        try:
+            source_bytes = await image.read()
+        except Exception as e:
+            log.exception("Failed to read Discord attachment")
+            await interaction.response.send_message(
+                f"Could not read the attached image: {e}", ephemeral=True
+            )
+            return
+
+        # Pick output size near 1MP preserving aspect (multiples of 64).
+        edit_w, edit_h = 1024, 1024
+        try:
+            with PILImage.open(BytesIO(source_bytes)) as im:
+                sw, sh = im.size
+            if sw > 0 and sh > 0:
+                target_mp = 1_048_576  # ~1MP
+                scale = (target_mp / (sw * sh)) ** 0.5
+                edit_w = max(64, int(sw * scale) // 64 * 64)
+                edit_h = max(64, int(sh * scale) // 64 * 64)
+                # Cap ~2MP training range
+                if edit_w * edit_h > 2_000_000:
+                    scale2 = (2_000_000 / (edit_w * edit_h)) ** 0.5
+                    edit_w = max(64, int(edit_w * scale2) // 64 * 64)
+                    edit_h = max(64, int(edit_h * scale2) // 64 * 64)
+        except Exception:
+            log.warning("Could not parse source image size; using 1024x1024")
+
+        safe_name = image.filename or "discord_edit.png"
+        # Avoid path separators in Comfy LoadImage name
+        safe_name = safe_name.replace("/", "_").replace("\\", "_")
+        if not any(safe_name.lower().endswith(ext) for ext in (".png", ".jpg", ".jpeg", ".webp")):
+            safe_name = f"{safe_name}.png"
+
+        image_entry = ImageCreation(
+            instruction.strip(),
+            Models.KREA2_IDENTITY_EDIT,
+            interaction=interaction,
+            negative_prompt="",
+            use_default_negative=False,
+            use_default_positive=False,
+            nsfw=NsfwLevel.NOT_SPECIFIED,
+            llm_prompt_enhance=False,
+            source_image_bytes=source_bytes,
+            source_image_filename=safe_name,
+            edit_width=edit_w,
+            edit_height=edit_h,
+        )
+
+        if await self.enqueue_image(
+            image_entry,
+            interaction,
+            queued_message=(
+                f"Queued Identity Edit ({edit_w}×{edit_h}). "
+                f"Instruction: {_preview_prompt(instruction, 80)}"
+            ),
+        ):
+            log.info(
+                "Queued Identity Edit from user=%s size=%sx%s instruction=%r",
+                interaction.user.id,
+                edit_w,
+                edit_h,
+                instruction[:100],
+            )
 
     async def enqueue_image(
         self,
@@ -789,6 +924,11 @@ class ImageDiffusion(Cog):
         file = discord.File(buffer, filename="generated.png")
         author_id = image.interaction.user.id
 
+        # Privacy: drop user source bytes after we have the result in RAM for Discord.
+        # Regenerate for Identity Edit will require a new upload.
+        if image.model == Models.KREA2_IDENTITY_EDIT:
+            image.source_image_bytes = None
+
         prompt_details = PromptDetailButton(
             user_prompt=image.prompt,
             user_negative=image.negative_prompt,
@@ -802,7 +942,10 @@ class ImageDiffusion(Cog):
 
         raw_prompt = (image.prompt or "").strip()
         preview = _preview_prompt(raw_prompt)
-        content = f"**{preview} — `{image.model}` — {image.interaction.user.mention}**"
+        if image.model == Models.KREA2_IDENTITY_EDIT:
+            content = f"**Edit:** {preview} — `{image.model}` — {image.interaction.user.mention}"
+        else:
+            content = f"**{preview} — `{image.model}` — {image.interaction.user.mention}**"
         if len(raw_prompt) > PROMPT_PREVIEW_MAX_CHARS:
             content += "\n-# Full prompt in **See prompt details**"
 
@@ -817,6 +960,14 @@ class ImageDiffusion(Cog):
             log.error(f"Error: {e}")
             await image.interaction.channel.send(content=f"Some error occurred while image generation:\n{e}",
                                                   allowed_mentions=discord.AllowedMentions(users=True))
+        finally:
+            # Drop large buffers once Discord has the file (or send failed).
+            try:
+                buffer.close()
+            except Exception:
+                pass
+            del img
+            del output
 
         log.debug("Image sent to Discord")
 

@@ -6,6 +6,7 @@ import json
 import copy
 import random
 import os
+import uuid
 from io import BytesIO
 
 import discord
@@ -34,6 +35,7 @@ KREA2_TURBO_WORKFLOW_PATH = r".\ComfyUI_New\user\default\workflows\KREA2_TURBO_I
 KREA2_TURBO_ENHANCE_WORKFLOW_PATH = r".\ComfyUI_New\user\default\workflows\KREA2_TURBO_INT8_API_ENHANCE.json"
 REDCRAFT_WORKFLOW_PATH = r".\ComfyUI_New\user\default\workflows\REDCRAFT_KREA2_API.json"
 REDCRAFT_ENHANCE_WORKFLOW_PATH = r".\ComfyUI_New\user\default\workflows\REDCRAFT_KREA2_API_ENHANCE.json"
+KREA2_IDENTITY_EDIT_WORKFLOW_PATH = r".\ComfyUI_New\user\default\workflows\KREA2_IDENTITY_EDIT_API.json"
 
 # System prompt used by the official Krea UI "prompt enhance" path (shortened slightly for Discord UX).
 KREA2_LLM_ENHANCE_SYSTEM_PROMPT = (
@@ -104,6 +106,7 @@ class Models(StrEnum):
     ONE_OBSESSION_ANIMA = "one_obsession_anima"
     KREA2_TURBO = "krea2_turbo"
     REDCRAFT = "redcraft"
+    KREA2_IDENTITY_EDIT = "krea2_identity_edit"
 
     @classmethod
     def _missing_(cls, value):
@@ -118,9 +121,21 @@ class Models(StrEnum):
 
 
 class ImageCreation:
-    def __init__(self, prompt: Models, model, interaction=None, negative_prompt='', use_default_negative=True,
-                 use_default_positive=True, nsfw: NsfwLevel=NsfwLevel.NOT_SPECIFIED,
-                 llm_prompt_enhance: bool = False):
+    def __init__(
+        self,
+        prompt,
+        model,
+        interaction=None,
+        negative_prompt="",
+        use_default_negative=True,
+        use_default_positive=True,
+        nsfw: NsfwLevel = NsfwLevel.NOT_SPECIFIED,
+        llm_prompt_enhance: bool = False,
+        source_image_bytes: Optional[bytes] = None,
+        source_image_filename: str = "discord_edit.png",
+        edit_width: int = 1024,
+        edit_height: int = 1024,
+    ):
         self.interaction: discord.Interaction = interaction
         self.negative_prompt = negative_prompt
         self.use_default_negative = use_default_negative
@@ -130,6 +145,12 @@ class ImageCreation:
         self.nsfw: NsfwLevel = nsfw
         # When True and the model supports it (Krea-family), run LLM prompt expansion first.
         self.llm_prompt_enhance: bool = bool(llm_prompt_enhance)
+        # Img2img / Identity Edit: raw source image from Discord attachment.
+        self.source_image_bytes: Optional[bytes] = source_image_bytes
+        self.source_image_filename: str = source_image_filename or "discord_edit.png"
+        # Output resolution for Identity Edit EmptySD3LatentImage (multiples of 64, ~1MP).
+        self.edit_width: int = int(edit_width) if edit_width else 1024
+        self.edit_height: int = int(edit_height) if edit_height else 1024
 
 
 class ComfyOutput:
@@ -238,16 +259,20 @@ class BaseComfyWorkflowModel:
 
         image_infos = comfy_client.wait_for_result(prompt_id, host=self.comfy_host, port=self.comfy_port)
         images: list[Image.Image] = []
-        for info in image_infos:
-            data = comfy_client.get_image_bytes(
-                filename=info["filename"],
-                subfolder=info.get("subfolder", ""),
-                image_type=info.get("type", "output"),
-                host=self.comfy_host,
-                port=self.comfy_port,
-            )
-            img = Image.open(BytesIO(data))
-            images.append(img.convert("RGB"))
+        try:
+            for info in image_infos:
+                data = comfy_client.get_image_bytes(
+                    filename=info["filename"],
+                    subfolder=info.get("subfolder", ""),
+                    image_type=info.get("type", "output"),
+                    host=self.comfy_host,
+                    port=self.comfy_port,
+                )
+                img = Image.open(BytesIO(data))
+                images.append(img.convert("RGB"))
+        finally:
+            # Privacy: do not retain generated files on the Comfy host.
+            comfy_client.delete_media_files(image_infos)
 
         gen_time = time.time() - gen_start
         self.log.info(f"ComfyUI generation completed for prompt: {positive_prompt} in {gen_time:.2f} seconds")
@@ -420,16 +445,20 @@ class ComfyKrea2TurboModel(BaseComfyWorkflowModel):
             timeout_sec=wait_timeout,
         )
         images: list[Image.Image] = []
-        for info in image_infos:
-            data = comfy_client.get_image_bytes(
-                filename=info["filename"],
-                subfolder=info.get("subfolder", ""),
-                image_type=info.get("type", "output"),
-                host=self.comfy_host,
-                port=self.comfy_port,
-            )
-            img = Image.open(BytesIO(data))
-            images.append(img.convert("RGB"))
+        try:
+            for info in image_infos:
+                data = comfy_client.get_image_bytes(
+                    filename=info["filename"],
+                    subfolder=info.get("subfolder", ""),
+                    image_type=info.get("type", "output"),
+                    host=self.comfy_host,
+                    port=self.comfy_port,
+                )
+                img = Image.open(BytesIO(data))
+                images.append(img.convert("RGB"))
+        finally:
+            # Privacy: do not retain generated files on the Comfy host.
+            comfy_client.delete_media_files(image_infos)
 
         gen_time = time.time() - gen_start
         enhance_note = " (llm_prompt_enhance)" if image.llm_prompt_enhance else ""
@@ -458,3 +487,139 @@ class ComfyRedCraftModel(ComfyKrea2TurboModel):
         )
         self.workflow_enhance_path = REDCRAFT_ENHANCE_WORKFLOW_PATH
         self._enhance_workflow_template: Optional[dict] = None
+
+
+class ComfyKrea2IdentityEditModel(BaseComfyWorkflowModel):
+    """Krea 2 Identity Edit LoRA — instruction edit with source image.
+
+    Requires custom nodes: comfyui-krea2edit (Krea2EditModelPatch + GroundedEncode).
+    Turbo path: 10 steps, CFG 1, LoRA v1.2 @ strength 1.0, ref_boost 4.
+    """
+
+    def __init__(self):
+        super().__init__(
+            name=Models.KREA2_IDENTITY_EDIT,
+            workflow_path=KREA2_IDENTITY_EDIT_WORKFLOW_PATH,
+            default_pos=NO_DEFAULT_POSITIVE,
+            default_neg=NO_DEFAULT_NEGATIVE,
+        )
+
+    def _apply_prompts_to_workflow(
+        self,
+        workflow: dict,
+        positive_prompt: str,
+        negative_prompt: str,
+        image: ImageCreation,
+    ) -> dict:
+        workflow = copy.deepcopy(workflow)
+        seed = random.getrandbits(64)
+
+        # Positive instruction (node 84)
+        if "84" in workflow and workflow["84"].get("class_type") == "Krea2EditGroundedEncode":
+            workflow["84"]["inputs"]["prompt"] = positive_prompt or ""
+
+        # Negative stays empty for Turbo CFG 1 (trained unconditional)
+        if "85" in workflow and workflow["85"].get("class_type") == "Krea2EditGroundedEncode":
+            workflow["85"]["inputs"]["prompt"] = negative_prompt or ""
+
+        if "53" in workflow and workflow["53"].get("class_type") == "KSampler":
+            workflow["53"]["inputs"]["seed"] = seed
+
+        # Output resolution
+        if "82" in workflow and workflow["82"].get("class_type") == "EmptySD3LatentImage":
+            w = max(64, (int(image.edit_width) // 64) * 64)
+            h = max(64, (int(image.edit_height) // 64) * 64)
+            # Cap ~2MP for model training range
+            if w * h > 2_000_000:
+                scale = (2_000_000 / (w * h)) ** 0.5
+                w = max(64, int(w * scale) // 64 * 64)
+                h = max(64, int(h * scale) // 64 * 64)
+            workflow["82"]["inputs"]["width"] = w
+            workflow["82"]["inputs"]["height"] = h
+
+        return workflow
+
+    @to_thread
+    def generate(self, image: ImageCreation):
+        if not image.source_image_bytes:
+            raise RuntimeError("Identity Edit requires a source image attachment")
+
+        if self._ui_workflow_template is None:
+            raise RuntimeError("Identity Edit workflow not loaded; call load_pipeline first")
+
+        # Instruction only — do not append default quality tags for this model.
+        instruction = (image.prompt or "").strip()
+        if image.nsfw != NsfwLevel.NOT_SPECIFIED:
+            instruction = f"{instruction}, {image.nsfw}" if instruction else str(image.nsfw)
+
+        # Unique temp name so we can delete only this upload (privacy).
+        upload_meta: Optional[dict] = None
+        image_infos: list = []
+        unique_name = f"bot_edit_{uuid.uuid4().hex}.png"
+
+        try:
+            upload_meta = comfy_client.upload_image(
+                image.source_image_bytes,
+                filename=unique_name,
+                host=self.comfy_host,
+                port=self.comfy_port,
+            )
+            load_name = upload_meta["load_name"]
+
+            workflow_api = self._apply_prompts_to_workflow(
+                workflow=self._ui_workflow_template,
+                positive_prompt=instruction,
+                negative_prompt="",
+                image=image,
+            )
+            if "72" in workflow_api and workflow_api["72"].get("class_type") == "LoadImage":
+                workflow_api["72"]["inputs"]["image"] = load_name
+
+            gen_start = time.time()
+            self.log.info(
+                "Krea2 Identity Edit: instruction=%r size=%sx%s (upload ephemeral)",
+                instruction[:120],
+                image.edit_width,
+                image.edit_height,
+            )
+            result = comfy_client.post_prompt(
+                prompt=workflow_api,
+                host=self.comfy_host,
+                port=self.comfy_port,
+            )
+            prompt_id = result.get("prompt_id")
+            image_infos = comfy_client.wait_for_result(
+                prompt_id,
+                host=self.comfy_host,
+                port=self.comfy_port,
+                timeout_sec=600.0,
+            )
+            images: list[Image.Image] = []
+            for info in image_infos:
+                data = comfy_client.get_image_bytes(
+                    filename=info["filename"],
+                    subfolder=info.get("subfolder", ""),
+                    image_type=info.get("type", "output"),
+                    host=self.comfy_host,
+                    port=self.comfy_port,
+                )
+                img = Image.open(BytesIO(data))
+                images.append(img.convert("RGB"))
+
+            gen_time = time.time() - gen_start
+            self.log.info(
+                "Identity Edit completed for instruction: %s in %.2f seconds",
+                instruction,
+                gen_time,
+            )
+            return ComfyOutput(images), instruction, "", gen_time
+        finally:
+            # Privacy: never leave user upload or Comfy outputs on disk.
+            if upload_meta:
+                comfy_client.delete_media_file(
+                    upload_meta.get("name") or unique_name,
+                    subfolder=upload_meta.get("subfolder", "") or "",
+                    image_type=upload_meta.get("type") or "input",
+                )
+            if image_infos:
+                comfy_client.delete_media_files(image_infos)

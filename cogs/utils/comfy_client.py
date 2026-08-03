@@ -610,6 +610,134 @@ def get_image_bytes(
     return r.content
 
 
+def upload_image(
+    image_bytes: bytes,
+    filename: str = "discord_edit.png",
+    *,
+    host: str = DEFAULT_COMFY_HOST,
+    port: int = DEFAULT_COMFY_PORT,
+    overwrite: bool = True,
+) -> dict:
+    """
+    Upload an image into ComfyUI's input folder via POST /upload/image.
+
+    Returns a dict: {name, subfolder, type, load_name}
+    where load_name is what LoadImage expects (subfolder/name or name).
+    Caller should delete via delete_media_file when done (privacy).
+    """
+    url = f"{comfy_base_url(host, port)}/upload/image"
+    # Comfy expects multipart field "image"; optional overwrite flag.
+    files = {
+        "image": (filename, image_bytes, "application/octet-stream"),
+    }
+    data = {"overwrite": "true" if overwrite else "false"}
+    r = requests.post(url, files=files, data=data, timeout=120)
+    r.raise_for_status()
+    payload = r.json()
+    # Typical response: {"name": "foo.png", "subfolder": "", "type": "input"}
+    name = payload.get("name") or filename
+    subfolder = (payload.get("subfolder") or "").replace("\\", "/").strip("/")
+    media_type = payload.get("type") or "input"
+    load_name = f"{subfolder}/{name}" if subfolder else name
+    return {
+        "name": name,
+        "subfolder": subfolder,
+        "type": media_type,
+        "load_name": load_name,
+    }
+
+
+def _candidate_comfy_roots() -> List[str]:
+    """Roots where Comfy may store input/output (bot install + Desktop Documents)."""
+    roots: List[str] = []
+    try:
+        roots.append(default_comfy_root())
+    except Exception:
+        pass
+    docs = os.path.join(os.path.expanduser("~"), "Documents", "ComfyUI")
+    if os.path.isdir(docs) and docs not in roots:
+        roots.append(docs)
+    # Dedupe preserving order
+    seen = set()
+    out = []
+    for r in roots:
+        ar = os.path.abspath(r)
+        if ar not in seen and os.path.isdir(ar):
+            seen.add(ar)
+            out.append(ar)
+    return out
+
+
+def resolve_media_path(
+    filename: str,
+    subfolder: str = "",
+    image_type: str = "output",
+) -> Optional[str]:
+    """Resolve a Comfy input/output/temp file on disk, if present."""
+    if not filename:
+        return None
+    # load_name may be "sub/file.png" with empty subfolder arg
+    if not subfolder and ("/" in filename or "\\" in filename):
+        filename = filename.replace("\\", "/")
+        parts = filename.rsplit("/", 1)
+        if len(parts) == 2:
+            subfolder, filename = parts[0], parts[1]
+    folder = image_type if image_type in ("input", "output", "temp") else "output"
+    subfolder = (subfolder or "").replace("\\", "/").strip("/")
+    for root in _candidate_comfy_roots():
+        base = os.path.join(root, folder)
+        path = os.path.join(base, subfolder, filename) if subfolder else os.path.join(base, filename)
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def delete_media_file(
+    filename: str,
+    subfolder: str = "",
+    image_type: str = "output",
+) -> bool:
+    """
+    Delete a ComfyUI media file from disk (privacy: do not retain user/bot images).
+
+    Returns True if a file was removed.
+    """
+    path = resolve_media_path(filename, subfolder=subfolder, image_type=image_type)
+    if not path:
+        log.debug(
+            "delete_media_file: not found type=%s subfolder=%s name=%s",
+            image_type,
+            subfolder,
+            filename,
+        )
+        return False
+    try:
+        os.remove(path)
+        log.info("Deleted Comfy media file (privacy): %s", path)
+        return True
+    except OSError as e:
+        log.warning("Failed to delete Comfy media file %s: %s", path, e)
+        return False
+
+
+def delete_media_files(file_infos: List[dict]) -> int:
+    """Delete many {filename, subfolder, type} dicts; return count removed."""
+    removed = 0
+    for info in file_infos or []:
+        if not isinstance(info, dict):
+            continue
+        name = info.get("filename") or info.get("name")
+        if not name:
+            continue
+        if delete_media_file(
+            name,
+            subfolder=info.get("subfolder", "") or "",
+            image_type=info.get("type", "output") or "output",
+        ):
+            removed += 1
+    return removed
+
+
 def inspect_safetensors_keys(path: str) -> list:
     """Return a list of keys present in a safetensors file (requires `safetensors` installed)."""
     try:
