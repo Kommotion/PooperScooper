@@ -22,10 +22,15 @@ from cogs.music import (
     format_track_length,
     linked_track_title,
     message_is_latest,
+    end_event_applies,
+    fault_event_applies,
     playback_will_continue,
     repeat_target,
     should_reuse_now_playing,
+    stale_end_during_startup,
+    started_track_is_playing,
     take_for_queue,
+    track_end_should_advance,
     track_should_give_up,
     track_wait_timeout,
 )
@@ -275,6 +280,45 @@ def test_unknown_length_waits_only_while_audio_is_up():
         paused=False,
         voice_dead=False,
     )
+
+
+class _IdTrack:
+    def __init__(self, encoded: str) -> None:
+        self.encoded = encoded
+
+
+class _Player:
+    def __init__(self, current, *, playing: bool = False, paused: bool = False) -> None:
+        self.current = current
+        self.playing = playing
+        self.paused = paused
+
+
+def test_replaced_track_end_does_not_skip_the_song_just_started():
+    waiting = _IdTrack("new")
+    previous = _IdTrack("old")
+    assert track_end_should_advance("finished")
+    assert track_end_should_advance("loadFailed")
+    assert track_end_should_advance("stopped")
+    assert track_end_should_advance("cleanup")
+    assert not track_end_should_advance("replaced")
+
+    assert not end_event_applies(reason="replaced", waiting_track=waiting, ended_track=previous)
+    assert not end_event_applies(reason="replaced", waiting_track=waiting, ended_track=waiting)
+    assert not end_event_applies(reason="loadFailed", waiting_track=waiting, ended_track=previous)
+    assert end_event_applies(reason="finished", waiting_track=waiting, ended_track=_IdTrack("new"))
+    assert end_event_applies(reason="loadFailed", waiting_track=waiting, ended_track=waiting)
+    assert end_event_applies(reason="finished", waiting_track=None, ended_track=previous)
+    assert not fault_event_applies(waiting_track=waiting, failed_track=previous)
+    assert fault_event_applies(waiting_track=waiting, failed_track=_IdTrack("new"))
+
+    assert not stale_end_during_startup(event_is_set=False, started_track_is_playing=True)
+    assert not stale_end_during_startup(event_is_set=True, started_track_is_playing=False)
+    assert stale_end_during_startup(event_is_set=True, started_track_is_playing=True)
+    assert started_track_is_playing(_Player(waiting, playing=True), waiting)
+    assert started_track_is_playing(_Player(waiting, paused=True), waiting)
+    assert not started_track_is_playing(_Player(previous, playing=True), waiting)
+    assert not started_track_is_playing(_Player(waiting, playing=False), waiting)
 
 
 def test_queue_cap_leaves_room_for_tracks_already_waiting():

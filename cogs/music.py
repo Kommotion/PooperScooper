@@ -21,7 +21,7 @@ log = logging.getLogger(__name__)
 ONE_MEMBER = 1
 DEFAULT_VOLUME = 100  # Wavelink/Lavalink scale: 100 = 100%, max 1000
 TRACK_END_GRACE_SECONDS = 20
-MAX_QUEUE = 300
+MAX_QUEUE = 2000
 
 
 def voice_client_is_stale(
@@ -177,6 +177,85 @@ def track_wait_timeout(length_ms: int | None, *, grace_seconds: float = TRACK_EN
     return (length_ms / 1000) + grace_seconds
 
 
+def track_identity(track) -> tuple[str, str] | None:
+    """A stable id for one Lavalink track. None when the track cannot be told apart."""
+    if track is None:
+        return None
+    encoded = getattr(track, "encoded", None)
+    if encoded:
+        return ("encoded", encoded)
+    identifier = getattr(track, "identifier", None)
+    if identifier:
+        return ("identifier", identifier)
+    uri = getattr(track, "uri", None)
+    if uri:
+        return ("uri", uri)
+    return None
+
+
+def tracks_match(left, right) -> bool:
+    if left is None or right is None:
+        return False
+    if left is right:
+        return True
+    left_id = track_identity(left)
+    right_id = track_identity(right)
+    if left_id is None or right_id is None:
+        return False
+    return left_id == right_id
+
+
+def track_end_should_advance(reason: str | None) -> bool:
+    """``replaced`` is play() cutting the previous track, not this track finishing."""
+    return reason != "replaced"
+
+
+def end_event_applies(*, reason: str | None, waiting_track, ended_track) -> bool:
+    """Wake the queue only for the track it is waiting on.
+
+    A replace, or an end event for the track that was just replaced, must not
+    skip the song that play() just started.
+    """
+    if not track_end_should_advance(reason):
+        return False
+    if waiting_track is None or ended_track is None:
+        return True
+    if tracks_match(waiting_track, ended_track):
+        return True
+    if track_identity(waiting_track) and track_identity(ended_track):
+        return False
+    return True
+
+
+def fault_event_applies(*, waiting_track, failed_track) -> bool:
+    """A stuck or exception event for the previous track must not skip the new one."""
+    if waiting_track is None or failed_track is None:
+        return True
+    if tracks_match(waiting_track, failed_track):
+        return True
+    if track_identity(waiting_track) and track_identity(failed_track):
+        return False
+    return True
+
+
+def started_track_is_playing(player, track) -> bool:
+    """True when `track` is the player's current track and audio is up or paused."""
+    if player is None or track is None:
+        return False
+    current = getattr(player, "current", None)
+    if not tracks_match(current, track):
+        return False
+    return bool(getattr(player, "playing", False) or getattr(player, "paused", False))
+
+
+def stale_end_during_startup(*, event_is_set: bool, started_track_is_playing: bool) -> bool:
+    """A signal that arrived as play() started is stale when that track is actually up.
+
+    A track that never started keeps the signal, so one failure advances once.
+    """
+    return event_is_set and started_track_is_playing
+
+
 def track_should_give_up(
     *,
     length_ms: int | None,
@@ -277,6 +356,7 @@ class GuildSession:
         self.queue_ready = asyncio.Event()
         self.halt = False
         self.current_entry: MusicEntry | None = None
+        self.waiting_track = None
         self.task: asyncio.Task | None = None
         self.running = False
         self.volume = DEFAULT_VOLUME
@@ -979,13 +1059,35 @@ class Music(Cog):
             return None
         return guild.id
 
+    def _waiting_track(self, player) -> object | None:
+        guild_id = self._guild_id_from_player(player)
+        if guild_id is None:
+            return None
+        session = self._sessions.get(guild_id)
+        if session is None:
+            return None
+        return session.waiting_track
+
     @commands.Cog.listener()
     async def on_wavelink_track_end(self, payload: wavelink.TrackEndEventPayload):
+        ended = getattr(payload, "track", None)
+        if not end_event_applies(
+            reason=payload.reason,
+            waiting_track=self._waiting_track(payload.player),
+            ended_track=ended,
+        ):
+            return
         self._signal_guild(self._guild_id_from_player(payload.player))
 
     @commands.Cog.listener()
     async def on_wavelink_track_exception(self, payload: wavelink.TrackExceptionEventPayload):
         log.error("Track exception: %s", payload.exception)
+        failed = getattr(payload, "track", None)
+        if not fault_event_applies(
+            waiting_track=self._waiting_track(payload.player),
+            failed_track=failed,
+        ):
+            return
         self._signal_guild(self._guild_id_from_player(payload.player))
 
     @commands.Cog.listener()
@@ -995,6 +1097,11 @@ class Music(Cog):
             payload.threshold,
             getattr(payload.track, "title", payload.track),
         )
+        if not fault_event_applies(
+            waiting_track=self._waiting_track(payload.player),
+            failed_track=getattr(payload, "track", None),
+        ):
+            return
         self._signal_guild(self._guild_id_from_player(payload.player))
 
     @commands.Cog.listener()
@@ -1106,9 +1213,10 @@ class Music(Cog):
                         await self.invalidate_current_np(session.guild_id, entry)
                         continue
                     await self.present_now_playing(entry, session=session)
-                    # Drop a stale track-end, then read halt before the next await.
-                    # Stop sets both, so it is either still latched here or it
-                    # arrives afterward and wakes the wait below.
+                    # Only this track may wake the wait. Stop sets next_song and
+                    # halt together, so a stop during the card edit is still
+                    # visible on the lock below.
+                    session.waiting_track = entry.track
                     session.next_song.clear()
                     async with session.lock:
                         if session.halt:
@@ -1127,6 +1235,14 @@ class Music(Cog):
                     # Omit volume. Passing it resets a !volume the listener just set.
                     await player.play(entry.track)
                     async with session.lock:
+                        # A late end from the track we just replaced can land
+                        # during play(). Drop it when this track is actually up.
+                        # Halt stays latched so stop still wakes the wait.
+                        if not session.halt and stale_end_during_startup(
+                            event_is_set=session.next_song.is_set(),
+                            started_track_is_playing=started_track_is_playing(player, entry.track),
+                        ):
+                            session.next_song.clear()
                         if session.repeat_enabled:
                             session.repeated_entry = entry
                             if requeued:
