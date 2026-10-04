@@ -1,0 +1,210 @@
+"""Now-playing card layout and reuse rules."""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+import discord
+
+from cogs.music import (
+    ENDED_ACCENT,
+    PAUSED_ACCENT,
+    PLAYING_ACCENT,
+    Music,
+    NowPlayingView,
+    format_track_length,
+    linked_track_title,
+    message_is_latest,
+    playback_will_continue,
+    should_reuse_now_playing,
+)
+
+
+class _Queue:
+    def __init__(self, size: int) -> None:
+        self._size = size
+
+    def qsize(self) -> int:
+        return self._size
+
+
+class _Cog:
+    def __init__(self, *, queue: int = 2, repeat: bool = False, loop: bool = False, shuffle: bool = False) -> None:
+        self.music_queue = _Queue(queue)
+        self.repeat_enabled = repeat
+        self.loop_enabled = loop
+        self.shuffle_mode = shuffle
+
+
+class _Author:
+    def __init__(self, name: str) -> None:
+        self.display_name = name
+        self.name = name
+
+
+class _Ctx:
+    def __init__(self, name: str) -> None:
+        self.message = type("Msg", (), {"author": _Author(name)})()
+
+
+class _Track:
+    def __init__(self, **kwargs) -> None:
+        self.title = kwargs.get("title", "Midnight City")
+        self.author = kwargs.get("author", "M83")
+        self.uri = kwargs.get("uri", "https://example.com/midnight")
+        self.artwork = kwargs.get("artwork", "https://example.com/art.jpg")
+        self.length = kwargs.get("length", 243000)
+
+
+class _Entry:
+    def __init__(self, track: _Track, requester: str = "Jacqu") -> None:
+        self.track = track
+        self.ctx = _Ctx(requester)
+
+
+def _card(cog: _Cog | None = None, **track_kwargs) -> NowPlayingView:
+    return NowPlayingView(cog or _Cog(), _Entry(_Track(**track_kwargs)))
+
+
+def _texts(view: NowPlayingView) -> str:
+    chunks = []
+    for item in view.walk_children():
+        content = getattr(item, "content", None)
+        if isinstance(content, str):
+            chunks.append(content)
+    return "\n".join(chunks)
+
+
+def _buttons(view: NowPlayingView) -> list[discord.ui.Button]:
+    return [item for item in view.walk_children() if isinstance(item, discord.ui.Button)]
+
+
+def _walk_payload(components):
+    for component in components:
+        yield component
+        nested = component.get("components")
+        if isinstance(nested, list):
+            yield from _walk_payload(nested)
+        accessory = component.get("accessory")
+        if isinstance(accessory, dict):
+            yield accessory
+
+
+def test_track_length_formatting():
+    assert format_track_length(None) is None
+    assert format_track_length(0) is None
+    assert format_track_length(125000) == "2:05"
+    assert format_track_length(3661000) == "1:01:01"
+
+
+def test_title_is_a_safe_link():
+    assert linked_track_title("A_B *live*", "https://example.com/a") == r"[A\_B \*live\*](https://example.com/a)"
+    assert linked_track_title("Song [Live]", "https://example.com/a(1)") == r"Song \[Live\]"
+    assert "http" not in linked_track_title("Plain", None)
+
+
+def test_reuse_only_when_the_card_is_still_the_newest_message():
+    assert message_is_latest(candidate_id=5, newest_id=5)
+    assert not message_is_latest(candidate_id=5, newest_id=9)
+    assert not message_is_latest(candidate_id=None, newest_id=5)
+    assert should_reuse_now_playing(same_channel=True, is_latest=True)
+    assert not should_reuse_now_playing(same_channel=True, is_latest=False)
+    assert not should_reuse_now_playing(same_channel=False, is_latest=True)
+
+
+def test_playback_continues_for_repeat_or_a_queued_track():
+    assert not playback_will_continue(
+        stopping=True, repeat_enabled=True, has_repeated_entry=True, queue_empty=False
+    )
+    assert playback_will_continue(
+        stopping=False, repeat_enabled=True, has_repeated_entry=True, queue_empty=True
+    )
+    assert not playback_will_continue(
+        stopping=False, repeat_enabled=True, has_repeated_entry=False, queue_empty=True
+    )
+    assert playback_will_continue(
+        stopping=False, repeat_enabled=False, has_repeated_entry=False, queue_empty=False
+    )
+    assert not playback_will_continue(
+        stopping=False, repeat_enabled=False, has_repeated_entry=False, queue_empty=True
+    )
+
+
+def test_buttons_sit_inside_the_card_and_the_disc_is_a_small_thumbnail():
+    view = _card(_Cog(queue=2, repeat=True))
+    assert view.has_components_v2()
+    assert len(view.children) == 1
+    container = view.children[0]
+    assert isinstance(container, discord.ui.Container)
+    assert container.accent_colour == PLAYING_ACCENT
+    assert not any(isinstance(child, discord.ui.ActionRow) for child in view.children)
+    rows = [child for child in container.children if isinstance(child, discord.ui.ActionRow)]
+    assert len(rows) == 2
+
+    payload = view.to_components()
+    assert payload[0]["type"] == discord.ComponentType.container.value
+    flat = list(_walk_payload(payload))
+    assert discord.ComponentType.media_gallery.value not in [item["type"] for item in flat]
+    assert discord.ComponentType.file.value not in [item["type"] for item in flat]
+    urls = [
+        item["media"]["url"]
+        for item in flat
+        if item.get("type") == discord.ComponentType.thumbnail.value
+    ]
+    assert urls[0] == Music.disc_attachment_url(is_playing=True)
+    assert urls[0].endswith("spinning_disc.gif")
+    assert "https://example.com/art.jpg" in urls
+
+    buttons = _buttons(view)
+    assert [button.custom_id for button in buttons] == [
+        "np_skip",
+        "np_stop",
+        "np_pause",
+        "np_resume",
+        "np_repeat",
+        "np_loop",
+        "np_shuffle",
+    ]
+    repeat = next(button for button in buttons if button.custom_id == "np_repeat")
+    loop = next(button for button in buttons if button.custom_id == "np_loop")
+    assert repeat.style == discord.ButtonStyle.primary
+    assert loop.style == discord.ButtonStyle.secondary
+
+    text = _texts(view)
+    assert "NOW PLAYING" in text
+    assert "Midnight City" in text
+    assert "https://example.com/midnight" in text
+    assert "M83" in text
+    assert "4:03" in text
+    assert "▶️ **Playing** · **2** in queue" in text
+    assert "Requested by **Jacqu**" in text
+    assert "🔂 Repeat" in text
+
+    entry = _Entry(_Track())
+    entry.started_at = datetime(2026, 10, 4, tzinfo=timezone.utc)
+    stamped = NowPlayingView(_Cog(), entry)
+    stamp = int(entry.started_at.timestamp())
+    assert f"<t:{stamp}:R>" in _texts(stamped)
+    assert f"<t:{stamp}:R>" not in _texts(NowPlayingView(_Cog(), entry, ended=True))
+
+
+def test_paused_and_ended_cards_use_the_static_disc_and_drop_the_banner():
+    paused = NowPlayingView(_Cog(queue=0), _Entry(_Track(artwork=None, author="*Jay*")), is_paused=True)
+    assert paused.children[0].accent_colour == PAUSED_ACCENT
+    paused_text = _texts(paused)
+    assert "PAUSED" in paused_text
+    assert r"\*Jay\*" in paused_text
+    assert "Queue clear" in paused_text
+    paused_urls = [
+        item.media.url for item in paused.walk_children() if isinstance(item, discord.ui.Thumbnail)
+    ]
+    assert paused_urls == [Music.disc_attachment_url(is_playing=False)]
+
+    ended = NowPlayingView(_Cog(), _Entry(_Track()), ended=True)
+    assert ended.children[0].accent_colour == ENDED_ACCENT
+    assert _buttons(ended) == []
+    assert "PLAYBACK ENDED" in _texts(ended)
+    assert "Queue another track to keep it going" in _texts(ended)
+    ended_flat = list(_walk_payload(ended.to_components()))
+    assert discord.ComponentType.action_row.value not in [item["type"] for item in ended_flat]
+    assert discord.ComponentType.media_gallery.value not in [item["type"] for item in ended_flat]

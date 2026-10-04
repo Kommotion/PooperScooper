@@ -13,6 +13,43 @@ from cogs.utils.config import BotConfig, LavalinkConfig, PalworldConfig, _apply_
 from cogs.utils.json_store import LockedJsonFile, migrate_legacy_data_files
 
 
+def test_voice_client_stale_after_gateway_reconnect():
+    from cogs.music import voice_client_is_stale
+
+    # Gateway session replaced the bot's voice state, but the player still
+    # believes it is connected to the old channel.
+    assert voice_client_is_stale(
+        claimed_connected=True,
+        player_channel_id=1077383363494690876,
+        actual_channel_id=None,
+    )
+
+
+def test_voice_client_not_stale_while_handshake_is_open():
+    from cogs.music import voice_client_is_stale
+
+    assert not voice_client_is_stale(
+        claimed_connected=False,
+        player_channel_id=1077383363494690876,
+        actual_channel_id=None,
+    )
+
+
+def test_voice_client_live_when_discord_channel_matches():
+    from cogs.music import voice_client_is_stale
+
+    assert not voice_client_is_stale(
+        claimed_connected=True,
+        player_channel_id=5,
+        actual_channel_id=5,
+    )
+    assert voice_client_is_stale(
+        claimed_connected=True,
+        player_channel_id=5,
+        actual_channel_id=9,
+    )
+
+
 def test_lavalink_config_defaults():
     config = LavalinkConfig()
     assert config.port == 2333
