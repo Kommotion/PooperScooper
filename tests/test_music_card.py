@@ -1,22 +1,33 @@
-"""Now-playing card layout and reuse rules."""
+"""Now-playing card layout, reuse rules, and per-server playback."""
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 
 import discord
 
 from cogs.music import (
+    DEFAULT_VOLUME,
     ENDED_ACCENT,
+    MAX_QUEUE,
     PAUSED_ACCENT,
     PLAYING_ACCENT,
+    TRACK_END_GRACE_SECONDS,
+    GuildSession,
     Music,
     NowPlayingView,
+    discard_queued,
+    drain_queue,
     format_track_length,
     linked_track_title,
     message_is_latest,
     playback_will_continue,
+    repeat_target,
     should_reuse_now_playing,
+    take_for_queue,
+    track_should_give_up,
+    track_wait_timeout,
 )
 
 
@@ -208,3 +219,195 @@ def test_paused_and_ended_cards_use_the_static_disc_and_drop_the_banner():
     ended_flat = list(_walk_payload(ended.to_components()))
     assert discord.ComponentType.action_row.value not in [item["type"] for item in ended_flat]
     assert discord.ComponentType.media_gallery.value not in [item["type"] for item in ended_flat]
+
+
+def test_unknown_length_waits_only_while_audio_is_up():
+    assert track_wait_timeout(None) is None
+    assert track_wait_timeout(0) is None
+    assert track_wait_timeout(10_000) == 10 + TRACK_END_GRACE_SECONDS
+
+    assert not track_should_give_up(
+        length_ms=None,
+        elapsed_seconds=TRACK_END_GRACE_SECONDS,
+        playing=True,
+        paused=False,
+        voice_dead=False,
+    )
+    assert not track_should_give_up(
+        length_ms=None,
+        elapsed_seconds=TRACK_END_GRACE_SECONDS,
+        playing=False,
+        paused=True,
+        voice_dead=False,
+    )
+    assert track_should_give_up(
+        length_ms=None,
+        elapsed_seconds=TRACK_END_GRACE_SECONDS,
+        playing=False,
+        paused=False,
+        voice_dead=False,
+    )
+    assert not track_should_give_up(
+        length_ms=None,
+        elapsed_seconds=TRACK_END_GRACE_SECONDS - 1,
+        playing=False,
+        paused=False,
+        voice_dead=False,
+    )
+    assert track_should_give_up(
+        length_ms=180_000,
+        elapsed_seconds=1,
+        playing=True,
+        paused=False,
+        voice_dead=True,
+    )
+    assert not track_should_give_up(
+        length_ms=10_000,
+        elapsed_seconds=29,
+        playing=True,
+        paused=False,
+        voice_dead=False,
+    )
+    assert track_should_give_up(
+        length_ms=10_000,
+        elapsed_seconds=30,
+        playing=True,
+        paused=False,
+        voice_dead=False,
+    )
+
+
+def test_queue_cap_leaves_room_for_tracks_already_waiting():
+    assert take_for_queue(0, 10) == 10
+    assert take_for_queue(MAX_QUEUE - 1, 5) == 1
+    assert take_for_queue(MAX_QUEUE, 5) == 0
+    assert take_for_queue(0, 0) == 0
+    assert take_for_queue(10, 5, limit=12) == 2
+
+
+def test_repeat_turned_on_mid_song_keeps_the_current_track():
+    current = object()
+    held = object()
+    assert repeat_target(enabled=True, repeated_entry=None, current_entry=current) is current
+    assert repeat_target(enabled=True, repeated_entry=held, current_entry=current) is held
+    assert repeat_target(enabled=False, repeated_entry=held, current_entry=current) is None
+
+
+def test_each_server_has_its_own_queue_and_modes():
+    one = GuildSession(1)
+    two = GuildSession(2)
+    one.music_queue.put_nowait("a")
+    two.music_queue.put_nowait("b")
+    two.music_queue.put_nowait("c")
+    one.repeat_enabled = True
+    one.volume = 40
+
+    assert one.music_queue.qsize() == 1
+    assert two.music_queue.qsize() == 2
+    assert not two.repeat_enabled
+    assert two.volume == DEFAULT_VOLUME
+    assert one.drain() == 1
+    assert one.music_queue.qsize() == 0
+    assert two.music_queue.qsize() == 2
+
+    one.loop_enabled = True
+    one.shuffle_mode = True
+    one.repeated_entry = object()
+    one.reset_modes()
+    assert not one.repeat_enabled
+    assert one.repeated_entry is None
+    assert not one.loop_enabled
+    assert not one.shuffle_mode
+
+
+def test_discard_removes_one_looped_copy_and_keeps_order():
+    queue = asyncio.Queue()
+    first = object()
+    looped = object()
+    last = object()
+    for item in (first, looped, last, looped):
+        queue.put_nowait(item)
+    assert discard_queued(queue, looped)
+    assert queue.get_nowait() is first
+    assert queue.get_nowait() is last
+    assert queue.get_nowait() is looped
+    assert queue.empty()
+
+
+def test_card_reads_the_guild_session_when_one_is_attached():
+    cog = _Cog(queue=9, repeat=False, loop=False, shuffle=False)
+    session = GuildSession(123)
+    session.music_queue.put_nowait(object())
+    session.music_queue.put_nowait(object())
+    session.repeat_enabled = True
+    session.loop_enabled = True
+    view = NowPlayingView(cog, _Entry(_Track()), session=session)
+    text = _texts(view)
+    assert "**2** in queue" in text
+    assert "🔂 Repeat" in text
+    assert "🔁 Loop" in text
+    repeat = next(button for button in _buttons(view) if button.custom_id == "np_repeat")
+    assert repeat.style == discord.ButtonStyle.primary
+
+
+def test_a_waiting_server_does_not_take_another_servers_track():
+    async def scenario():
+        music = Music.__new__(Music)
+        music._sessions = {}
+        one = music._session(1)
+        two = music._session(2)
+        one.put("from-one")
+        two.put("from-two")
+        assert await music._get_entry(two) == "from-two"
+        assert await music._get_entry(one) == "from-one"
+
+        waiting = music._session(3)
+
+        async def later():
+            await asyncio.sleep(0)
+            async with waiting.lock:
+                waiting.put("after")
+
+        asyncio.create_task(later())
+        assert await music._get_entry(waiting) == "after"
+        assert one.music_queue.empty()
+        assert two.music_queue.empty()
+
+    asyncio.run(scenario())
+
+
+def test_a_track_queued_as_the_player_exits_starts_another_player():
+    async def scenario():
+        music = Music.__new__(Music)
+        music._sessions = {}
+        started: list[int] = []
+
+        def fake_ensure(session):
+            started.append(session.guild_id)
+            session.running = True
+            session.task = None
+
+        music._ensure_player_task = fake_ensure
+        session = music._session(4)
+
+        async def exiting():
+            session.music_queue.put_nowait("late")
+            await music._finish_player_task(session)
+
+        session.task = asyncio.create_task(exiting())
+        await session.task
+        assert started == [4]
+        assert session.music_queue.qsize() == 1
+
+        idle = music._session(5)
+
+        async def leaving():
+            await music._finish_player_task(idle)
+
+        idle.task = asyncio.create_task(leaving())
+        await idle.task
+        assert started == [4]
+        assert idle.task is None
+        assert not idle.running
+
+    asyncio.run(scenario())

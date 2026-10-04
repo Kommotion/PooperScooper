@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -20,6 +21,7 @@ log = logging.getLogger(__name__)
 ONE_MEMBER = 1
 DEFAULT_VOLUME = 100  # Wavelink/Lavalink scale: 100 = 100%, max 1000
 TRACK_END_GRACE_SECONDS = 20
+MAX_QUEUE = 300
 
 
 def voice_client_is_stale(
@@ -168,11 +170,131 @@ def playback_will_continue(
     return not queue_empty
 
 
+def track_wait_timeout(length_ms: int | None, *, grace_seconds: float = TRACK_END_GRACE_SECONDS) -> float | None:
+    """Seconds to allow a known-length track. None when the length is unknown."""
+    if not length_ms or length_ms <= 0:
+        return None
+    return (length_ms / 1000) + grace_seconds
+
+
+def track_should_give_up(
+    *,
+    length_ms: int | None,
+    elapsed_seconds: float,
+    playing: bool,
+    paused: bool,
+    voice_dead: bool,
+    grace_seconds: float = TRACK_END_GRACE_SECONDS,
+) -> bool:
+    """Move on when the voice link is dead, the track never started, or it ran long.
+
+    A livestream (no length) that is actually playing keeps going. A known-length
+    track is cut at its duration plus the grace period.
+    """
+    if voice_dead:
+        return True
+    timeout = track_wait_timeout(length_ms, grace_seconds=grace_seconds)
+    if timeout is None:
+        return elapsed_seconds >= grace_seconds and not (playing or paused)
+    return elapsed_seconds >= timeout
+
+
+def take_for_queue(current: int, incoming: int, limit: int = MAX_QUEUE) -> int:
+    """How many of `incoming` tracks still fit under `limit`."""
+    if incoming <= 0 or limit <= 0:
+        return 0
+    room = limit - max(0, current)
+    if room <= 0:
+        return 0
+    return min(incoming, room)
+
+
+def drain_queue(queue: asyncio.Queue) -> int:
+    removed = 0
+    while True:
+        try:
+            queue.get_nowait()
+        except asyncio.QueueEmpty:
+            return removed
+        removed += 1
+
+
+def discard_queued(queue: asyncio.Queue, entry) -> bool:
+    """Remove one queued instance of `entry`. Other tracks stay in order."""
+    kept = []
+    removed = False
+    while True:
+        try:
+            item = queue.get_nowait()
+        except asyncio.QueueEmpty:
+            break
+        if not removed and item is entry:
+            removed = True
+            continue
+        kept.append(item)
+    for item in kept:
+        queue.put_nowait(item)
+    return removed
+
+
+def _discard_queued(session: "GuildSession", entry) -> bool:
+    return discard_queued(session.music_queue, entry)
+
+
+def repeat_target(*, enabled: bool, repeated_entry, current_entry):
+    """The track repeat should hold. Turning it on mid-song keeps the current one."""
+    if not enabled:
+        return None
+    if repeated_entry is not None:
+        return repeated_entry
+    return current_entry
+
+
 class MusicEntry:
     def __init__(self, track: wavelink.Playable, ctx: commands.Context):
         self.track = track
         self.ctx = ctx
         self.started_at: datetime | None = None
+
+
+class GuildSession:
+    """Playback state for one Discord server.
+
+    Queue, repeat, loop, shuffle, and the player task are per server. A second
+    server's !play must not sit behind the first server's playlist, and !stop
+    in one server must not silence the other.
+    """
+
+    def __init__(self, guild_id: int) -> None:
+        self.guild_id = guild_id
+        self.music_queue: asyncio.Queue = asyncio.Queue()
+        self.lock = asyncio.Lock()
+        self.repeat_enabled = False
+        self.repeated_entry: MusicEntry | None = None
+        self.loop_enabled = False
+        self.shuffle_mode = False
+        self.next_song = asyncio.Event()
+        self.queue_ready = asyncio.Event()
+        self.halt = False
+        self.current_entry: MusicEntry | None = None
+        self.task: asyncio.Task | None = None
+        self.running = False
+        self.volume = DEFAULT_VOLUME
+        self.alone_notice_sent = False
+
+    def reset_modes(self) -> None:
+        self.repeat_enabled = False
+        self.repeated_entry = None
+        self.loop_enabled = False
+        self.shuffle_mode = False
+
+    def drain(self) -> int:
+        return drain_queue(self.music_queue)
+
+    def put(self, entry) -> None:
+        """Queue a track and wake the player. Caller holds the session lock."""
+        self.music_queue.put_nowait(entry)
+        self.queue_ready.set()
 
 
 class NowPlayingView(discord.ui.LayoutView):
@@ -193,13 +315,21 @@ class NowPlayingView(discord.ui.LayoutView):
         ended: bool = False,
         controls: bool = True,
         timeout: float = 3600,
+        session: GuildSession | None = None,
     ):
         interactive = controls and not ended
         super().__init__(timeout=timeout if interactive else None)
         self.cog = cog
         self.entry = entry
         self.message = message
+        self.session = session
         self.add_item(self._build_container(is_paused=is_paused, ended=ended, controls=interactive))
+
+    def _playback(self):
+        """Queue size and modes come from the guild session when the cog has one."""
+        if self.session is not None:
+            return self.session
+        return self.cog
 
     def _build_container(self, *, is_paused: bool, ended: bool, controls: bool) -> discord.ui.Container:
         track = self.entry.track
@@ -244,13 +374,14 @@ class NowPlayingView(discord.ui.LayoutView):
             text = f"Requested by **{name}**\n-# Queue another track to keep it going"
         else:
             status = "⏸️ **Paused**" if is_paused else "▶️ **Playing**"
-            waiting = self.cog.music_queue.qsize()
+            state = self._playback()
+            waiting = state.music_queue.qsize()
             queue = "Queue clear" if waiting == 0 else f"**{waiting}** in queue"
             lines = [f"{status} · {queue}", f"Requested by **{name}**"]
             modes = mode_line(
-                repeat=self.cog.repeat_enabled,
-                loop=self.cog.loop_enabled,
-                shuffle=self.cog.shuffle_mode,
+                repeat=state.repeat_enabled,
+                loop=state.loop_enabled,
+                shuffle=state.shuffle_mode,
             )
             if modes:
                 lines.append(modes)
@@ -306,21 +437,21 @@ class NowPlayingView(discord.ui.LayoutView):
                 custom_id="np_repeat",
                 emoji="🔂",
                 label="Repeat",
-                style=self._toggle_style(self.cog.repeat_enabled),
+                style=self._toggle_style(self._playback().repeat_enabled),
                 callback=self.repeat_button,
             ),
             self._control(
                 custom_id="np_loop",
                 emoji="🔁",
                 label="Loop",
-                style=self._toggle_style(self.cog.loop_enabled),
+                style=self._toggle_style(self._playback().loop_enabled),
                 callback=self.loop_button,
             ),
             self._control(
                 custom_id="np_shuffle",
                 emoji="🔀",
                 label="Shuffle",
-                style=self._toggle_style(self.cog.shuffle_mode),
+                style=self._toggle_style(self._playback().shuffle_mode),
                 callback=self.shuffle_button,
             ),
         ]
@@ -353,7 +484,13 @@ class NowPlayingView(discord.ui.LayoutView):
             return
         player = interaction.guild.voice_client
         is_paused = bool(player.paused) if isinstance(player, wavelink.Player) else False
-        view = NowPlayingView(self.cog, self.entry, self.message, is_paused=is_paused)
+        view = NowPlayingView(
+            self.cog,
+            self.entry,
+            self.message,
+            is_paused=is_paused,
+            session=self.session,
+        )
         self.cog._release_np_view(interaction.guild.id)
         try:
             edited = await self.message.edit(
@@ -373,7 +510,14 @@ class NowPlayingView(discord.ui.LayoutView):
         self.cog.current_np_view.pop(guild.id, None)
         player = guild.voice_client
         is_paused = isinstance(player, wavelink.Player) and bool(player.paused)
-        frozen = NowPlayingView(self.cog, self.entry, message, is_paused=is_paused, controls=False)
+        frozen = NowPlayingView(
+            self.cog,
+            self.entry,
+            message,
+            is_paused=is_paused,
+            controls=False,
+            session=self.session,
+        )
         try:
             await message.edit(
                 view=frozen,
@@ -433,21 +577,20 @@ class Music(Cog):
     def __init__(self, bot):
         self.bot = bot
         self._verify_disc_assets()
-        self.music_queue = asyncio.Queue()
-        self.next_song = asyncio.Event()
-        self.music_player.start()
-        self.idle_timeout.start()
-
-        self.repeat_enabled = False
-        self.repeated_entry = None
-        self.loop_enabled = False
-        self.shuffle_mode = False
+        self._sessions: dict[int, GuildSession] = {}
         self.current_np_message = {}
         self.current_np_entry = {}
         self.current_np_view = {}
-        self._stopping = False
+        self.idle_timeout.start()
         self._lavalink_bootstrap_task: asyncio.Task | None = None
         self._lavalink_shutdown_done = False
+
+    def _session(self, guild_id: int) -> GuildSession:
+        session = self._sessions.get(guild_id)
+        if session is None:
+            session = GuildSession(guild_id)
+            self._sessions[guild_id] = session
+        return session
 
     @staticmethod
     def _verify_disc_assets() -> None:
@@ -471,11 +614,10 @@ class Music(Cog):
         name = cls.disc_asset_name(is_playing=is_playing)
         return [discord.File(ASSETS_DIR / name, filename=name)]
 
-    async def reset_player_controls(self):
-        self.repeat_enabled = False
-        self.repeated_entry = None
-        self.loop_enabled = False
-        self.shuffle_mode = False
+    async def reset_player_controls(self, guild_id: int):
+        session = self._session(guild_id)
+        async with session.lock:
+            session.reset_modes()
 
     def _lavalink_ready(self) -> bool:
         return bool(wavelink.Pool.nodes)
@@ -570,72 +712,115 @@ class Music(Cog):
             await self._drop_voice_client(ctx.guild)
             return None
 
-    async def _ensure_connected_for_entry(self, entry: MusicEntry) -> bool:
-        """Ensure the bot is in a voice channel before playing a queued track."""
+    async def _apply_volume(self, player: wavelink.Player, session: GuildSession) -> None:
+        """Restore this server's volume. play() is called without a volume so it sticks."""
+        if session.volume == DEFAULT_VOLUME:
+            return
+        try:
+            await player.set_volume(session.volume)
+        except Exception:
+            log.exception("Failed to apply volume in guild %s", session.guild_id)
+
+    async def _ensure_connected_for_entry(self, session: GuildSession, entry: MusicEntry) -> bool:
+        """Stay in the channel the bot already joined.
+
+        !play / !join move the bot. Starting the next queued track must not
+        follow the requester into another channel and pull the listening party apart.
+        """
         ctx = entry.ctx
-        player = self._get_player(ctx.guild)
-        if player and self._needs_reconnect(ctx.guild, player):
+        guild = ctx.guild
+        player = self._get_player(guild)
+        if player and self._needs_reconnect(guild, player):
             log.warning(
                 "Voice client in %s is not actually connected; reconnecting for %r",
-                ctx.guild.name,
+                guild.name,
                 entry.track.title,
             )
-            await self._drop_voice_client(ctx.guild)
+            await self._drop_voice_client(guild)
             player = None
 
+        if player and self._actual_channel_id(guild) is not None:
+            await self._apply_volume(player, session)
+            return True
+
         if player:
-            author_channel = ctx.author.voice.channel if ctx.author.voice else None
-            if author_channel and player.channel != author_channel:
-                await player.move_to(author_channel, self_deaf=True, self_mute=False)
-            if self._actual_channel_id(ctx.guild) is not None:
-                return True
-            log.warning(
-                "Player for %s still has no Discord voice state after move",
-                ctx.guild.name,
-            )
-            await self._drop_voice_client(ctx.guild)
+            log.warning("Player for %s has no Discord voice state; reconnecting", guild.name)
+            await self._drop_voice_client(guild)
 
         player = await self._connect_to_author(ctx)
-        if player and self._actual_channel_id(ctx.guild) is not None:
+        if player and self._actual_channel_id(guild) is not None:
+            await self._apply_volume(player, session)
             return True
 
         log.warning(
-            "Skipping queued track %r; could not join a voice channel (requester left VC?)",
+            "Could not join a voice channel for %r in %s",
             entry.track.title,
+            getattr(guild, "name", session.guild_id),
         )
-        self._signal_next_song()
         return False
 
-    async def _wait_for_track_end(self, entry: MusicEntry, player: wavelink.Player) -> None:
+    def _voice_is_dead(self, guild: discord.Guild, player: wavelink.Player | None) -> bool:
+        if guild is None or player is None:
+            return True
+        return self._needs_reconnect(guild, player)
+
+    async def _wait_for_track_end(
+        self,
+        session: GuildSession,
+        entry: MusicEntry,
+        player: wavelink.Player,
+    ) -> None:
         """Wait until Lavalink finishes the track, but do not wedge the queue.
 
-        A track sent with no live voice link never emits track end. Without a
-        bound, every later !play sits behind that wait.
+        Known-length tracks are capped at their duration plus a grace period.
+        A livestream with no length keeps going while audio is actually up.
+        A dead voice link is abandoned after one grace period instead of
+        playing out the rest of the song to nobody.
         """
-        length_ms = entry.track.length or 0
-        if length_ms <= 0:
-            await self.next_song.wait()
-            return
-        timeout = length_ms / 1000 + TRACK_END_GRACE_SECONDS
-        try:
-            await asyncio.wait_for(self.next_song.wait(), timeout=timeout)
-        except asyncio.TimeoutError:
-            log.warning(
-                "No track-end event for %r after %.0fs; advancing the queue",
-                entry.track.title,
-                timeout,
-            )
+        length_ms = getattr(entry.track, "length", None)
+        started = time.monotonic()
+        while True:
+            timeout = track_wait_timeout(length_ms)
+            if timeout is None:
+                wait_for = TRACK_END_GRACE_SECONDS
+            else:
+                remaining = timeout - (time.monotonic() - started)
+                if remaining <= 0:
+                    wait_for = 0.1
+                else:
+                    wait_for = min(TRACK_END_GRACE_SECONDS, remaining)
             try:
-                await player.stop()
-            except Exception:
-                log.exception("Failed to stop %r after a missing track-end event", entry.track.title)
+                await asyncio.wait_for(session.next_song.wait(), timeout=wait_for)
+                return
+            except asyncio.TimeoutError:
+                elapsed = time.monotonic() - started
+                playing = bool(getattr(player, "playing", False))
+                paused = bool(getattr(player, "paused", False))
+                if not track_should_give_up(
+                    length_ms=length_ms,
+                    elapsed_seconds=elapsed,
+                    playing=playing,
+                    paused=paused,
+                    voice_dead=self._voice_is_dead(entry.ctx.guild, player),
+                ):
+                    continue
+                log.warning(
+                    "No track-end event for %r after %.0fs; advancing the queue",
+                    entry.track.title,
+                    elapsed,
+                )
+                try:
+                    await player.stop()
+                except Exception:
+                    log.exception("Failed to stop %r after a missing track-end event", entry.track.title)
+                return
 
-    def _playback_will_continue(self) -> bool:
+    def _playback_will_continue(self, session: GuildSession) -> bool:
         return playback_will_continue(
-            stopping=self._stopping,
-            repeat_enabled=self.repeat_enabled,
-            has_repeated_entry=self.repeated_entry is not None,
-            queue_empty=self.music_queue.empty(),
+            stopping=session.halt,
+            repeat_enabled=session.repeat_enabled,
+            has_repeated_entry=session.repeated_entry is not None,
+            queue_empty=session.music_queue.empty(),
         )
 
     def _release_np_view(self, guild_id: int) -> None:
@@ -682,7 +867,7 @@ class Music(Cog):
         self._release_np_view(guild_id)
         if shown is None:
             return
-        ended = NowPlayingView(self, shown, message, ended=True)
+        ended = NowPlayingView(self, shown, message, ended=True, session=self._sessions.get(guild_id))
         try:
             await message.edit(
                 view=ended,
@@ -694,11 +879,19 @@ class Music(Cog):
         except discord.HTTPException:
             log.warning("Could not mark the now playing card ended in guild %s", guild_id)
 
-    async def present_now_playing(self, entry: MusicEntry, *, is_paused: bool = False) -> discord.Message | None:
+    async def present_now_playing(
+        self,
+        entry: MusicEntry,
+        *,
+        is_paused: bool = False,
+        session: GuildSession | None = None,
+    ) -> discord.Message | None:
         """Edit the current card when it is still the newest message. Otherwise post a new one."""
         guild_id = entry.ctx.guild.id
+        if session is None:
+            session = self._sessions.get(guild_id)
         entry.started_at = discord.utils.utcnow()
-        view = NowPlayingView(self, entry, is_paused=is_paused)
+        view = NowPlayingView(self, entry, is_paused=is_paused, session=session)
         previous = self.current_np_message.get(guild_id)
         same_channel = False
         if previous is not None:
@@ -745,101 +938,367 @@ class Music(Cog):
         log.info("Posted a new now playing card for %r", entry.track.title)
         return message
 
-    async def get_entry(self):
-        if self.repeat_enabled:
-            entry = self.repeated_entry if self.repeated_entry else await self.music_queue.get()
-            if not self.repeated_entry:
-                self.repeated_entry = entry
-            return entry
-        if self.shuffle_mode:
-            items = []
-            while True:
-                try:
-                    items.append(self.music_queue.get_nowait())
-                except asyncio.QueueEmpty:
-                    break
-            if not items:
-                items.append(await self.music_queue.get())
-            entry = random.choice(items)
-            items.remove(entry)
-            for e in items:
-                await self.music_queue.put(e)
-            return entry
-        return await self.music_queue.get()
+    async def _get_entry(self, session: GuildSession) -> MusicEntry:
+        """Take the next track. The wait itself does not hold the session lock."""
+        while True:
+            async with session.lock:
+                if session.repeat_enabled and session.repeated_entry is not None:
+                    return session.repeated_entry
+                if not session.music_queue.empty():
+                    if session.shuffle_mode:
+                        items = []
+                        while True:
+                            try:
+                                items.append(session.music_queue.get_nowait())
+                            except asyncio.QueueEmpty:
+                                break
+                        entry = random.choice(items)
+                        items.remove(entry)
+                        for queued in items:
+                            session.put(queued)
+                    else:
+                        entry = session.music_queue.get_nowait()
+                    if session.repeat_enabled and session.repeated_entry is None:
+                        session.repeated_entry = entry
+                    return entry
+                session.queue_ready.clear()
+            await session.queue_ready.wait()
 
-    def _signal_next_song(self):
-        self.bot.loop.call_soon_threadsafe(self.next_song.set)
+    def _signal_guild(self, guild_id: int | None) -> None:
+        if guild_id is None:
+            return
+        session = self._sessions.get(guild_id)
+        if session is None:
+            return
+        session.next_song.set()
+
+    @staticmethod
+    def _guild_id_from_player(player) -> int | None:
+        guild = getattr(player, "guild", None)
+        if guild is None:
+            return None
+        return guild.id
 
     @commands.Cog.listener()
     async def on_wavelink_track_end(self, payload: wavelink.TrackEndEventPayload):
-        if self._stopping:
-            return
-        player = payload.player
-        if not player or not player.guild:
-            return
-        self._signal_next_song()
+        self._signal_guild(self._guild_id_from_player(payload.player))
 
     @commands.Cog.listener()
     async def on_wavelink_track_exception(self, payload: wavelink.TrackExceptionEventPayload):
         log.error("Track exception: %s", payload.exception)
-        self._signal_next_song()
+        self._signal_guild(self._guild_id_from_player(payload.player))
 
-    @tasks.loop(seconds=1)
-    async def music_player(self):
+    @commands.Cog.listener()
+    async def on_wavelink_track_stuck(self, payload: wavelink.TrackStuckEventPayload):
+        log.warning(
+            "Track stuck after %sms: %s",
+            payload.threshold,
+            getattr(payload.track, "title", payload.track),
+        )
+        self._signal_guild(self._guild_id_from_player(payload.player))
+
+    @commands.Cog.listener()
+    async def on_wavelink_websocket_closed(self, payload: wavelink.WebsocketClosedEventPayload):
+        code = getattr(payload.code, "value", payload.code)
+        log.warning(
+            "Voice websocket closed (code=%s, by_remote=%s, reason=%s)",
+            code,
+            payload.by_remote,
+            payload.reason,
+        )
+        # 4014 is Discord asking for a new voice session (a move or a brief
+        # reconnect). Wavelink already waits for that. Other codes mean the
+        # link is gone, so don't play the rest of the track into it.
+        if code == 4014:
+            return
+        self._signal_guild(self._guild_id_from_player(payload.player))
+
+    def _ensure_player_task(self, session: GuildSession) -> None:
+        """Start this server's player. Caller holds session.lock."""
+        task = session.task
+        if task is not None and not task.done():
+            return
+        session.running = True
+        session.task = asyncio.create_task(
+            self._run_guild_player(session),
+            name=f"pooperscooper-music-{session.guild_id}",
+        )
+
+    async def _finish_player_task(self, session: GuildSession) -> None:
+        """Clear a finished player, and start another if work arrived while it was exiting."""
+        current = asyncio.current_task()
+        async with session.lock:
+            if session.task is not current:
+                return
+            session.running = False
+            session.halt = False
+            session.current_entry = None
+            session.task = None
+            pending = not session.music_queue.empty() or (
+                session.repeat_enabled and session.repeated_entry is not None
+            )
+            cancelling = current is not None and current.cancelling()
+            if pending and not cancelling:
+                self._ensure_player_task(session)
+            elif not cancelling:
+                log.info("Music queue empty in guild %s", session.guild_id)
+
+    async def _run_guild_player(self, session: GuildSession) -> None:
+        """Play this server's queue until it is idle or the cog is unloaded."""
         try:
-            await self._run_music_player()
+            while True:
+                async with session.lock:
+                    repeating = session.repeat_enabled and session.repeated_entry is not None
+                    if session.music_queue.empty() and not repeating:
+                        return
+
+                entry = await self._get_entry(session)
+                async with session.lock:
+                    if session.halt:
+                        session.halt = False
+                        session.current_entry = None
+                        abandoned = True
+                    else:
+                        session.current_entry = entry
+                        abandoned = False
+                if abandoned:
+                    await self.invalidate_current_np(session.guild_id, entry)
+                    continue
+
+                if not await self._ensure_connected_for_entry(session, entry):
+                    await self._give_up_session(session, entry, "I couldn't join a voice channel, so I cleared the queue.")
+                    continue
+
+                if await self._alone_in_channel(session, entry):
+                    await self.invalidate_current_np(session.guild_id, entry)
+                    continue
+
+                player = self._get_player(entry.ctx.guild)
+                if not player:
+                    log.error("No Wavelink player for guild %s", session.guild_id)
+                    await self._give_up_session(session, entry, "Playback stopped because the voice connection dropped.")
+                    continue
+
+                async with session.lock:
+                    if session.halt:
+                        session.halt = False
+                        session.current_entry = None
+                        stopped = True
+                    else:
+                        stopped = False
+                if stopped:
+                    await self.invalidate_current_np(session.guild_id, entry)
+                    continue
+
+                requeued = False
+                try:
+                    async with session.lock:
+                        if session.halt:
+                            session.halt = False
+                            session.current_entry = None
+                            stopped = True
+                        else:
+                            stopped = False
+                            if session.loop_enabled and not session.repeat_enabled:
+                                session.put(entry)
+                                requeued = True
+                    if stopped:
+                        await self.invalidate_current_np(session.guild_id, entry)
+                        continue
+                    await self.present_now_playing(entry, session=session)
+                    # Drop a stale track-end, then read halt before the next await.
+                    # Stop sets both, so it is either still latched here or it
+                    # arrives afterward and wakes the wait below.
+                    session.next_song.clear()
+                    async with session.lock:
+                        if session.halt:
+                            session.halt = False
+                            session.current_entry = None
+                            stopped = True
+                        else:
+                            stopped = False
+                    if stopped:
+                        if requeued:
+                            async with session.lock:
+                                _discard_queued(session, entry)
+                        await self.invalidate_current_np(session.guild_id, entry)
+                        continue
+                    await self._apply_volume(player, session)
+                    # Omit volume. Passing it resets a !volume the listener just set.
+                    await player.play(entry.track)
+                    async with session.lock:
+                        if session.repeat_enabled:
+                            session.repeated_entry = entry
+                            if requeued:
+                                _discard_queued(session, entry)
+                except Exception as e:
+                    async with session.lock:
+                        stopped = session.halt
+                        if stopped:
+                            session.halt = False
+                        session.repeated_entry = None
+                        session.current_entry = None
+                        if requeued:
+                            _discard_queued(session, entry)
+                    if stopped:
+                        await self.invalidate_current_np(session.guild_id, entry)
+                        continue
+                    log.error("Unexpected error while playing %s: %s", entry.track.uri, e)
+                    await self.error_playing_embed(entry)
+                    if not self._playback_will_continue(session):
+                        await self.invalidate_current_np(session.guild_id, entry)
+                    continue
+
+                await self._wait_for_track_end(session, entry, player)
+                async with session.lock:
+                    stopped = session.halt
+                    if stopped:
+                        session.halt = False
+                    session.current_entry = None
+                if stopped or not self._playback_will_continue(session):
+                    await self.invalidate_current_np(session.guild_id, entry)
+        except asyncio.CancelledError:
+            raise
         except Exception:
-            log.exception("Unhandled error in music_player; task will continue")
+            log.exception("Music player for guild %s stopped on an unexpected error", session.guild_id)
+        finally:
+            await self._finish_player_task(session)
 
-    async def _run_music_player(self):
-        self.next_song.clear()
-        if self.music_queue.empty() and not self.repeat_enabled:
-            connected = [vc for vc in self.bot.voice_clients if vc.channel]
-            if connected:
-                log.info(
-                    "Music queue empty; waiting for next !play (%s voice channel(s) connected)",
-                    len(connected),
-                )
-        entry = await self.get_entry()
-
-        if self.loop_enabled and not self.repeat_enabled:
-            await self.music_queue.put(entry)
-
-        if not await self._ensure_connected_for_entry(entry):
-            if not self._playback_will_continue():
-                await self.invalidate_current_np(entry.ctx.guild.id)
-            return
-
-        if await self.bot_is_alone(entry.ctx):
-            if not self._playback_will_continue():
-                await self.invalidate_current_np(entry.ctx.guild.id)
-            return
-
-        player = self._get_player(entry.ctx.guild)
-        if not player:
-            log.error("No Wavelink player for guild %s", entry.ctx.guild.id)
-            self._signal_next_song()
-            if not self._playback_will_continue():
-                await self.invalidate_current_np(entry.ctx.guild.id)
-            return
-
+    async def _give_up_session(self, session: GuildSession, entry: MusicEntry, notice: str) -> None:
+        """Drop this server's queue once. A failed join must not spin the playlist."""
+        async with session.lock:
+            session.reset_modes()
+            session.drain()
+            session.halt = False
+            session.current_entry = None
+            session.alone_notice_sent = False
+            session.queue_ready.set()
+        session.next_song.set()
+        await self.invalidate_current_np(session.guild_id, entry)
         try:
-            await self.present_now_playing(entry)
-            await player.play(entry.track, volume=DEFAULT_VOLUME)
-            if self.repeat_enabled:
-                self.repeated_entry = entry
-        except Exception as e:
-            log.error("Unexpected error while playing %s: %s", entry.track.uri, e)
-            await self.error_playing_embed(entry)
-            self.repeated_entry = None
-            self._signal_next_song()
-            if not self._playback_will_continue():
-                await self.invalidate_current_np(entry.ctx.guild.id, entry=entry)
-            return
+            await entry.ctx.send(notice)
+        except discord.HTTPException:
+            log.warning("Could not send playback notice in guild %s", session.guild_id)
 
-        await self._wait_for_track_end(entry, player)
-        if not self._playback_will_continue():
-            await self.invalidate_current_np(entry.ctx.guild.id, entry=entry)
+    async def _alone_in_channel(self, session: GuildSession, entry: MusicEntry) -> bool:
+        ctx = entry.ctx
+        voice_client = ctx.voice_client
+        if voice_client is None or voice_client.channel is None:
+            return False
+        members = len(voice_client.channel.voice_states)
+        if members > ONE_MEMBER:
+            session.alone_notice_sent = False
+            return False
+        async with session.lock:
+            session.reset_modes()
+            session.drain()
+            session.halt = False
+            session.current_entry = None
+            already_sent = session.alone_notice_sent
+            session.alone_notice_sent = True
+            session.queue_ready.set()
+        if not already_sent:
+            embed = discord.Embed(
+                title='Disconnecting to save my owner some bandwidth',
+                description='{} other(s) detected as connected to this channel'.format(members - 1),
+                colour=discord.Colour.blue(),
+            )
+            try:
+                await ctx.send(embed=embed)
+            except discord.HTTPException:
+                log.warning("Could not send the alone notice in guild %s", session.guild_id)
+        try:
+            await voice_client.disconnect()
+        except Exception:
+            log.exception("Failed to disconnect while alone in guild %s", session.guild_id)
+        return True
+
+    async def _stop_session(self, guild: discord.Guild) -> None:
+        """Stop one server: clear its queue and modes, and leave voice if audio is up."""
+        session = self._session(guild.id)
+        async with session.lock:
+            session.reset_modes()
+            session.drain()
+            session.alone_notice_sent = False
+            in_flight = session.current_entry is not None
+            session.halt = in_flight
+            session.queue_ready.set()
+        session.next_song.set()
+        player = self._get_player(guild)
+        if player is not None and (in_flight or player.playing or player.paused):
+            try:
+                player.queue.clear()
+            except Exception:
+                log.exception("Failed to clear the Lavalink queue in guild %s", guild.id)
+            try:
+                await player.disconnect()
+            except Exception:
+                log.exception("Failed to disconnect player in guild %s", guild.id)
+        await self.invalidate_current_np(guild.id)
+
+    async def _abandon_voice(self, guild: discord.Guild) -> None:
+        """The channel is empty or Discord dropped the session. Stop this server only."""
+        session = self._sessions.get(guild.id)
+        if session is not None:
+            async with session.lock:
+                session.reset_modes()
+                session.drain()
+                session.alone_notice_sent = False
+                session.halt = session.current_entry is not None
+                session.queue_ready.set()
+            session.next_song.set()
+        await self._drop_voice_client(guild)
+        await self.invalidate_current_np(guild.id)
+
+    async def _refresh_live_card(self, guild: discord.Guild) -> None:
+        message = self.current_np_message.get(guild.id)
+        entry = self.current_np_entry.get(guild.id)
+        if message is None or entry is None:
+            return
+        player = self._get_player(guild)
+        is_paused = bool(player.paused) if player else False
+        view = NowPlayingView(
+            self,
+            entry,
+            message,
+            is_paused=is_paused,
+            session=self._sessions.get(guild.id),
+        )
+        self._release_np_view(guild.id)
+        try:
+            edited = await message.edit(
+                view=view,
+                attachments=self.disc_files(is_playing=not is_paused),
+                allowed_mentions=NO_MENTIONS,
+            )
+        except (discord.NotFound, discord.HTTPException):
+            return
+        self._remember_np(guild.id, edited, entry, view)
+
+    async def _set_repeat(self, guild_id: int, enabled: bool | None = None) -> bool:
+        session = self._session(guild_id)
+        async with session.lock:
+            if enabled is None:
+                enabled = not session.repeat_enabled
+            current = session.current_entry or self.current_np_entry.get(guild_id)
+            session.repeated_entry = repeat_target(
+                enabled=enabled,
+                repeated_entry=session.repeated_entry if enabled else None,
+                current_entry=current,
+            )
+            session.repeat_enabled = enabled
+            return enabled
+
+    async def _enqueue(self, ctx: commands.Context, tracks: list) -> tuple[int, int]:
+        session = self._session(ctx.guild.id)
+        async with session.lock:
+            room = take_for_queue(session.music_queue.qsize(), len(tracks))
+            for track in tracks[:room]:
+                session.put(MusicEntry(track, ctx))
+            if room:
+                session.alone_notice_sent = False
+                self._ensure_player_task(session)
+        return room, len(tracks) - room
 
     @tasks.loop(seconds=30)
     async def idle_timeout(self):
@@ -848,41 +1307,19 @@ class Music(Cog):
             guild = getattr(voice_client, "guild", None)
             if channel is None or guild is None:
                 continue
-            if isinstance(voice_client, wavelink.Player) and self._player_is_stale(guild, voice_client):
+            stale = isinstance(voice_client, wavelink.Player) and self._player_is_stale(guild, voice_client)
+            if stale:
                 log.warning(
                     "Dropping stale voice client in %s (Discord no longer has the bot in %s)",
                     guild.name,
                     getattr(channel, "name", channel.id),
                 )
-                await self._drop_voice_client(guild)
-                await self.invalidate_current_np(guild.id)
-                continue
-            if len(channel.voice_states) <= ONE_MEMBER:
-                guild_id = guild.id
-                await voice_client.disconnect()
-                await self.invalidate_current_np(guild_id)
+            if stale or len(channel.voice_states) <= ONE_MEMBER:
+                await self._abandon_voice(guild)
 
     @idle_timeout.before_loop
     async def before_timeout(self):
         await self.bot.wait_until_ready()
-
-    async def bot_is_alone(self, ctx):
-        vc = ctx.voice_client
-        if vc is None or vc.channel is None:
-            return False
-
-        number_of_members = len(vc.channel.voice_states)
-        if number_of_members <= ONE_MEMBER:
-            while not self.music_queue.empty():
-                self.music_queue.get_nowait()
-            embed = discord.Embed(
-                title='Disconnecting to save my owner some bandwidth',
-                description='{} other(s) detected as connected to this channel'.format(number_of_members - 1),
-                colour=discord.Colour.blue(),
-            )
-            await ctx.send(embed=embed)
-            return True
-        return False
 
     async def error_playing_embed(self, entry: MusicEntry):
         embed = discord.Embed(
@@ -908,27 +1345,18 @@ class Music(Cog):
         return interaction.user.voice.channel == voice_client.channel
 
     async def _button_skip(self, interaction):
-        if self.repeat_enabled:
+        session = self._session(interaction.guild.id)
+        if session.repeat_enabled:
             await interaction.response.send_message("Can't skip while Repeat is enabled!", ephemeral=True)
             return
         await interaction.response.defer()
         player = self._get_player(interaction.guild)
-        if player and player.playing:
+        if player and (player.playing or player.paused):
             await player.skip(force=True)
 
     async def _button_stop(self, interaction):
         await interaction.response.defer()
-        self._stopping = True
-        while not self.music_queue.empty():
-            self.music_queue.get_nowait()
-        player = self._get_player(interaction.guild)
-        if player and (player.playing or player.paused):
-            player.queue.clear()
-            await player.disconnect()
-        guild_id = interaction.guild.id
-        await self.invalidate_current_np(guild_id)
-        self._signal_next_song()
-        self._stopping = False
+        await self._stop_session(interaction.guild)
 
     async def _button_pause(self, interaction):
         player = self._get_player(interaction.guild)
@@ -947,25 +1375,30 @@ class Music(Cog):
             await interaction.response.send_message("Player is not paused.", ephemeral=True)
 
     async def _button_repeat(self, interaction):
-        self.repeat_enabled = not self.repeat_enabled
-        if not self.repeat_enabled:
-            self.repeated_entry = None
+        await self._set_repeat(interaction.guild.id)
         await interaction.response.defer()
 
     async def _button_loop(self, interaction):
-        self.loop_enabled = not self.loop_enabled
+        session = self._session(interaction.guild.id)
+        async with session.lock:
+            session.loop_enabled = not session.loop_enabled
         await interaction.response.defer()
 
     async def _button_shuffle(self, interaction):
-        if self.repeat_enabled:
-            await interaction.response.send_message("Can't use shuffle mode while repeat is enabled!", ephemeral=True)
+        session = self._session(interaction.guild.id)
+        async with session.lock:
+            if session.repeat_enabled:
+                blocked = True
+            else:
+                session.shuffle_mode = not session.shuffle_mode
+                blocked = False
+        if blocked:
+            await interaction.response.send_message(
+                "Can't use shuffle mode while repeat is enabled!",
+                ephemeral=True,
+            )
             return
-        self.shuffle_mode = not self.shuffle_mode
         await interaction.response.defer()
-
-    @music_player.before_loop
-    async def before_music(self):
-        await self.bot.wait_until_ready()
 
     @commands.command()
     async def join(self, ctx):
@@ -1086,11 +1519,16 @@ class Music(Cog):
             if shuffle:
                 random.shuffle(tracks)
 
-            for track in tracks:
-                entry = MusicEntry(track, ctx)
-                await self.music_queue.put(entry)
-
-            description = url if len(tracks) == 1 else '{} songs'.format(len(tracks))
+            queued, skipped = await self._enqueue(ctx, tracks)
+            if queued == 0:
+                description = f"The queue is full ({MAX_QUEUE} tracks). Nothing new was added."
+            elif skipped:
+                shown = url if queued == 1 else f"{queued} songs"
+                description = (
+                    f"{shown}. {skipped} didn't fit because the queue is capped at {MAX_QUEUE}."
+                )
+            else:
+                description = url if queued == 1 else f"{queued} songs"
             embed = discord.Embed(
                 title='Queued up',
                 description=description,
@@ -1102,17 +1540,26 @@ class Music(Cog):
     @commands.command()
     async def shuffle(self, ctx):
         """Shuffles the current music queue."""
-        if self.repeat_enabled:
+        session = self._session(ctx.guild.id)
+        async with session.lock:
+            if session.repeat_enabled:
+                blocked = True
+            else:
+                blocked = False
+                items = []
+                while True:
+                    try:
+                        items.append(session.music_queue.get_nowait())
+                    except asyncio.QueueEmpty:
+                        break
+                random.shuffle(items)
+                for item in items:
+                    session.put(item)
+        if blocked:
             await ctx.send("Can't shuffle while repeat is enabled!")
             return
 
-        try:
-            random.shuffle(self.music_queue._queue)
-        except Exception as e:
-            log.warning("Failed to shuffle the music queue: {}".format(e))
-            await ctx.send("Error shuffling music queue!")
-            return
-
+        await self._refresh_live_card(ctx.guild)
         await ctx.message.add_reaction('👍')
 
     @commands.command()
@@ -1123,8 +1570,10 @@ class Music(Cog):
             await ctx.send("Not connected to a voice channel.")
             return
 
-        original = player.volume
+        session = self._session(ctx.guild.id)
+        original = session.volume
         clamped = max(0, min(100, volume))
+        session.volume = clamped
         await player.set_volume(clamped)
 
         description = '{}% -> {}%'.format(str(original), str(clamped))
@@ -1138,65 +1587,54 @@ class Music(Cog):
     @commands.command()
     async def skip(self, ctx):
         """Skip the current song."""
-        if self.repeat_enabled:
+        session = self._session(ctx.guild.id)
+        if session.repeat_enabled:
             await ctx.send("Can't skip while Repeat is enabled!")
             return
 
         player = self._get_player(ctx.guild)
-        if player and player.playing:
+        if player and (player.playing or player.paused):
             await player.skip(force=True)
 
     @commands.command()
     async def stop(self, ctx):
-        """Stops what's playing."""
-        self._stopping = True
-        while not self.music_queue.empty():
-            self.music_queue.get_nowait()
-
-        player = self._get_player(ctx.guild)
-        if player and (player.playing or player.paused):
-            player.queue.clear()
-            await player.disconnect()
-
-        guild_id = ctx.guild.id
-        await self.invalidate_current_np(guild_id)
-        self._signal_next_song()
-        self._stopping = False
+        """Stops what's playing and clears this server's queue."""
+        await self._stop_session(ctx.guild)
 
     @commands.command()
     async def pause(self, ctx):
         """Pauses the current song."""
         player = self._get_player(ctx.guild)
-        if player:
+        if player and player.playing:
             await player.pause(True)
+            await self._refresh_live_card(ctx.guild)
 
     @commands.command()
     async def resume(self, ctx):
         """Resumes the current song."""
         player = self._get_player(ctx.guild)
-        if player:
+        if player and player.paused:
             await player.pause(False)
+            await self._refresh_live_card(ctx.guild)
 
     @commands.command()
     async def repeat(self, ctx):
         """Enable/Disable repeat the current playing song."""
-        self.repeat_enabled = not self.repeat_enabled
-        message = "Current/Next Song Repeat is now {}."
-        if self.repeat_enabled:
-            await ctx.send(message.format("enabled"))
-        else:
-            self.repeated_entry = None
-            await ctx.send(message.format("disabled"))
+        enabled = await self._set_repeat(ctx.guild.id)
+        state = "enabled" if enabled else "disabled"
+        await ctx.send(f"Current/Next Song Repeat is now {state}.")
+        await self._refresh_live_card(ctx.guild)
 
     @commands.command()
     async def loop(self, ctx):
         """Enable/Disable looping the current music queue."""
-        self.loop_enabled = not self.loop_enabled
-        message = "Music Looping is now {}."
-        if self.loop_enabled:
-            await ctx.send(message.format("enabled"))
-        else:
-            await ctx.send(message.format("disabled"))
+        session = self._session(ctx.guild.id)
+        async with session.lock:
+            session.loop_enabled = not session.loop_enabled
+            enabled = session.loop_enabled
+        state = "enabled" if enabled else "disabled"
+        await ctx.send(f"Music Looping is now {state}.")
+        await self._refresh_live_card(ctx.guild)
 
     async def cog_load(self) -> None:
         settings = getattr(self.bot, "lavalink_settings", None)
@@ -1253,12 +1691,23 @@ class Music(Cog):
             log.warning("Lavalink bootstrap finished without a Wavelink connection; music is unavailable.")
 
     async def cog_unload(self):
+        self.idle_timeout.cancel()
+        pending = []
+        for session in list(self._sessions.values()):
+            if session.task is not None and not session.task.done():
+                session.task.cancel()
+                pending.append(session.task)
+        for task in pending:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                log.exception("Music player task failed during unload")
+
         await self.shutdown_lavalink()
 
-        while not self.music_queue.empty():
-            self.music_queue.get_nowait()
-
-        for voice_client in self.bot.voice_clients:
+        for voice_client in list(self.bot.voice_clients):
             try:
                 await voice_client.disconnect()
             except Exception:
@@ -1290,14 +1739,18 @@ class Music(Cog):
         elif ctx.guild.voice_client is not None and player is None:
             await self._drop_voice_client(ctx.guild)
 
+        session = self._session(ctx.guild.id)
         if player is None:
-            if not await self._connect_to_author(ctx):
+            player = await self._connect_to_author(ctx)
+            if not player:
                 await ctx.send("Failed to join your voice channel.")
                 raise commands.CommandError("Failed to join voice channel.")
-            await self.reset_player_controls()
+            await self.reset_player_controls(ctx.guild.id)
+            await self._apply_volume(player, session)
         elif author_channel != player.channel:
             await player.move_to(author_channel, self_deaf=True, self_mute=False)
-            await self.reset_player_controls()
+            await self.reset_player_controls(ctx.guild.id)
+            await self._apply_volume(player, session)
 
     @resume.before_invoke
     @pause.before_invoke
