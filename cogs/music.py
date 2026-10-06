@@ -22,6 +22,8 @@ ONE_MEMBER = 1
 DEFAULT_VOLUME = 100  # Wavelink/Lavalink scale: 100 = 100%, max 1000
 TRACK_END_GRACE_SECONDS = 20
 MAX_QUEUE = 2000
+IDLE_STATUS_NAME = "for a missed pile of 💩"
+PRESENCE_NAME_LIMIT = 128
 
 
 def voice_client_is_stale(
@@ -91,6 +93,22 @@ def _plain(text: str | None) -> str:
         return ""
     cleaned = " ".join(str(text).split())
     return discord.utils.escape_mentions(discord.utils.escape_markdown(cleaned))
+
+
+def music_presence(titles: list[str]) -> tuple[discord.ActivityType, str]:
+    """The bot status for whatever is playing.
+
+    One song is shown by name. Several servers at once do not name a single
+    track, because that title would be wrong for the other servers. Nothing
+    playing keeps the idle line.
+    """
+    names = [" ".join(str(title).split()) for title in titles]
+    names = [name for name in names if name]
+    if not names:
+        return discord.ActivityType.watching, IDLE_STATUS_NAME
+    if len(names) == 1:
+        return discord.ActivityType.listening, names[0][:PRESENCE_NAME_LIMIT]
+    return discord.ActivityType.listening, f"music in {len(names)} servers"
 
 
 def format_track_length(length_ms: int | None) -> str | None:
@@ -681,6 +699,31 @@ class Music(Cog):
         async with session.lock:
             session.reset_modes()
 
+    def _now_playing_titles(self) -> list[str]:
+        """Song titles whose playback has not been stopped."""
+        titles = []
+        for session in self._sessions.values():
+            entry = session.current_entry
+            if entry is None or session.halt:
+                continue
+            titles.append(getattr(entry.track, "title", None) or "")
+        return titles
+
+    async def refresh_music_presence(self, *, idle: bool = False) -> None:
+        """Show the current song, or the idle line when nothing is playing."""
+        bot = getattr(self, "bot", None)
+        if bot is None:
+            return
+        activity_type, name = music_presence([] if idle else self._now_playing_titles())
+        try:
+            await bot.change_presence(
+                activity=discord.Activity(type=activity_type, name=name),
+            )
+        except discord.HTTPException:
+            log.warning("Could not update the bot status")
+            return
+        log.info("Bot status is now %s %s", activity_type.name, name)
+
     def _lavalink_ready(self) -> bool:
         return bool(wavelink.Pool.nodes)
 
@@ -1106,6 +1149,9 @@ class Music(Cog):
                 self._ensure_player_task(session)
             elif not cancelling:
                 log.info("Music queue empty in guild %s", session.guild_id)
+            went_idle = not pending and not cancelling
+        if went_idle:
+            await self.refresh_music_presence()
 
     async def _run_guild_player(self, session: GuildSession) -> None:
         """Play this server's queue until it is idle or the cog is unloaded."""
@@ -1203,6 +1249,7 @@ class Music(Cog):
                             session.repeated_entry = entry
                             if requeued:
                                 _discard_queued(session, entry)
+                    await self.refresh_music_presence()
                 except Exception as e:
                     async with session.lock:
                         stopped = session.halt
@@ -1214,11 +1261,13 @@ class Music(Cog):
                             _discard_queued(session, entry)
                     if stopped:
                         await self.invalidate_current_np(session.guild_id, entry)
+                        await self.refresh_music_presence()
                         continue
                     log.error("Unexpected error while playing %s: %s", entry.track.uri, e)
                     await self.error_playing_embed(entry)
                     if not self._playback_will_continue(session):
                         await self.invalidate_current_np(session.guild_id, entry)
+                        await self.refresh_music_presence()
                     continue
 
                 await self._wait_for_track_end(session, entry, player)
@@ -1247,6 +1296,7 @@ class Music(Cog):
             session.queue_ready.set()
         session.next_song.set()
         await self.invalidate_current_np(session.guild_id, entry)
+        await self.refresh_music_presence()
         try:
             await entry.ctx.send(notice)
         except discord.HTTPException:
@@ -1283,6 +1333,7 @@ class Music(Cog):
             await voice_client.disconnect()
         except Exception:
             log.exception("Failed to disconnect while alone in guild %s", session.guild_id)
+        await self.refresh_music_presence()
         return True
 
     async def _stop_session(self, guild: discord.Guild) -> None:
@@ -1307,6 +1358,7 @@ class Music(Cog):
             except Exception:
                 log.exception("Failed to disconnect player in guild %s", guild.id)
         await self.invalidate_current_np(guild.id)
+        await self.refresh_music_presence()
 
     async def _abandon_voice(self, guild: discord.Guild) -> None:
         """The channel is empty or Discord dropped the session. Stop this server only."""
@@ -1321,6 +1373,7 @@ class Music(Cog):
             session.next_song.set()
         await self._drop_voice_client(guild)
         await self.invalidate_current_np(guild.id)
+        await self.refresh_music_presence()
 
     async def _refresh_live_card(self, guild: discord.Guild) -> None:
         message = self.current_np_message.get(guild.id)
@@ -1791,6 +1844,7 @@ class Music(Cog):
                 await voice_client.disconnect()
             except Exception:
                 pass
+        await self.refresh_music_presence(idle=True)
 
     @play.before_invoke
     @join.before_invoke

@@ -6,6 +6,7 @@ import pathlib
 import os
 from logging.handlers import RotatingFileHandler
 from discord.ext import commands
+from cogs.music import IDLE_STATUS_NAME
 from cogs.utils.config import load_config
 from cogs.utils.constants import LEGACY_DATA_FILES, PROJECT_ROOT
 from cogs.utils.json_store import migrate_legacy_data_files
@@ -92,8 +93,12 @@ class PooperScooper(commands.AutoShardedBot):
         log.info('Logging in as:')
         log.info('Username: {}'.format(self.user.name))
         log.info('ID: {}'.format(self.user.id))
-        activity = discord.Activity(name='for a missed pile of 💩', type=discord.ActivityType.watching)
-        await self.change_presence(activity=activity)
+        music = self.get_cog('Music')
+        if music is not None:
+            await music.refresh_music_presence()
+        else:
+            activity = discord.Activity(name=IDLE_STATUS_NAME, type=discord.ActivityType.watching)
+            await self.change_presence(activity=activity)
 
     async def close(self) -> None:
         music = self.get_cog('Music')

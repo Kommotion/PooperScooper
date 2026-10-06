@@ -10,6 +10,7 @@ import discord
 from cogs.music import (
     DEFAULT_VOLUME,
     ENDED_ACCENT,
+    IDLE_STATUS_NAME,
     MAX_QUEUE,
     PAUSED_ACCENT,
     PLAYING_ACCENT,
@@ -22,6 +23,7 @@ from cogs.music import (
     format_track_length,
     linked_track_title,
     message_is_latest,
+    music_presence,
     end_event_applies,
     playback_will_continue,
     repeat_target,
@@ -314,6 +316,24 @@ def test_replaced_track_end_does_not_skip_the_song_just_started():
     assert started_track_is_playing(_Player(waiting, paused=True), waiting)
     assert not started_track_is_playing(_Player(mirrored, playing=True), waiting)
     assert not started_track_is_playing(_Player(waiting, playing=False), waiting)
+
+
+def test_music_presence_follows_what_is_playing():
+    watching, idle_name = music_presence([])
+    assert watching is discord.ActivityType.watching
+    assert idle_name == IDLE_STATUS_NAME
+    assert music_presence(["  ", ""])[0] is discord.ActivityType.watching
+
+    listening, title = music_presence(["  Say My Name  "])
+    assert listening is discord.ActivityType.listening
+    assert title == "Say My Name"
+
+    long_title = "a" * 200
+    assert music_presence([long_title])[1] == "a" * 128
+
+    several_type, several_name = music_presence(["One", "Two"])
+    assert several_type is discord.ActivityType.listening
+    assert several_name == "music in 2 servers"
 
 
 def test_queue_cap_leaves_room_for_tracks_already_waiting():
