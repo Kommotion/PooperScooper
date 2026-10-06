@@ -92,7 +92,7 @@ class PooperScooper(commands.AutoShardedBot):
         log.info('Logging in as:')
         log.info('Username: {}'.format(self.user.name))
         log.info('ID: {}'.format(self.user.id))
-        activity = discord.Activity(name='humans scoop 💩', type=discord.ActivityType.watching)
+        activity = discord.Activity(name='for a missed pile of 💩', type=discord.ActivityType.watching)
         await self.change_presence(activity=activity)
 
     async def close(self) -> None:
