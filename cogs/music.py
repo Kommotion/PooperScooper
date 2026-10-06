@@ -210,32 +210,15 @@ def track_end_should_advance(reason: str | None) -> bool:
     return reason != "replaced"
 
 
-def end_event_applies(*, reason: str | None, waiting_track, ended_track) -> bool:
-    """Wake the queue only for the track it is waiting on.
+def end_event_applies(reason: str | None) -> bool:
+    """A finished, stopped, or failed track advances the queue. A replace does not.
 
-    A replace, or an end event for the track that was just replaced, must not
-    skip the song that play() just started.
+    The ended track is not compared with the queued one. Lavalink reports the
+    mirrored audio track here, which is a different encoding than the Spotify
+    track that was queued. Comparing them drops a real skip or finish, and the
+    queue then sits silent until the skipped song's original time runs out.
     """
-    if not track_end_should_advance(reason):
-        return False
-    if waiting_track is None or ended_track is None:
-        return True
-    if tracks_match(waiting_track, ended_track):
-        return True
-    if track_identity(waiting_track) and track_identity(ended_track):
-        return False
-    return True
-
-
-def fault_event_applies(*, waiting_track, failed_track) -> bool:
-    """A stuck or exception event for the previous track must not skip the new one."""
-    if waiting_track is None or failed_track is None:
-        return True
-    if tracks_match(waiting_track, failed_track):
-        return True
-    if track_identity(waiting_track) and track_identity(failed_track):
-        return False
-    return True
+    return track_end_should_advance(reason)
 
 
 def started_track_is_playing(player, track) -> bool:
@@ -356,7 +339,6 @@ class GuildSession:
         self.queue_ready = asyncio.Event()
         self.halt = False
         self.current_entry: MusicEntry | None = None
-        self.waiting_track = None
         self.task: asyncio.Task | None = None
         self.running = False
         self.volume = DEFAULT_VOLUME
@@ -1059,35 +1041,15 @@ class Music(Cog):
             return None
         return guild.id
 
-    def _waiting_track(self, player) -> object | None:
-        guild_id = self._guild_id_from_player(player)
-        if guild_id is None:
-            return None
-        session = self._sessions.get(guild_id)
-        if session is None:
-            return None
-        return session.waiting_track
-
     @commands.Cog.listener()
     async def on_wavelink_track_end(self, payload: wavelink.TrackEndEventPayload):
-        ended = getattr(payload, "track", None)
-        if not end_event_applies(
-            reason=payload.reason,
-            waiting_track=self._waiting_track(payload.player),
-            ended_track=ended,
-        ):
+        if not end_event_applies(payload.reason):
             return
         self._signal_guild(self._guild_id_from_player(payload.player))
 
     @commands.Cog.listener()
     async def on_wavelink_track_exception(self, payload: wavelink.TrackExceptionEventPayload):
         log.error("Track exception: %s", payload.exception)
-        failed = getattr(payload, "track", None)
-        if not fault_event_applies(
-            waiting_track=self._waiting_track(payload.player),
-            failed_track=failed,
-        ):
-            return
         self._signal_guild(self._guild_id_from_player(payload.player))
 
     @commands.Cog.listener()
@@ -1097,11 +1059,6 @@ class Music(Cog):
             payload.threshold,
             getattr(payload.track, "title", payload.track),
         )
-        if not fault_event_applies(
-            waiting_track=self._waiting_track(payload.player),
-            failed_track=getattr(payload, "track", None),
-        ):
-            return
         self._signal_guild(self._guild_id_from_player(payload.player))
 
     @commands.Cog.listener()
@@ -1213,10 +1170,9 @@ class Music(Cog):
                         await self.invalidate_current_np(session.guild_id, entry)
                         continue
                     await self.present_now_playing(entry, session=session)
-                    # Only this track may wake the wait. Stop sets next_song and
+                    # Drop a stale end, then read halt. Stop sets next_song and
                     # halt together, so a stop during the card edit is still
                     # visible on the lock below.
-                    session.waiting_track = entry.track
                     session.next_song.clear()
                     async with session.lock:
                         if session.halt:
@@ -1460,15 +1416,24 @@ class Music(Cog):
             return False
         return interaction.user.voice.channel == voice_client.channel
 
+    async def _skip_playing(self, guild: discord.Guild) -> None:
+        """Stop the current audio and wake the queue.
+
+        The queue also listens for the stopped event. Setting the signal here
+        means a skip does not sit silent until that song's original time runs out.
+        """
+        player = self._get_player(guild)
+        if player and (player.playing or player.paused):
+            await player.skip(force=True)
+        self._signal_guild(guild.id)
+
     async def _button_skip(self, interaction):
         session = self._session(interaction.guild.id)
         if session.repeat_enabled:
             await interaction.response.send_message("Can't skip while Repeat is enabled!", ephemeral=True)
             return
         await interaction.response.defer()
-        player = self._get_player(interaction.guild)
-        if player and (player.playing or player.paused):
-            await player.skip(force=True)
+        await self._skip_playing(interaction.guild)
 
     async def _button_stop(self, interaction):
         await interaction.response.defer()
@@ -1708,9 +1673,7 @@ class Music(Cog):
             await ctx.send("Can't skip while Repeat is enabled!")
             return
 
-        player = self._get_player(ctx.guild)
-        if player and (player.playing or player.paused):
-            await player.skip(force=True)
+        await self._skip_playing(ctx.guild)
 
     @commands.command()
     async def stop(self, ctx):

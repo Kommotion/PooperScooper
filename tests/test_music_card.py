@@ -23,7 +23,6 @@ from cogs.music import (
     linked_track_title,
     message_is_latest,
     end_event_applies,
-    fault_event_applies,
     playback_will_continue,
     repeat_target,
     should_reuse_now_playing,
@@ -295,29 +294,25 @@ class _Player:
 
 
 def test_replaced_track_end_does_not_skip_the_song_just_started():
-    waiting = _IdTrack("new")
-    previous = _IdTrack("old")
+    waiting = _IdTrack("spotify")
+    mirrored = _IdTrack("youtube-mirror")
     assert track_end_should_advance("finished")
     assert track_end_should_advance("loadFailed")
     assert track_end_should_advance("stopped")
     assert track_end_should_advance("cleanup")
     assert not track_end_should_advance("replaced")
 
-    assert not end_event_applies(reason="replaced", waiting_track=waiting, ended_track=previous)
-    assert not end_event_applies(reason="replaced", waiting_track=waiting, ended_track=waiting)
-    assert not end_event_applies(reason="loadFailed", waiting_track=waiting, ended_track=previous)
-    assert end_event_applies(reason="finished", waiting_track=waiting, ended_track=_IdTrack("new"))
-    assert end_event_applies(reason="loadFailed", waiting_track=waiting, ended_track=waiting)
-    assert end_event_applies(reason="finished", waiting_track=None, ended_track=previous)
-    assert not fault_event_applies(waiting_track=waiting, failed_track=previous)
-    assert fault_event_applies(waiting_track=waiting, failed_track=_IdTrack("new"))
+    assert end_event_applies("stopped")
+    assert end_event_applies("finished")
+    assert end_event_applies("loadFailed")
+    assert not end_event_applies("replaced")
 
     assert not stale_end_during_startup(event_is_set=False, started_track_is_playing=True)
     assert not stale_end_during_startup(event_is_set=True, started_track_is_playing=False)
     assert stale_end_during_startup(event_is_set=True, started_track_is_playing=True)
     assert started_track_is_playing(_Player(waiting, playing=True), waiting)
     assert started_track_is_playing(_Player(waiting, paused=True), waiting)
-    assert not started_track_is_playing(_Player(previous, playing=True), waiting)
+    assert not started_track_is_playing(_Player(mirrored, playing=True), waiting)
     assert not started_track_is_playing(_Player(waiting, playing=False), waiting)
 
 
