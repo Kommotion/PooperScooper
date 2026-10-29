@@ -39,6 +39,75 @@ PROMPT_PREVIEW_MAX_CHARS = 160
 DISCORD_EMBED_FIELD_MAX = 1024
 
 
+# Fixed instruction for /halloweenify. Callers cannot change it.
+HALLOWEENIFY_PROMPT = (
+    "Transform this into a spooky Halloween version: give the subject a fun Halloween costume "
+    "and face paint, glowing jack-o'-lanterns, bats, a full moon, and purple-orange night lighting. "
+    "Keep the same subject, identity, pose, and composition, recognizable and fun, not gory."
+)
+HALLOWEENIFY_SIZE = 1024
+# Shipped off so /halloweenify is not on the app command tree and no sync can publish it.
+HALLOWEENIFY_ENABLED = False
+
+
+def app_commands_for_tree(commands):
+    """Drop /halloweenify before discord.py attaches cog commands to the tree.
+
+    ``cog_load`` runs before those commands are added, so a disabled command
+    never becomes global or guild-scoped.
+    """
+    if HALLOWEENIFY_ENABLED:
+        return list(commands)
+    return [command for command in commands if getattr(command, "name", None) != "halloweenify"]
+
+
+def static_png_avatar(asset):
+    """1024px PNG of a display avatar. Animated avatars use the static frame.
+
+    ``replace(static_format=...)`` leaves an animated asset on its gif URL.
+    ``format='png'`` asks Discord for the first frame.
+    """
+    if asset.is_animated():
+        return asset.replace(size=HALLOWEENIFY_SIZE, format="png")
+    return asset.replace(size=HALLOWEENIFY_SIZE, static_format="png")
+
+
+def build_halloweenify_image(source_bytes: bytes, interaction) -> ImageCreation:
+    """Identity-edit job for the caller's own avatar. No user-supplied prompt."""
+    if not source_bytes:
+        raise ValueError("halloweenify requires the caller's avatar bytes")
+    return ImageCreation(
+        HALLOWEENIFY_PROMPT,
+        Models.KREA2_IDENTITY_EDIT,
+        interaction=interaction,
+        negative_prompt="",
+        use_default_negative=False,
+        use_default_positive=False,
+        nsfw=NsfwLevel.NOT_SPECIFIED,
+        llm_prompt_enhance=False,
+        source_image_bytes=source_bytes,
+        source_image_filename="halloweenify_avatar.png",
+        edit_width=HALLOWEENIFY_SIZE,
+        edit_height=HALLOWEENIFY_SIZE,
+        retain_source=True,
+    )
+
+
+def release_source_bytes(image: ImageCreation) -> None:
+    """Drop Identity Edit uploads after the result exists. Halloweenify keeps them."""
+    if image.model == Models.KREA2_IDENTITY_EDIT and not image.retain_source:
+        image.source_image_bytes = None
+
+
+def generation_caption(image: ImageCreation, preview: str) -> str:
+    mention = image.interaction.user.mention
+    if image.model == Models.KREA2_IDENTITY_EDIT and image.retain_source:
+        return f"**Halloweenify** — {mention}"
+    if image.model == Models.KREA2_IDENTITY_EDIT:
+        return f"**Edit:** {preview} — `{image.model}` — {mention}"
+    return f"**{preview} — `{image.model}` — {mention}**"
+
+
 def _preview_prompt(text: str, max_chars: int = PROMPT_PREVIEW_MAX_CHARS) -> str:
     """Short one-line-ish preview for the public channel message."""
     text = (text or "").replace("\n", " ").strip()
@@ -339,6 +408,7 @@ class PromptDetailButton(ui.View):
         self.source_image_filename = image.source_image_filename
         self.edit_width = image.edit_width
         self.edit_height = image.edit_height
+        self.retain_source = bool(getattr(image, "retain_source", False))
         self.author_id = author_id
         self.gen_time = gen_time
         self.guild_id = guild_id
@@ -427,9 +497,14 @@ class PromptDetailButton(ui.View):
         self._cooldown[interaction.user.id] = now
 
         if self.model == Models.KREA2_IDENTITY_EDIT and not self.source_image_bytes:
+            again = (
+                "`/halloweenify`"
+                if self.retain_source
+                else "`/imagegen edit` again with the attachment"
+            )
             await interaction.response.send_message(
                 "Cannot regenerate this edit — source image is no longer available. "
-                "Run `/imagegen edit` again with the attachment.",
+                f"Run {again}.",
                 ephemeral=True,
             )
             return
@@ -448,6 +523,7 @@ class PromptDetailButton(ui.View):
             source_image_filename=self.source_image_filename,
             edit_width=self.edit_width,
             edit_height=self.edit_height,
+            retain_source=self.retain_source,
         )
 
         cog = interaction.client.get_cog("ImageDiffusion")
@@ -755,6 +831,49 @@ class ImageDiffusion(Cog):
                 instruction[:100],
             )
 
+    @app_commands.command(
+        name="halloweenify",
+        description="Turn your own avatar into a Halloween version.",
+    )
+    @app_commands.guild_only()
+    async def halloweenify(self, interaction: discord.Interaction) -> None:
+        """Restyle the caller's display avatar. There is no target and no prompt option."""
+        guild_id = getattr(interaction, "guild_id", None)
+        channel_id = getattr(interaction, "channel_id", None)
+        if guild_id is None or channel_id is None or not self._is_allowed_channel(guild_id, channel_id):
+            await interaction.response.send_message(
+                "This command is not allowed in this channel!",
+                ephemeral=True,
+            )
+            return
+
+        user = interaction.user
+        try:
+            asset = static_png_avatar(user.display_avatar)
+            source_bytes = await asset.read()
+        except Exception:
+            log.exception(
+                "Failed to fetch avatar for halloweenify user=%s",
+                getattr(user, "id", None),
+            )
+            source_bytes = b""
+
+        if not source_bytes:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    "I couldn't fetch your avatar, so nothing was queued.",
+                    ephemeral=True,
+                )
+            return
+
+        image_entry = build_halloweenify_image(source_bytes, interaction)
+        if await self.enqueue_image(
+            image_entry,
+            interaction,
+            queued_message="Queued a Halloween version of your avatar (1024×1024).",
+        ):
+            log.info("Queued halloweenify for user=%s", getattr(user, "id", None))
+
     async def enqueue_image(
         self,
         image_entry: ImageCreation,
@@ -924,10 +1043,9 @@ class ImageDiffusion(Cog):
         file = discord.File(buffer, filename="generated.png")
         author_id = image.interaction.user.id
 
-        # Privacy: drop user source bytes after we have the result in RAM for Discord.
-        # Regenerate for Identity Edit will require a new upload.
-        if image.model == Models.KREA2_IDENTITY_EDIT:
-            image.source_image_bytes = None
+        # Privacy: drop uploaded Identity Edit bytes once the result is in memory.
+        # Halloweenify sets retain_source so Regenerate can reuse the caller's avatar.
+        release_source_bytes(image)
 
         prompt_details = PromptDetailButton(
             user_prompt=image.prompt,
@@ -942,11 +1060,10 @@ class ImageDiffusion(Cog):
 
         raw_prompt = (image.prompt or "").strip()
         preview = _preview_prompt(raw_prompt)
-        if image.model == Models.KREA2_IDENTITY_EDIT:
-            content = f"**Edit:** {preview} — `{image.model}` — {image.interaction.user.mention}"
-        else:
-            content = f"**{preview} — `{image.model}` — {image.interaction.user.mention}**"
-        if len(raw_prompt) > PROMPT_PREVIEW_MAX_CHARS:
+        content = generation_caption(image, preview)
+        if len(raw_prompt) > PROMPT_PREVIEW_MAX_CHARS and not (
+            image.model == Models.KREA2_IDENTITY_EDIT and image.retain_source
+        ):
             content += "\n-# Full prompt in **See prompt details**"
 
         try:
@@ -971,6 +1088,9 @@ class ImageDiffusion(Cog):
 
         log.debug("Image sent to Discord")
 
+
+    async def cog_load(self) -> None:
+        self.__cog_app_commands__ = app_commands_for_tree(self.__cog_app_commands__)
 
     def cog_unload(self):
         self.image_generation.cancel()

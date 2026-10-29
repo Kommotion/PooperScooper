@@ -135,6 +135,7 @@ class ImageCreation:
         source_image_filename: str = "discord_edit.png",
         edit_width: int = 1024,
         edit_height: int = 1024,
+        retain_source: bool = False,
     ):
         self.interaction: discord.Interaction = interaction
         self.negative_prompt = negative_prompt
@@ -151,6 +152,9 @@ class ImageCreation:
         # Output resolution for Identity Edit EmptySD3LatentImage (multiples of 64, ~1MP).
         self.edit_width: int = int(edit_width) if edit_width else 1024
         self.edit_height: int = int(edit_height) if edit_height else 1024
+        # Identity Edit drops the upload after the result is built. Halloweenify keeps
+        # the caller's avatar bytes so the result view can regenerate.
+        self.retain_source: bool = bool(retain_source)
 
 
 class ComfyOutput:
