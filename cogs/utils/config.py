@@ -66,10 +66,16 @@ class BotConfig(BaseModel):
     spotify_secret: SecretStr = SecretStr("")
     lavalink: LavalinkConfig = Field(default_factory=LavalinkConfig)
     comfyui: ComfyUIConfig = Field(default_factory=ComfyUIConfig)
+    grok_webhook_url: str = ""
+    grok_webhook_key: SecretStr = SecretStr("")
+    grok_webhook_key_header: str = ""
 
     def to_credentials_dict(self) -> dict[str, Any]:
         """Legacy dict shape used by Lavalink helpers and Wavelink bootstrap."""
-        data = self.model_dump(mode="json")
+        data = self.model_dump(
+            mode="json",
+            exclude={"grok_webhook_url", "grok_webhook_key", "grok_webhook_key_header"},
+        )
         data["token"] = self.token.get_secret_value()
         data["spotify_secret"] = self.spotify_secret.get_secret_value()
         return data

@@ -23,5 +23,8 @@
         "port": 8188,
         "root": "ComfyUI_New",
         "auto_start": true
-    }
+    },
+    "grok_webhook_url": "https://example.com/grok-webhook",
+    "grok_webhook_key": "YOUR_GROK_WEBHOOK_KEY",
+    "grok_webhook_key_header": "Authorization"
 }

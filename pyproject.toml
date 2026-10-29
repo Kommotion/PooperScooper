@@ -13,8 +13,11 @@ dependencies = [
     "wavelink>=3.5",
     "yt-dlp",
     "requests",
+    "aiohttp",
     "Pillow",
     "pydantic>=2.0",
+    "dateparser>=1.2",
+    "tzdata",
 ]
 
 [project.optional-dependencies]
@@ -41,3 +44,6 @@ all = [
 
 [tool.setuptools]
 packages = ["cogs"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
