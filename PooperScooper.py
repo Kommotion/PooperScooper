@@ -20,13 +20,17 @@ initial_extensions = [
     'cogs.general',
     'cogs.gametime',
     'cogs.menacesroles',
+    'cogs.eastereggs',
     'cogs.imagediffusion',
     'cogs.birthdaytracker',
+    'cogs.reminders',
     'cogs.palworld',
     'cogs.bingo',
     'cogs.gamepicker',
     'cogs.random',
     'cogs.music',
+    'cogs.grok',
+    'cogs.candyhunt',
 ]
 
 LOG_FILE = "pooperscooper.log"
@@ -109,7 +113,11 @@ class PooperScooper(commands.AutoShardedBot):
     async def setup_hook(self) -> None:
         """Sets up the bot one time."""
         self.bot_app_info = await self.application_info()
-        self.owner_id = self.bot_app_info.owner.id
+        if self.bot_app_info.team:
+            self.owner_ids = {m.id for m in self.bot_app_info.team.members}
+            self.owner_id = None
+        else:
+            self.owner_id = self.bot_app_info.owner.id
         self.commands_executed = 0
 
         for extension in initial_extensions:

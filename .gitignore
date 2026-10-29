@@ -137,3 +137,7 @@ ENV/
 # mypy
 .mypy_cache/
 /ComfyUI/
+
+# Rotated logs and local ComfyUI backups
+*.log.*
+_comfy_backup*/

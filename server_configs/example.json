@@ -23,5 +23,34 @@
   "palworld": {
     "enabled": false,
     "status_channel_id": null
+  },
+  "easter_eggs": {
+    "hooty_hoo": {
+      "enabled": false,
+      "emoji": "",
+      "skip_channel_ids": []
+    },
+    "do_not_redeem": {
+      "enabled": false,
+      "channel_id": null,
+      "reply": "DO NOT REDEEM"
+    },
+    "announcement_party": {
+      "enabled": false,
+      "channel_ids": [],
+      "timezone": "America/Chicago",
+      "reaction_count": 5,
+      "emojis": []
+    }
+  },
+  "candy_hunt": {
+    "streak_factor": 0.6,
+    "streak_floor_low_minutes": 12,
+    "streak_floor_high_minutes": 15,
+    "late_floor_minutes": 1,
+    "late_ramp_start": "18:00",
+    "late_ramp_full": "21:00",
+    "late_ramp_factor": 0.5,
+    "window_end": "30:00"
   }
 }

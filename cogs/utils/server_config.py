@@ -84,6 +84,82 @@ class ServerConfig:
         channel_id = self._data.get("palworld", {}).get("status_channel_id")
         return int(channel_id) if channel_id is not None else None
 
+    @property
+    def _easter_eggs(self) -> dict[str, Any]:
+        raw = self._data.get("easter_eggs", {})
+        return raw if isinstance(raw, dict) else {}
+
+    def _egg(self, name: str) -> dict[str, Any]:
+        raw = self._easter_eggs.get(name) or {}
+        return raw if isinstance(raw, dict) else {}
+
+    @property
+    def hooty_hoo_enabled(self) -> bool:
+        return bool(self._egg("hooty_hoo").get("enabled", False))
+
+    @property
+    def hooty_hoo_emoji(self) -> str:
+        return str(self._egg("hooty_hoo").get("emoji", ""))
+
+    @property
+    def hooty_hoo_skip_channel_ids(self) -> set[int]:
+        raw = self._egg("hooty_hoo").get("skip_channel_ids", [])
+        return {int(channel_id) for channel_id in raw}
+
+    @property
+    def hooty_hoo_channel_ids(self) -> set[int]:
+        raw = self._egg("hooty_hoo").get("channel_ids", [])
+        return {int(channel_id) for channel_id in raw}
+
+    @property
+    def easter_eggs_allow_webhooks(self) -> bool:
+        return bool(self._easter_eggs.get("allow_webhooks", False))
+
+    @property
+    def do_not_redeem_enabled(self) -> bool:
+        return bool(self._egg("do_not_redeem").get("enabled", False))
+
+    @property
+    def do_not_redeem_channel_id(self) -> Optional[int]:
+        channel_id = self._egg("do_not_redeem").get("channel_id")
+        return int(channel_id) if channel_id is not None else None
+
+    @property
+    def do_not_redeem_reply(self) -> str:
+        return str(self._egg("do_not_redeem").get("reply", "DO NOT REDEEM"))
+
+    @property
+    def announcement_party_enabled(self) -> bool:
+        return bool(self._egg("announcement_party").get("enabled", False))
+
+    @property
+    def announcement_party_channel_ids(self) -> set[int]:
+        raw = self._egg("announcement_party").get("channel_ids", [])
+        return {int(channel_id) for channel_id in raw}
+
+    @property
+    def announcement_party_timezone(self) -> str:
+        return str(self._egg("announcement_party").get("timezone", "America/Chicago"))
+
+    @property
+    def announcement_party_reaction_count(self) -> int:
+        raw = self._egg("announcement_party").get("reaction_count", 5)
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return 5
+
+    @property
+    def announcement_party_emojis(self) -> list[str]:
+        raw = self._egg("announcement_party").get("emojis", [])
+        return [str(emoji) for emoji in raw if emoji]
+
+    @property
+    def candy_hunt(self) -> dict[str, Any]:
+        """Optional candy-hunt overrides. Missing section means use cog defaults."""
+        raw = self._data.get("candy_hunt", {})
+        return raw if isinstance(raw, dict) else {}
+
     def is_image_diffusion_channel(self, channel_id: int) -> bool:
         return channel_id in self.image_diffusion_channel_ids
 

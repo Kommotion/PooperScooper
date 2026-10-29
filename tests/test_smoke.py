@@ -56,6 +56,15 @@ def test_lavalink_config_defaults():
     assert config.enabled is True
 
 
+def test_windows_ytdlp_wrapper_keeps_share_link_equals_signs(tmp_path):
+    from cogs.utils.lavalink_server import _write_ytdlp_wrapper
+
+    path = _write_ytdlp_wrapper(tmp_path, r"C:\yt-dlp.EXE")
+    text = path.read_text(encoding="ascii")
+    assert '"C:\\yt-dlp.EXE" %*' in text
+    assert "%~1" not in text
+
+
 def test_bot_config_validation():
     config = BotConfig.model_validate({
         "token": "test-token",
