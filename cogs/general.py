@@ -344,6 +344,11 @@ class General(Cog):
         """Prints out how long the bot has been online."""
         await ctx.send('Uptime: **{}**'.format(self._get_bot_uptime()))
 
+    @commands.command(name="gay")
+    async def gay(self, ctx):
+        """Tell Wolfy he's wrong about his waifus."""
+        await ctx.send("Wolfy you're wrong about your waifus")
+
     @commands.command()
     async def about(self, ctx):
         """Displays information about the bot."""

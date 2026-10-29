@@ -116,6 +116,9 @@ def _resolve_ytdlp(settings: LavalinkSettings) -> Optional[str]:
 def _write_ytdlp_wrapper(lavalink_dir: Path, ytdlp_executable: str) -> Path:
     wrapper_path = lavalink_dir / WRAPPER_NAME
     if sys.platform == "win32":
+        # %* keeps ?si= share links intact. %1 would split them on "=".
+        # "&" still belongs to cmd.exe; Lavalink is pointed at yt-dlp.exe so
+        # those URLs never pass through this file.
         content = (
             "@echo off\r\n"
             "set PYTHONWARNINGS=ignore\r\n"
@@ -158,8 +161,10 @@ def write_lavalink_config(settings: LavalinkSettings, credentials: dict) -> Path
             "yt-dlp not found. Install yt-dlp or set lavalink.ytdlp_executable in config.json."
         )
 
-    wrapper_path = _write_ytdlp_wrapper(settings.directory, ytdlp_executable)
-    ytdlp_path = _yaml_path_for_lavalink(wrapper_path)
+    # Call yt-dlp.exe directly. A .bat is launched through cmd.exe, which
+    # treats "&" in a YouTube URL as a second command.
+    _write_ytdlp_wrapper(settings.directory, ytdlp_executable)
+    ytdlp_path = _yaml_path_for_lavalink(Path(ytdlp_executable))
 
     deezer_enabled = "true" if settings.deezer_arl else "false"
     template = template_path.read_text(encoding="utf-8")
@@ -400,12 +405,16 @@ class LavalinkServerManager:
 
         log.info("Starting Lavalink: %s (cwd=%s)", " ".join(command), self.settings.directory)
         creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        env = os.environ.copy()
+        env["PYTHONWARNINGS"] = "ignore"
+        env["PYTHONIOENCODING"] = "utf-8"
         self._process = subprocess.Popen(
             command,
             cwd=str(self.settings.directory),
             stdout=log_handle,
             stderr=subprocess.STDOUT,
             creationflags=creationflags,
+            env=env,
         )
         self._started_by_bot = True
 

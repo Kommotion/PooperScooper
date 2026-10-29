@@ -7,6 +7,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from urllib.parse import parse_qs, urlparse
 
 import discord
 import wavelink
@@ -15,6 +16,7 @@ from discord.ext.commands import Cog
 
 from cogs.utils.lavalink_server import LavalinkServerManager, load_lavalink_settings
 from cogs.utils.utils import load_credentials
+from cogs.utils.voice_status import VoiceStatusManager
 
 log = logging.getLogger(__name__)
 
@@ -93,6 +95,38 @@ def _plain(text: str | None) -> str:
         return ""
     cleaned = " ".join(str(text).split())
     return discord.utils.escape_mentions(discord.utils.escape_markdown(cleaned))
+
+
+def canonical_youtube_url(query: str) -> str:
+    """A YouTube link with the tracking and radio-mix query removed.
+
+    Share links look like youtu.be/id?si=... or watch?v=id&list=RD....
+    The Windows loader is cmd.exe, which splits on "&" and can mangle "=".
+    The video id, or a real playlist id, is enough to load the track.
+    """
+    raw = query.strip()
+    if not raw.lower().startswith(("http://", "https://")):
+        return raw
+    parsed = urlparse(raw)
+    host = parsed.netloc.lower().removeprefix("www.")
+    if host not in {"youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be"}:
+        return raw
+    params = parse_qs(parsed.query, keep_blank_values=False)
+    video_id = ""
+    if host == "youtu.be":
+        video_id = parsed.path.strip("/").split("/", 1)[0]
+    elif parsed.path.strip("/").startswith("shorts/"):
+        video_id = parsed.path.strip("/").split("/", 1)[1].split("/", 1)[0]
+    else:
+        video_id = (params.get("v") or [""])[0]
+    playlist_id = (params.get("list") or [""])[0]
+    if playlist_id.startswith("RD"):
+        playlist_id = ""
+    if playlist_id:
+        return f"https://www.youtube.com/playlist?list={playlist_id}"
+    if video_id:
+        return f"https://www.youtube.com/watch?v={video_id}"
+    return raw
 
 
 def music_presence(titles: list[str]) -> tuple[discord.ActivityType, str]:
@@ -661,6 +695,9 @@ class Music(Cog):
         self.current_np_message = {}
         self.current_np_entry = {}
         self.current_np_view = {}
+        self.voice_status = VoiceStatusManager(bot, is_playing=self._voice_channel_is_playing)
+        self._voice_status_tasks: set[asyncio.Task] = set()
+        self._voice_status_cleanup_task: asyncio.Task | None = None
         self.idle_timeout.start()
         self._lavalink_bootstrap_task: asyncio.Task | None = None
         self._lavalink_shutdown_done = False
@@ -724,6 +761,48 @@ class Music(Cog):
             return
         log.info("Bot status is now %s %s", activity_type.name, name)
 
+    def _schedule_voice_status(self, channel, track) -> None:
+        """Update a voice-channel status without blocking playback.
+
+        The generation is taken here, before this task can yield, so a later
+        track, stop, or disconnect is not overwritten by this one.
+        """
+        epoch = self.voice_status.begin_track(channel)
+        coro = self.voice_status.set_now_playing(channel, track, epoch=epoch)
+        task = asyncio.create_task(self._guard_voice_status(coro), name="voice-status")
+        self._voice_status_tasks.add(task)
+        task.add_done_callback(self._voice_status_tasks.discard)
+
+    async def _guard_voice_status(self, coro) -> None:
+        try:
+            await coro
+        except Exception:
+            log.warning("Voice channel status update failed", exc_info=True)
+
+    async def _clear_voice_status(self, channel) -> None:
+        if channel is None:
+            return
+        try:
+            await self.voice_status.clear(channel)
+        except Exception:
+            log.warning(
+                "Could not clear the voice channel status for channel %s",
+                getattr(channel, "id", "?"),
+                exc_info=True,
+            )
+
+    def _voice_channel_is_playing(self, channel_id: int) -> bool:
+        """True when a track is playing or paused in this voice channel."""
+        for guild in list(getattr(self.bot, "guilds", ())):
+            player = self._get_player(guild)
+            if player is None:
+                continue
+            if not (getattr(player, "playing", False) or getattr(player, "paused", False)):
+                continue
+            if getattr(getattr(player, "channel", None), "id", None) == channel_id:
+                return True
+        return False
+
     def _lavalink_ready(self) -> bool:
         return bool(wavelink.Pool.nodes)
 
@@ -770,6 +849,7 @@ class Music(Cog):
         vc = guild.voice_client
         if vc is None:
             return
+        await self._clear_voice_status(getattr(vc, "channel", None))
         try:
             await vc.disconnect(force=True)
         except TypeError:
@@ -1250,6 +1330,14 @@ class Music(Cog):
                             if requeued:
                                 _discard_queued(session, entry)
                     await self.refresh_music_presence()
+                    async with session.lock:
+                        # halt is set before the status is cleared. This read
+                        # and the schedule below do not await, so stop cannot
+                        # land between them.
+                        publish_status = not session.halt
+                    channel = getattr(player, "channel", None)
+                    if publish_status and channel is not None:
+                        self._schedule_voice_status(channel, entry.track)
                 except Exception as e:
                     async with session.lock:
                         stopped = session.halt
@@ -1329,6 +1417,7 @@ class Music(Cog):
                 await ctx.send(embed=embed)
             except discord.HTTPException:
                 log.warning("Could not send the alone notice in guild %s", session.guild_id)
+        await self._clear_voice_status(voice_client.channel)
         try:
             await voice_client.disconnect()
         except Exception:
@@ -1348,6 +1437,11 @@ class Music(Cog):
             session.queue_ready.set()
         session.next_song.set()
         player = self._get_player(guild)
+        channel = getattr(player, "channel", None) if player is not None else None
+        if channel is None:
+            voice_client = getattr(guild, "voice_client", None)
+            channel = getattr(voice_client, "channel", None)
+        await self._clear_voice_status(channel)
         if player is not None and (in_flight or player.playing or player.paused):
             try:
                 player.queue.clear()
@@ -1592,7 +1686,7 @@ class Music(Cog):
         *,
         expand_collection: bool = False,
     ) -> list[wavelink.Playable]:
-        query = query.strip()
+        query = canonical_youtube_url(query.strip())
         result = None
         is_url = self._is_url(query)
         single_track = not is_url and not expand_collection
@@ -1769,6 +1863,11 @@ class Music(Cog):
         await self._refresh_live_card(ctx.guild)
 
     async def cog_load(self) -> None:
+        self.voice_status.install()
+        self._voice_status_cleanup_task = asyncio.create_task(
+            self.voice_status.clear_stale_after_restart(),
+            name="voice-status-cleanup",
+        )
         settings = getattr(self.bot, "lavalink_settings", None)
         if settings and settings.enabled:
             self._lavalink_bootstrap_task = asyncio.create_task(self._bootstrap_lavalink())
@@ -1824,6 +1923,13 @@ class Music(Cog):
 
     async def cog_unload(self):
         self.idle_timeout.cancel()
+        cleanup = self._voice_status_cleanup_task
+        if cleanup is not None and not cleanup.done():
+            cleanup.cancel()
+            try:
+                await cleanup
+            except asyncio.CancelledError:
+                pass
         pending = []
         for session in list(self._sessions.values()):
             if session.task is not None and not session.task.done():
@@ -1839,11 +1945,19 @@ class Music(Cog):
 
         await self.shutdown_lavalink()
 
+        pending_status = [task for task in list(self._voice_status_tasks) if not task.done()]
+        if pending_status:
+            await asyncio.gather(*pending_status, return_exceptions=True)
+
         for voice_client in list(self.bot.voice_clients):
+            channel = getattr(voice_client, "channel", None)
+            if channel is not None:
+                await self._clear_voice_status(channel)
             try:
                 await voice_client.disconnect()
             except Exception:
                 pass
+        self.voice_status.uninstall()
         await self.refresh_music_presence(idle=True)
 
     @play.before_invoke

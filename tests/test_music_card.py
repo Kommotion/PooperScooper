@@ -24,6 +24,7 @@ from cogs.music import (
     linked_track_title,
     message_is_latest,
     music_presence,
+    canonical_youtube_url,
     end_event_applies,
     playback_will_continue,
     repeat_target,
@@ -316,6 +317,27 @@ def test_replaced_track_end_does_not_skip_the_song_just_started():
     assert started_track_is_playing(_Player(waiting, paused=True), waiting)
     assert not started_track_is_playing(_Player(mirrored, playing=True), waiting)
     assert not started_track_is_playing(_Player(waiting, playing=False), waiting)
+
+
+def test_youtube_share_links_keep_the_video_id():
+    assert canonical_youtube_url("sleep token gods") == "sleep token gods"
+    assert (
+        canonical_youtube_url("https://youtu.be/_pO7BRNdJdc?si=3h8UY99Y6AKhLni3")
+        == "https://www.youtube.com/watch?v=_pO7BRNdJdc"
+    )
+    assert (
+        canonical_youtube_url("https://www.youtube.com/watch?v=5uhktDv6hSY&list=RD5uhktDv6hSY")
+        == "https://www.youtube.com/watch?v=5uhktDv6hSY"
+    )
+    assert (
+        canonical_youtube_url("https://www.youtube.com/watch?v=abc12345678&list=PLabcdefghij")
+        == "https://www.youtube.com/playlist?list=PLabcdefghij"
+    )
+    assert (
+        canonical_youtube_url("https://www.youtube.com/playlist?list=PLabcdefghij&si=abc")
+        == "https://www.youtube.com/playlist?list=PLabcdefghij"
+    )
+    assert canonical_youtube_url("https://open.spotify.com/track/abc") == "https://open.spotify.com/track/abc"
 
 
 def test_music_presence_follows_what_is_playing():

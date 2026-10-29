@@ -46,5 +46,43 @@
   "palworld": {
     "enabled": true,
     "status_channel_id": null
+  },
+  "easter_eggs": {
+    "hooty_hoo": {
+      "enabled": true,
+      "emoji": "<:salute:1213661793700937728>",
+      "skip_channel_ids": [1019352642977267743]
+    },
+    "do_not_redeem": {
+      "enabled": true,
+      "channel_id": 1457177076820869412,
+      "reply": "DO NOT REDEEM"
+    },
+    "announcement_party": {
+      "enabled": true,
+      "channel_ids": [1019352642977267743],
+      "timezone": "America/Chicago",
+      "reaction_count": 5,
+      "emojis": [
+        "<a:Beer:1058793580702998628>",
+        "<a:Beer_girl:1058793582510743663>",
+        "<:beer_cat:1057119414195073115>",
+        "<:beer_cheers_hooty_hoo:1378426713532399786>",
+        "<a:Drunk:1058793573069369455>",
+        "<:wine_drunk:1058793576739393546>",
+        "<:neko_drunk:1058793578400333884>",
+        "<a:Drunk_Slav_Dance:1378426577037033532>",
+        "<:DrinkMorePls:1146970663156973618>",
+        "<:drink:1236488533645070397>",
+        "<a:dance_party:1213663538703368212>",
+        "<a:dance:1378422889832906762>",
+        "<a:DogJam:1058769443934720060>",
+        "<a:catJAM:1058769446069608478>",
+        "<a:happycatparty:1378436942705725583>",
+        "<:Angel_Yay_Cheer:1549270426071601273>",
+        "<a:anya_yay:1208572650104954900>",
+        "<:salute:1213661793700937728>"
+      ]
+    }
   }
 }
