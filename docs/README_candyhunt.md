@@ -2,6 +2,8 @@
 
 Next year: set halloween_enabled to true in config.json and restart.
 
+After turning Halloween off, the owner syncs manually with "!sync_commands ~" in each candy guild and "!sync_commands" for global.
+
 The hunt is Menaces to Sobriety. The defaults in `cogs/candyhunt.py` are the 2026 event. Override them in `server_configs/932057681307512922.json` under `candy_hunt`. A missing key keeps the default. A bad value is logged and ignored. `guild_id` is not overridable.
 
 Stop the bot before you edit the state file. Do not edit `data/candy_hunt.json` while the bot is running.

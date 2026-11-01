@@ -59,47 +59,6 @@ def _config_for_startup():
         return None
 
 
-async def sync_retired_halloween_commands(bot) -> None:
-    """Publish the current tree for each candy guild, then sync globally.
-
-    ``tree.sync(guild=...)`` replaces that guild's Discord commands with the
-    guild commands already on the tree. It does not call ``clear_commands`` or
-    ``copy_global_to``, so copied or other guild commands already on the tree
-    stay. Global ``tree.sync()`` drops /halloweenify when that command was left
-    off the tree. One failed sync is logged and skipped. This never raises.
-    The guild ids come from ``cogs.candyhunt.CANDY_GUILD_IDS`` without loading
-    that cog.
-    """
-    tree = getattr(bot, 'tree', None)
-    sync = getattr(tree, 'sync', None)
-    if not callable(sync):
-        log.error('halloween command sync failed error=no_tree')
-        return
-
-    guild_ids: tuple[int, ...] = ()
-    try:
-        from cogs.candyhunt import CANDY_GUILD_IDS
-        guild_ids = tuple(CANDY_GUILD_IDS)
-    except Exception:
-        log.exception('halloween command sync failed error=no_guild_ids')
-
-    for gid in guild_ids:
-        try:
-            synced = await sync(guild=discord.Object(id=gid))
-            synced = list(synced or [])
-            names = ','.join(str(getattr(command, 'name', '')) for command in synced)
-            log.info('halloween command sync guild=%s count=%s names=%s', gid, len(synced), names)
-        except Exception:
-            log.exception('halloween command sync failed guild=%s', gid)
-
-    try:
-        synced = await sync()
-        synced = list(synced or [])
-        names = ','.join(str(getattr(command, 'name', '')) for command in synced)
-        log.info('halloween command sync scope=global count=%s names=%s', len(synced), names)
-    except Exception:
-        log.exception('halloween command sync failed scope=global')
-
 LOG_FILE = "pooperscooper.log"
 LOG_MAX_BYTES = 5 * 1024 * 1024
 LOG_BACKUP_COUNT = 9
@@ -155,7 +114,6 @@ class PooperScooper(commands.AutoShardedBot):
 
         self.client_id: str = client_id
         self.commands_executed = None
-        self._halloween_sunset_synced = False
 
     async def on_ready(self) -> None:
         """Event that occurs when PooperScooper is ready"""
@@ -194,19 +152,6 @@ class PooperScooper(commands.AutoShardedBot):
                 await self.load_extension(extension)
             except Exception as e:
                 log.exception('Failed to load extension {}\n{}'.format(extension, e))
-
-        if not bool(getattr(cfg, 'halloween_enabled', False)):
-            await self._retire_halloween_commands_once()
-
-    async def _retire_halloween_commands_once(self) -> None:
-        """Drop stale Halloween slash commands once per process. Never raises."""
-        if self._halloween_sunset_synced:
-            return
-        self._halloween_sunset_synced = True
-        try:
-            await sync_retired_halloween_commands(self)
-        except Exception:
-            log.exception('halloween command sync failed')
 
 
 async def run_bot(token: str, *, client_id: str):
