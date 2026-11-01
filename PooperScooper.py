@@ -31,6 +31,8 @@ initial_extensions = [
     'cogs.music',
     'cogs.grok',
     'cogs.candyhunt',
+    'cogs.costume',
+    'cogs.malfoyd',
 ]
 
 LOG_FILE = "pooperscooper.log"

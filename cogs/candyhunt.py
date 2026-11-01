@@ -5,6 +5,60 @@ next day, the first click wins, and November 1 crowns a Pumpkin God. A
 support-server test session can post dry-run drops into the test tally
 without touching the MTS totals.
 Pure helpers at the top are what the tests drive; the cog only talks to Discord.
+
+Running the candy hunt next year
+--------------------------------
+The hunt is Menaces to Sobriety. Defaults below are the 2026 event. Override
+them in ``server_configs/932057681307512922.json`` under ``candy_hunt``. A
+missing key keeps the default. A bad value is logged and ignored.
+
+Change these to retarget the calendar:
+
+- ``event_date`` — ``YYYY-MM-DD`` of the hunt morning (default ``2026-10-31``).
+- ``window_start`` / ``window_end`` — local clocks after midnight of
+  ``event_date``. ``10:00`` and ``30:00`` are 10 AM through 6 AM the next day.
+- ``wrap_up_at`` — ISO datetime of the winner post (default Nov 1 10:00 PT).
+- ``lights_out`` — when the "hunt is over" post goes out. Omit it to use
+  ``window_end``.
+- ``timezone`` — IANA name. Default ``America/Los_Angeles``.
+- ``late_ramp_start`` / ``late_ramp_full`` — gap speedup. ``late_ramp_start``
+  is also when day treats/tricks switch to the night tables, and when the
+  night-shift announcement posts (default 18:00).
+- ``multi_drop_start`` / ``multi_drop_late`` / ``frenzy_start`` — 18:00, 19:00,
+  and 19:30 this year.
+
+Channels and the two scheduled announcements:
+
+- ``announcement_channel_id`` / ``announcement_channel_name``
+- ``main_drop_channel_id`` / ``multi_drop_channel_names``
+- ``night_shift_enabled`` / ``witching_hour_enabled``
+- ``announcement_grace_minutes`` — do not post if this many minutes past the
+  scheduled clock (default 30). Also never posts once ``window_end`` has passed,
+  so a restart late on hunt night does not repeat them.
+
+Optional tuning: ``trick_chance``, ``night_trick_chance``, ``treat_weights``,
+``night_treat_weights``, ``trick_weights``, ``night_trick_weights``,
+``multi_drop_odds``, ``multi_drop_odds_late``, ``frenzy_chance``,
+``frenzy_rounds``, ``frenzy_drop_count``, ``frenzy_gap_seconds``,
+``frenzy_kick_delay``, ``leader_trick_chance``, ``leader_big_loss_multiplier``,
+``leader_big_loss_amounts``, plus the interval, expiry, streak, and Pumpkin God
+keys already read by ``apply_candy_hunt_overrides``.
+
+Reset ``data/candy_hunt.json`` for a new year: stop the bot, copy the file to
+something like ``data/candy_hunt_2026.json``, then delete
+``data/candy_hunt.json``. The next launch creates a fresh book. That clears
+totals and the done flags (``night_shift_done``, ``witching_hour_done``,
+``lights_out_done``, ``wrap_up_done``).
+
+Admin commands (owner only, ``!candyadmin``):
+
+- ``wrapup`` or ``wrapup true`` — preview the winner post. Nothing is sent.
+- ``wrapup false`` — post the real wrap-up once, in Menaces to Sobriety.
+- ``cleanup true`` — count this bot's candy-hunt messages in the drop channels.
+- ``cleanup false`` — delete those messages. Announcements are skipped.
+- ``status`` — show the window, ramp, and next drop.
+
+See ``docs/README_candyhunt.md`` for the same checklist.
 """
 
 from __future__ import annotations
@@ -14,6 +68,7 @@ import copy
 import json
 import logging
 import random
+import re
 import secrets
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
@@ -50,6 +105,10 @@ MEDALS = ("🥇", "🥈", "🥉")
 # Static cards have no buttons. A finite timeout keeps them out of the persistent
 # view store. The drop view stays timeout=None so its claim button survives restart.
 CARD_TIMEOUT = 180.0
+_PUBLIC_MENTION_RE = re.compile(
+    r"<@!?\d+>|<@&\d+>|<#\d+>|@everyone|@here",
+    re.IGNORECASE,
+)
 
 
 def _as_blurbs(value: tuple[str, ...] | str) -> tuple[str, ...]:
@@ -76,6 +135,7 @@ class Treat:
 @dataclass(frozen=True)
 class Trick:
     amount: int
+    weight: int
     blurbs: tuple[str, ...]
 
     def __post_init__(self) -> None:
@@ -173,9 +233,11 @@ TREATS: tuple[Treat, ...] = (
     ),
 )
 
+# Every trick costs candy: mostly small, a few mean, one curse. Weights sum to 100.
 TRICKS: tuple[Trick, ...] = (
     Trick(
         -1,
+        25,
         (
             "A porch ghost swipes one piece and cackles.",
             "Cold fingers lift one piece and vanish.",
@@ -183,22 +245,8 @@ TRICKS: tuple[Trick, ...] = (
         ),
     ),
     Trick(
-        0,
-        (
-            "You bite down. It's an onion. You put it back.",
-            "An onion. You return it with what dignity you have.",
-            "Your teeth meet onion. The score stays put.",
-        ),
-    ),
-    Trick(
-        0,
-        (
-            "A plastic spider. Festive, and completely inedible.",
-            "Plastic legs and zero candy. Your total holds.",
-        ),
-    ),
-    Trick(
         -2,
+        18,
         (
             "Raisins. The ancient betrayal. Two pieces walk off in shame.",
             "Raisins. Two pieces leave in protest.",
@@ -207,6 +255,7 @@ TRICKS: tuple[Trick, ...] = (
     ),
     Trick(
         -1,
+        21,
         (
             "Your bucket has a hole. One piece hits the sidewalk.",
             "A hole in the bucket. One piece escapes.",
@@ -214,13 +263,55 @@ TRICKS: tuple[Trick, ...] = (
         ),
     ),
     Trick(
-        0,
+        -4,
+        14,
         (
-            "The house is dark. You get a 'boo' and an empty hand.",
-            "Nobody's home. A 'boo', and your candy stays put.",
-            "Dark windows. Empty hand. You keep what you had.",
+            "The dentist hands out toothbrushes and confiscates four pieces.",
+            "A toothbrush, and a bill. Four pieces leave with the dentist.",
+            "They trade a brush for candy. Four pieces stay on the porch.",
         ),
     ),
+    Trick(
+        -6,
+        11,
+        (
+            "A black cat crosses your path. You spill six pieces.",
+            "The cat cuts across. Six pieces spill from the bucket.",
+            "Black cat. Bad luck. Six pieces scatter in the leaves.",
+        ),
+    ),
+    Trick(
+        -10,
+        7,
+        (
+            "Older kids ambush you and snatch ten pieces.",
+            "They step from the hedge and take ten pieces.",
+            "An ambush. A handful is gone. Ten pieces.",
+        ),
+    ),
+    Trick(
+        -25,
+        4,
+        (
+            "Witch Curse. Your bucket turns into a pumpkin and rolls away.",
+            "The witch points. Twenty-five pieces roll off as a pumpkin.",
+            "Your bucket becomes a pumpkin and rolls into the dark.",
+        ),
+    ),
+)
+
+# From late_ramp_start (18:00) bigger treats get likelier. Weights sum to 100.
+NIGHT_TREAT_WEIGHTS: dict[str, int] = {
+    "Candy Corn": 14,
+    "Lollipop": 16,
+    "Chocolate Bar": 16,
+    "Gummy Worms": 15,
+    "Caramel Apple": 14,
+    "Full-Size Snickers": 14,
+    "Pumpkin Jackpot": 11,
+}
+NIGHT_TREATS: tuple[Treat, ...] = tuple(
+    replace(t, weight=NIGHT_TREAT_WEIGHTS.get(t.name, t.weight)) for t in TREATS
 )
 
 # A treat line sometimes picks up one of these. Tricks stay as written.
@@ -233,6 +324,57 @@ AMBIENT_EXTRAS: tuple[str, ...] = (
     "A loose shutter taps once.",
 )
 AMBIENT_CHANCE = 0.05
+
+
+@dataclass(frozen=True)
+class CandyType:
+    key: str
+    name: str
+    emoji: str
+
+
+# Lifetime treats collected, by type. Tricks never change these counts.
+CANDY_TYPES: tuple[CandyType, ...] = (
+    CandyType("candy_corn", "Candy Corn", "🌽"),
+    CandyType("chocolate_bar", "Chocolate Bar", "🍫"),
+    CandyType("lollipop", "Lollipop", "🍭"),
+    CandyType("gummy_worms", "Gummy Worms", "🪱"),
+    CandyType("caramel_apple", "Caramel Apple", "🍎"),
+    CandyType("peanut_butter_cup", "Peanut Butter Cup", "🥜"),
+)
+CANDY_TYPE_BY_KEY: dict[str, CandyType] = {item.key: item for item in CANDY_TYPES}
+
+# This year's rooms and clocks. CandyHuntSettings holds the same objects so a
+# default settings value stays identical to the module alias the tests use.
+MAIN_DROP_CHANNEL_ID = 932057681307512924  # MTS #general
+# MTS #announcements. Cleanup never deletes in this channel.
+ANNOUNCEMENTS_CHANNEL_ID = 1019352642977267743
+MULTI_DROP_CHANNEL_NAMES = ("gaming", "sharing-is-caring", "food-porn", "music")
+MULTI_DROP_START_MINUTE = 18 * 60
+MULTI_DROP_LATE_MINUTE = 19 * 60
+MULTI_DROP_ODDS = ((1, 0.65), (2, 0.18), (3, 0.09), (4, 0.05), (5, 0.03))
+MULTI_DROP_ODDS_LATE = ((1, 0.25), (2, 0.30), (3, 0.22), (4, 0.13), (5, 0.10))
+FRENZY_START_MINUTE = 19 * 60 + 30
+FRENZY_CHANCE = 0.10
+FRENZY_ROUNDS = 5
+FRENZY_DROP_COUNT = 5  # every frenzy round is a QUINTUPLE drop
+FRENZY_GAP_SECONDS = (2.0, 2.0)  # no real wait: next round right away
+FRENZY_KICK_DELAY = 3.0
+# A restart more than this far past a scheduled announcement does not post it.
+ANNOUNCEMENT_GRACE_MINUTES = 30
+# Leader tax: whoever is #1 (sole or tied, total > 0) gets tricked more often,
+# and the big losses (-10 and -25) are twice as likely.
+LEADER_TRICK_CHANCE = 0.40
+LEADER_BIG_LOSS_MULTIPLIER = 2
+LEADER_BIG_LOSS_AMOUNTS = (-10, -25)
+LEADER_TRICKS: tuple[Trick, ...] = tuple(
+    replace(trick, weight=trick.weight * LEADER_BIG_LOSS_MULTIPLIER)
+    if trick.amount in LEADER_BIG_LOSS_AMOUNTS
+    else trick
+    for trick in TRICKS
+)
+# Saved frenzy rounds above this are junk. The live cap is frenzy_rounds.
+_FRENZY_ROUNDS_CAP = 100
 
 
 @dataclass(frozen=True)
@@ -253,10 +395,12 @@ class CandyHuntSettings:
     pumpkin_god_duration: timedelta = timedelta(days=7)
     wrap_up_late_limit: timedelta = timedelta(days=3)
     announcement_channel_name: str = "announcements"
-    announcement_channel_id: int | None = None
+    announcement_channel_id: int | None = ANNOUNCEMENTS_CHANNEL_ID
     skip_channel_ids: frozenset[int] = field(default_factory=frozenset)
     activity_window: timedelta = timedelta(hours=2)
-    trick_chance: float = 0.12
+    trick_chance: float = 0.20
+    # From late_ramp_start (18:00) through the window end the Witch tricks more.
+    night_trick_chance: float = 0.25
     pumpkin_god_role_name: str = "Pumpkin God"
     # Each claimed drop multiplies the gap by this. 1.0 disables the shrink.
     streak_factor: float = 0.6
@@ -270,6 +414,33 @@ class CandyHuntSettings:
     # 21:00 local. x0.5 from here through the window end (06:00 the next day).
     late_ramp_full_minute: int = 21 * 60
     late_ramp_factor: float = 0.5
+    # Multi-drop opens at 18:00, the hotter odds at 19:00, frenzy at 19:30.
+    # Night treat/trick tables still follow late_ramp_start.
+    multi_drop_start_minute: int = MULTI_DROP_START_MINUTE
+    multi_drop_late_minute: int = MULTI_DROP_LATE_MINUTE
+    frenzy_start_minute: int = FRENZY_START_MINUTE
+    treats: tuple[Treat, ...] = TREATS
+    night_treats: tuple[Treat, ...] = NIGHT_TREATS
+    tricks: tuple[Trick, ...] = TRICKS
+    night_tricks: tuple[Trick, ...] = TRICKS
+    multi_drop_odds: tuple[tuple[int, float], ...] = MULTI_DROP_ODDS
+    multi_drop_odds_late: tuple[tuple[int, float], ...] = MULTI_DROP_ODDS_LATE
+    main_drop_channel_id: int = MAIN_DROP_CHANNEL_ID
+    multi_drop_channel_names: tuple[str, ...] = MULTI_DROP_CHANNEL_NAMES
+    frenzy_chance: float = FRENZY_CHANCE
+    frenzy_rounds: int = FRENZY_ROUNDS
+    frenzy_drop_count: int = FRENZY_DROP_COUNT
+    frenzy_gap_seconds: tuple[float, float] = FRENZY_GAP_SECONDS
+    frenzy_kick_delay: float = FRENZY_KICK_DELAY
+    leader_trick_chance: float = LEADER_TRICK_CHANCE
+    leader_big_loss_multiplier: int = LEADER_BIG_LOSS_MULTIPLIER
+    leader_big_loss_amounts: tuple[int, ...] = LEADER_BIG_LOSS_AMOUNTS
+    leader_tricks: tuple[Trick, ...] = LEADER_TRICKS
+    # None means the lights-out post goes out at window_end.
+    lights_out_minute: int | None = None
+    night_shift_enabled: bool = True
+    witching_hour_enabled: bool = True
+    announcement_grace_minutes: int = ANNOUNCEMENT_GRACE_MINUTES
 
     @property
     def zone(self) -> ZoneInfo:
@@ -303,7 +474,12 @@ CANDYADMIN_USAGE = (
     "!candyadmin power on|off\n"
     "!candyadmin test_session [minutes=15] [interval=2] [#channel]\n"
     "!candyadmin test_session_stop\n"
-    "!candyadmin wrapup [true|false]  (false posts the real Nov 1 announcement, MTS only)"
+    "!candyadmin wrapup [true|false]  (false posts the real Nov 1 announcement, MTS only)\n"
+    "!candyadmin cleanup [true|false]  (true counts the bot's candy hunt messages, false deletes them, MTS only)"
+)
+CANDYADMIN_CLEANUP_USAGE = (
+    "Usage: !candyadmin cleanup [true|false]  "
+    "(true counts the bot's candy hunt messages, false deletes them, MTS only)"
 )
 CANDYADMIN_POWER_USAGE = "Usage: !candyadmin power on|off"
 CANDYADMIN_TEST_USAGE = (
@@ -345,6 +521,8 @@ class ClaimOutcome:
     players: int = 0
     dry_run: bool = False
     user_id: int = 0
+    # Candy actually removed by a negative trick after the total floors at 0.
+    removed: int = 0
 
 
 @dataclass(frozen=True)
@@ -889,7 +1067,7 @@ def roll_candy(
     tricks: tuple[Trick, ...] = TRICKS,
 ) -> CandyRoll:
     if tricks and rng.random() < trick_chance:
-        trick = rng.choice(tricks)
+        trick = weighted_choice(list(tricks), [item.weight for item in tricks], rng)
         return CandyRoll("trick", "Trick", trick.amount, pick_blurb(rng, trick.blurbs))
     treat = weighted_choice(list(treats), [item.weight for item in treats], rng)
     line = with_ambient(rng, pick_blurb(rng, treat.blurbs))
@@ -974,6 +1152,246 @@ def wrap_up_decision(
     return "announce"
 
 
+# Posted once in #announcements when the drop window ends (6 AM PT), before the
+# 10 AM wrap-up. Each line says the hunt is over, the Witch has flown home,
+# drops are off, thanks for playing, and the winner is crowned at 10 AM.
+LIGHTS_OUT_BANNERS: tuple[str, ...] = (
+    "🌙 **Lights out!** The candy hunt is over. The Witch has flown home, the drops are off, and the porch light is dark. Thanks for playing, Menaces. The winner gets crowned at the 10 AM wrap-up. 🎃",
+    "🧹 **The broom has left the chat.** The candy hunt is over, the Witch has flown home, and the drops are off. Thanks for playing. The winner gets crowned at the 10 AM wrap-up, so go practice your humble face.",
+    "🎃 **That was the last clatter.** The candy hunt is over. The Witch has flown home with corn stuck to her hat, and the drops are off. Thanks for playing. The winner gets crowned at the 10 AM wrap-up.",
+    "🛏️ **Lights out, bucket bandits.** The candy hunt is over, the Witch has flown home, and the drops are off until next year. Thanks for playing. The winner gets crowned at the 10 AM wrap-up.",
+    "🚪 **Porch light: clicked off.** The candy hunt is over. The Witch has flown home, the drops are off, and the bowl is just a bowl again. Thanks for playing, you delightful menaces. The winner gets crowned at the 10 AM wrap-up.",
+)
+
+
+def lights_out_banner(rng: random.Random | None = None) -> str:
+    return (rng or random).choice(LIGHTS_OUT_BANNERS)
+
+
+def _hunt_dry_run_active(state: dict, now: datetime) -> bool:
+    """True while a support test session or a live dry-run drop is in progress."""
+    test = state.get("test") if isinstance(state, dict) else None
+    session = test.get("session") if isinstance(test, dict) else None
+    if isinstance(session, dict) and resolve_test_session(session, now) in {"wait", "drop"}:
+        return True
+    for drop in (state.get("active_drops") or []) if isinstance(state, dict) else []:
+        if isinstance(drop, dict) and drop.get("dry_run") and drop.get("status") == "active":
+            return True
+    return False
+
+
+def lights_out_at(settings: CandyHuntSettings) -> datetime:
+    """When the lights-out post opens. Defaults to the drop window end."""
+    minute = settings.window_end_minute if settings.lights_out_minute is None else int(settings.lights_out_minute)
+    return local_wall_time(settings.event_date, minute, settings.zone)
+
+
+def lights_out_due(settings: CandyHuntSettings, state: dict, now: datetime) -> bool:
+    """True only when the one-shot lights-out post should go out now.
+
+    The window is from lights-out (the drop window end, unless configured) until
+    wrap-up. Already posted, wrap-up already done, a test session, and a live
+    dry-run drop all say no. At or after wrap-up this is False; the caller marks
+    the flag and skips.
+    """
+    if not isinstance(state, dict):
+        return False
+    if state.get("lights_out_done") or state.get("wrap_up_done"):
+        return False
+    if _hunt_dry_run_active(state, now):
+        return False
+    moment = as_utc(now)
+    if moment < as_utc(lights_out_at(settings)):
+        return False
+    if moment >= as_utc(settings.wrap_up_at):
+        return False
+    return True
+
+
+def scheduled_announcement_due(
+    settings: CandyHuntSettings,
+    state: dict,
+    now: datetime,
+    *,
+    done_key: str,
+    enabled: bool,
+    at_minute: int,
+) -> bool:
+    """True inside the grace after `at_minute`, and never once the window has ended.
+
+    A missing done flag counts as not done. More than ``announcement_grace_minutes``
+    past the scheduled clock is also not due, so a restart late on hunt night
+    does not post the note again.
+    """
+    if not enabled or not isinstance(state, dict):
+        return False
+    if state.get(done_key) is True:
+        return False
+    moment = as_utc(now)
+    _start, end = window_bounds(settings)
+    if moment >= as_utc(end):
+        return False
+    scheduled = as_utc(local_wall_time(settings.event_date, int(at_minute), settings.zone))
+    if moment < scheduled:
+        return False
+    grace = timedelta(minutes=int(settings.announcement_grace_minutes))
+    if moment > scheduled + grace:
+        return False
+    return True
+
+
+def night_shift_due(settings: CandyHuntSettings, state: dict, now: datetime) -> bool:
+    """Night-shift post at late_ramp_start (18:00 this year)."""
+    return scheduled_announcement_due(
+        settings,
+        state,
+        now,
+        done_key="night_shift_done",
+        enabled=bool(settings.night_shift_enabled),
+        at_minute=settings.late_ramp_start_minute,
+    )
+
+
+def witching_hour_due(settings: CandyHuntSettings, state: dict, now: datetime) -> bool:
+    """Witching-hour post at frenzy_start (19:30 this year)."""
+    return scheduled_announcement_due(
+        settings,
+        state,
+        now,
+        done_key="witching_hour_done",
+        enabled=bool(settings.witching_hour_enabled),
+        at_minute=settings.frenzy_start_minute,
+    )
+
+
+_COUNT_WORDS = (
+    "zero",
+    "one",
+    "two",
+    "three",
+    "four",
+    "five",
+    "six",
+    "seven",
+    "eight",
+    "nine",
+    "ten",
+)
+
+
+def _count_word(count: int) -> str:
+    if 0 <= int(count) < len(_COUNT_WORDS):
+        return _COUNT_WORDS[int(count)]
+    return str(int(count))
+
+
+def _english_join(parts: list[str]) -> str:
+    if not parts:
+        return ""
+    if len(parts) == 1:
+        return parts[0]
+    if len(parts) == 2:
+        return f"{parts[0]} and {parts[1]}"
+    return ", ".join(parts[:-1]) + " and " + parts[-1]
+
+
+def mentions_for_names(channels: list[tuple[int, str]], names: tuple[str, ...] | list[str]) -> list[str]:
+    """``<#id>`` for each name, first exact match, skipping names the guild lacks."""
+    by_name: dict[str, int] = {}
+    for channel_id, name in channels:
+        try:
+            cid = int(channel_id)
+        except (TypeError, ValueError):
+            continue
+        by_name.setdefault(str(name).casefold(), cid)
+    found: list[str] = []
+    for name in names:
+        cid = by_name.get(str(name).casefold())
+        if cid is not None:
+            found.append(f"<#{cid}>")
+    return found
+
+
+def _drop_ladder(settings: CandyHuntSettings) -> str:
+    """DOUBLE, TRIPLE… even QUINTUPLE for this year's odds."""
+    counts: set[int] = set()
+    for table in (settings.multi_drop_odds, settings.multi_drop_odds_late):
+        for count, _weight in table:
+            if int(count) >= 2:
+                counts.add(int(count))
+    words = [MULTI_DROP_WORDS.get(count, f"{count}x") for count in sorted(counts)]
+    if not words:
+        return "MULTI"
+    if len(words) == 1:
+        return words[0]
+    if len(words) == 2:
+        return f"{words[0]} and {words[1]}"
+    return f"{words[0]}, {words[1]}\u2026 even {words[-1]}"
+
+
+def _clock_struck(settings: CandyHuntSettings, minute: int) -> str:
+    """7:30 when the clock has minutes, otherwise ``8 PM``."""
+    local = as_utc(local_wall_time(settings.event_date, int(minute), settings.zone)).astimezone(settings.zone)
+    hour = local.hour % 12 or 12
+    if local.minute:
+        return f"{hour}:{local.minute:02d}"
+    suffix = "AM" if local.hour < 12 else "PM"
+    return f"{hour} {suffix}"
+
+
+def _hunt_end_label(settings: CandyHuntSettings) -> str:
+    """``6 AM PT`` for the default window end."""
+    _start, end = window_bounds(settings)
+    local = as_utc(end).astimezone(settings.zone)
+    hour = local.hour % 12 or 12
+    suffix = "AM" if local.hour < 12 else "PM"
+    clock = f"{hour}:{local.minute:02d} {suffix}" if local.minute else f"{hour} {suffix}"
+    if settings.timezone_name == "America/Los_Angeles":
+        zone = "PT"
+    else:
+        zone = local.tzname() or settings.timezone_name
+    return f"{clock} {zone}".strip()
+
+
+def _bundle_word(count: int) -> str:
+    word = MULTI_DROP_WORDS.get(int(count))
+    if word:
+        return word.capitalize()
+    return f"{int(count)}x"
+
+
+def night_shift_announcement(mentions: list[str], settings: CandyHuntSettings | None = None) -> str:
+    """6 PM #announcements note. Mentions are already ``<#id>`` strings, main first."""
+    pace = settings if settings is not None else CANDY_HUNT
+    slots = 1 + len(pace.multi_drop_channel_names)
+    places = _english_join(list(mentions)) if mentions else "the drop channels"
+    return (
+        "\U0001f383 **HALLOWEEN IS HERE!** \U0001f383\n"
+        "The sun's gone down, the Witch has had three espressos, and she's NOT holding back anymore. "
+        "\U0001f9f9\u2615\n"
+        f"From now on, candy can rain down in **up to {_count_word(slots)} channels at once**: {places}. "
+        f"Keep your eyes peeled for {_drop_ladder(pace)} DROPS.\n"
+        "But beware: the Witch is feeling *extra* tricky tonight. More tricks are out there, and some of them bite. "
+        "\U0001f9b7\n"
+        "Trick or treat, Menaces. It's about to get stupid. \U0001f36c\U0001f480"
+    )
+
+
+def witching_hour_announcement(general_mention: str, settings: CandyHuntSettings | None = None) -> str:
+    """7:30 #announcements note. Times, rounds, and the bundle word come from settings."""
+    pace = settings if settings is not None else CANDY_HUNT
+    spot = general_mention or "#general"
+    return (
+        "\U0001f987\U0001f52e **THE WITCHING HOUR HAS BEGUN** \U0001f52e\U0001f987\n"
+        f"The clock struck {_clock_struck(pace, pace.frenzy_start_minute)} and the Witch kicked open the cauldron. "
+        f"From now until the hunt ends ({_hunt_end_label(pace)}), every time you Menaces claim **every** drop in a batch, "
+        "there's a random chance she loses her mind and starts a **FRENZY**: \U0001f9f9\n"
+        f"\U0001f36c **{int(pace.frenzy_rounds)} drop rounds back to back**, no waiting. "
+        f"{_bundle_word(pace.frenzy_drop_count)} drops every round.\n"
+        f"\U0001f4e3 You'll know it's on when the **WITCHING HOUR** banner hits {spot}."
+    )
+
+
 def role_removal_due(pumpkin_god: dict | None, now: datetime) -> bool:
     if not pumpkin_god:
         return False
@@ -981,6 +1399,416 @@ def role_removal_due(pumpkin_god: dict | None, now: datetime) -> bool:
     if remove_at is None:
         return False
     return as_utc(now) >= remove_at
+
+
+# Pause between cleanup deletes so a long sweep stays under Discord's limit.
+CLEANUP_DELETE_PAUSE = 0.5
+MULTI_DROP_WORDS = {2: "DOUBLE", 3: "TRIPLE", 4: "QUADRUPLE", 5: "QUINTUPLE"}
+MULTI_DROP_QUIPS = (
+    "The Witch tripped over her broom and spilled candy all over the server!",
+    "The Witch's cauldron boiled over and candy is raining down!",
+    "The Witch sneezed mid-spell and cloned the candy. Oops!",
+    "The Witch's cat knocked the candy bowl off the shelf again!",
+    "Bats swiped the Witch's stash and dropped it all over town!",
+)
+
+
+def is_night(settings: CandyHuntSettings, now: datetime) -> bool:
+    """True from late_ramp_start (18:00 local) on the event day through the window end."""
+    return minutes_from_event_midnight(settings, now) >= float(settings.late_ramp_start_minute)
+
+
+def treats_at(settings: CandyHuntSettings, now: datetime) -> tuple[Treat, ...]:
+    return settings.night_treats if is_night(settings, now) else settings.treats
+
+
+def tricks_at(settings: CandyHuntSettings, now: datetime) -> tuple[Trick, ...]:
+    return settings.night_tricks if is_night(settings, now) else settings.tricks
+
+
+def trick_chance_at(settings: CandyHuntSettings, now: datetime) -> float:
+    return float(settings.night_trick_chance if is_night(settings, now) else settings.trick_chance)
+
+
+def multi_drop_odds_at(settings: CandyHuntSettings, now: datetime):
+    if minutes_from_event_midnight(settings, now) >= float(settings.multi_drop_late_minute):
+        return settings.multi_drop_odds_late
+    return settings.multi_drop_odds
+
+
+def roll_multi_drop_count(settings: CandyHuntSettings, now: datetime, rng: random.Random) -> int:
+    if minutes_from_event_midnight(settings, now) < float(settings.multi_drop_start_minute):
+        return 1
+    odds = multi_drop_odds_at(settings, now)
+    total = sum(weight for _count, weight in odds)
+    pick = rng.random() * total
+    for count, weight in odds:
+        pick -= weight
+        if pick < 0:
+            return int(count)
+    return 1
+
+
+def pick_multi_drop_channels(main_id: int, candidate_ids, count: int, rng: random.Random) -> list[int]:
+    """Main channel first, then up to count-1 distinct random extras."""
+    pool = sorted({int(cid) for cid in candidate_ids if int(cid) != int(main_id)})
+    extras = rng.sample(pool, min(len(pool), max(0, int(count) - 1)))
+    return [int(main_id), *extras]
+
+
+def multi_drop_banner(count: int, extra_channel_ids, rng: random.Random | None = None) -> str:
+    word = MULTI_DROP_WORDS.get(int(count), f"{int(count)}x")
+    quip = (rng or random).choice(MULTI_DROP_QUIPS)
+    spots = ", ".join(f"<#{int(cid)}>" for cid in extra_channel_ids)
+    return f"🎃 **{word} DROP!** 🎃 {quip} 🧹 Candy just landed here AND in {spots}. Go go go!"
+
+
+# "Witching Hour" frenzy. From frenzy_start (19:30) a fully claimed normal batch
+# has a frenzy_chance shot at kicking off frenzy_rounds back-to-back batches.
+# Persisted in state["frenzy"], so a restart picks it up where it left off.
+FRENZY_BANNERS: tuple[str, ...] = (
+    "\U0001f987\U0001f383 **WITCHING HOUR! HALLOWEEN IS HERE!** \U0001f383\U0001f987 The Witch just kicked over the cauldron. **5 drops back to back**, starting NOW. Trick or treat, Menaces!",
+    "\U0001f987\U0001f383 **WITCHING HOUR!** \U0001f383\U0001f987 The Witch lost her grip on the candy sack. **5 drops in a row**, incoming NOW. Grab fast, cry later!",
+    "\U0001f987\U0001f383 **HALLOWEEN IS HERE! WITCHING HOUR!** \U0001f383\U0001f987 The cauldron is boiling over. **5 back-to-back drops** starting NOW. Trick or treat, gremlins!",
+    "\U0001f987\U0001f383 **WITCHING HOUR!** \U0001f383\U0001f987 The Witch says it's power hour. **5 drops back to back**, NOW. Mind the curses, Menaces!",
+)
+
+
+def frenzy_banner(rng: random.Random | None = None) -> str:
+    return (rng or random).choice(FRENZY_BANNERS)
+
+
+def frenzy_allowed(settings: CandyHuntSettings, now: datetime) -> bool:
+    if minutes_from_event_midnight(settings, now) < float(settings.frenzy_start_minute):
+        return False
+    _start, end = window_bounds(settings)
+    return as_utc(now) < as_utc(end)
+
+
+def frenzy_gap(rng: random.Random, settings: CandyHuntSettings | None = None) -> timedelta:
+    pace = settings if settings is not None else CANDY_HUNT
+    return timedelta(seconds=rng.uniform(*pace.frenzy_gap_seconds))
+
+
+def _set_next(state: dict, moment: datetime | None, settings: CandyHuntSettings) -> None:
+    _start, end = window_bounds(settings)
+    if moment is None or as_utc(moment) >= as_utc(end):
+        state["next_drop_at"] = None
+    else:
+        state["next_drop_at"] = iso(moment)
+
+
+def frenzy_batch_active(state: dict) -> bool:
+    """True while the current frenzy round still has unclaimed live drops."""
+    frenzy = state.get("frenzy")
+    if not isinstance(frenzy, dict) or not frenzy.get("batch"):
+        return False
+    return any(
+        drop.get("status") == "active" and not drop.get("dry_run") and drop.get("created_at") == frenzy["batch"]
+        for drop in state.get("active_drops") or []
+    )
+
+
+def on_batch_finished(
+    state: dict,
+    batch_created: str,
+    now: datetime,
+    rng: random.Random,
+    settings: CandyHuntSettings | None,
+    *,
+    all_claimed: bool,
+) -> str | None:
+    """A real batch has no live drops left. Mutates state. Returns an event name."""
+    if settings is None:
+        return None
+    frenzy = state.get("frenzy")
+    if isinstance(frenzy, dict):
+        if frenzy.get("batch") != batch_created:
+            return None
+        frenzy["batch"] = None
+        if int(frenzy.get("rounds_left", 0)) > 0:
+            _set_next(state, as_utc(now) + frenzy_gap(rng, settings), settings)
+            return "frenzy_next"
+        state["frenzy"] = None
+        _start, end = window_bounds(settings)
+        low, high = effective_interval(settings, _streak_value(state.get("streak")), now)
+        _set_next(
+            state,
+            compute_next_drop_at(now, window_end=end, min_interval=low, max_interval=high, rng=rng, first=False),
+            settings,
+        )
+        _log_info("candy frenzy end")
+        return "frenzy_end"
+    if not all_claimed or not frenzy_allowed(settings, now):
+        return None
+    if rng.random() >= float(settings.frenzy_chance):
+        return None
+    state["frenzy"] = {
+        "rounds_left": int(settings.frenzy_rounds),
+        "round": 0,
+        "batch": None,
+        "announced": False,
+    }
+    _set_next(state, as_utc(now) + frenzy_gap(rng, settings), settings)
+    _log_info("candy frenzy start")
+    return "frenzy_start"
+
+
+def frenzy_drop_count(
+    is_frenzy_round: bool,
+    rolled: int,
+    settings: CandyHuntSettings | None = None,
+) -> int:
+    if not is_frenzy_round:
+        return rolled
+    pace = settings if settings is not None else CANDY_HUNT
+    return int(pace.frenzy_drop_count)
+
+
+def begin_frenzy_round(
+    state: dict,
+    batch_created: str,
+    settings: CandyHuntSettings | None = None,
+) -> int | None:
+    """Mark a batch posted at `batch_created` as the next frenzy round."""
+    frenzy = state.get("frenzy")
+    if not isinstance(frenzy, dict):
+        return None
+    if int(frenzy.get("rounds_left", 0)) <= 0:
+        state["frenzy"] = None
+        _log_info("candy frenzy end")
+        return None
+    frenzy["round"] = int(frenzy.get("round", 0)) + 1
+    frenzy["rounds_left"] = int(frenzy["rounds_left"]) - 1
+    frenzy["batch"] = batch_created
+    total = (settings if settings is not None else CANDY_HUNT).frenzy_rounds
+    _log_info(f"candy frenzy round {frenzy['round']}/{total}")
+    return frenzy["round"]
+
+
+def _normalize_frenzy(raw: object) -> dict | None:
+    if not isinstance(raw, dict):
+        return None
+    left = _nonneg_int(raw.get("rounds_left"))
+    batch = parse_optional_dt(raw.get("batch"))
+    if left <= 0 and batch is None:
+        return None
+    return {
+        "rounds_left": min(left, _FRENZY_ROUNDS_CAP),
+        "round": _nonneg_int(raw.get("round")),
+        "batch": None if batch is None else iso(batch),
+        "announced": _as_bool(raw.get("announced"), True),
+    }
+
+
+def is_leader(totals: dict, user_id: int) -> bool:
+    """True when user_id holds the top total (sole or tied) and it is above 0."""
+    mine = int((totals or {}).get(str(user_id), 0))
+    if mine <= 0:
+        return False
+    return mine >= max(int(v) for v in totals.values())
+
+
+def leader_tricks_for(
+    tricks: tuple[Trick, ...],
+    multiplier: int,
+    amounts: tuple[int, ...],
+) -> tuple[Trick, ...]:
+    """Day trick table with the big-loss weights multiplied. Defaults stay LEADER_TRICKS."""
+    if (
+        tricks is TRICKS
+        and int(multiplier) == LEADER_BIG_LOSS_MULTIPLIER
+        and tuple(amounts) == tuple(LEADER_BIG_LOSS_AMOUNTS)
+    ):
+        return LEADER_TRICKS
+    hot = {int(amount) for amount in amounts}
+    return tuple(
+        replace(trick, weight=trick.weight * int(multiplier)) if trick.amount in hot else trick
+        for trick in tricks
+    )
+
+
+def leader_trick_terms(
+    totals: dict,
+    user_id: int,
+    trick_chance: float,
+    settings: CandyHuntSettings | None = None,
+    now: datetime | None = None,
+) -> tuple[float, tuple[Trick, ...]]:
+    # trick_chance 0 means tricks are switched off; the tax does not override that.
+    pace = settings if settings is not None else CANDY_HUNT
+    table = tricks_at(pace, now) if now is not None else pace.tricks
+    if trick_chance > 0 and is_leader(totals, user_id):
+        if table is pace.tricks:
+            tilted = pace.leader_tricks
+        else:
+            tilted = leader_tricks_for(table, pace.leader_big_loss_multiplier, pace.leader_big_loss_amounts)
+        return float(pace.leader_trick_chance), tilted
+    return trick_chance, table
+
+
+_CLAIM_BUTTON_RE = re.compile(rf"candy:claim:{DROP_ID_RE_TEXT}")
+_MESSAGE_TEXT_KEYS = ("content", "description", "title", "label", "custom_id", "name", "value")
+
+
+def _collect_message_bits(node: object, parts: list[str], seen: set[int]) -> None:
+    """Pull display text and button ids out of a message, embed, or component tree."""
+    if node is None or isinstance(node, (int, float, bool, bytes)):
+        return
+    if isinstance(node, str):
+        parts.append(node)
+        return
+    marker = id(node)
+    if marker in seen:
+        return
+    seen.add(marker)
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in _MESSAGE_TEXT_KEYS and isinstance(value, str):
+                parts.append(value)
+            elif isinstance(value, (dict, list, tuple)):
+                _collect_message_bits(value, parts, seen)
+        return
+    if isinstance(node, (list, tuple)):
+        for item in node:
+            _collect_message_bits(item, parts, seen)
+        return
+    for attr in _MESSAGE_TEXT_KEYS:
+        value = getattr(node, attr, None)
+        if isinstance(value, str):
+            parts.append(value)
+    for attr in ("embeds", "components", "children", "fields", "accessory"):
+        child = getattr(node, attr, None)
+        if child is not None:
+            _collect_message_bits(child, parts, seen)
+
+
+def message_blob(content: str | None, components: object = None) -> str:
+    """Flat text for a message content plus embeds and/or components."""
+    parts: list[str] = []
+    if isinstance(content, str) and content:
+        parts.append(content)
+    if components is not None:
+        _collect_message_bits(components, parts, set())
+    return "\n".join(parts)
+
+
+def is_candy_hunt_message(content: str | None, components: object = None) -> bool:
+    """True when content and/or embeds/components are candy-hunt spam.
+
+    Matches drop prompts, claim lines, multi-drop banners, Witching Hour
+    banners, and candy cards. The curse and refund lines below are literal
+    leftovers so cleanup still recognizes those old posts. The second argument
+    may be a component list, an embed list, or a message-like object.
+    Wrap-up and lights-out copy are not matches. Author checks stay with the caller.
+    """
+    blob = message_blob(content, components)
+    if not blob:
+        return False
+    if _CLAIM_BUTTON_RE.search(blob):
+        return True
+    folded = blob.casefold()
+    markers = (
+        "trick or treat",
+        "a pumpkin bucket just clattered",
+        "first hand in the bowl",
+        "🎃 trick!",
+        "claimed by",
+        "candy card",
+        "candy change:",
+        "the witch's curse",
+        "the witch had a change of heart",
+        "witching hour",
+    )
+    if any(marker in folded for marker in markers):
+        return True
+    for word in MULTI_DROP_WORDS.values():
+        if f"{word.casefold()} drop" in folded:
+            return True
+    return False
+
+
+def is_drop_channel(channel_id: int, name: str, settings: CandyHuntSettings | None = None) -> bool:
+    """MTS #general plus the named multi-drop rooms."""
+    pace = settings if settings is not None else CANDY_HUNT
+    try:
+        cid = int(channel_id)
+    except (TypeError, ValueError):
+        return False
+    if cid == int(pace.main_drop_channel_id):
+        return True
+    return (name or "").casefold() in {item.casefold() for item in pace.multi_drop_channel_names}
+
+
+def cleanup_skip_channel(channel_id: int, name: str, *, announcement_channel_id: int | None = None) -> bool:
+    """Announcements are never cleaned, by id or by name."""
+    try:
+        cid = int(channel_id)
+    except (TypeError, ValueError):
+        return True
+    if cid == ANNOUNCEMENTS_CHANNEL_ID:
+        return True
+    if announcement_channel_id is not None:
+        try:
+            if cid == int(announcement_channel_id):
+                return True
+        except (TypeError, ValueError):
+            pass
+    return "announcement" in (name or "").casefold()
+
+
+def stored_candy_message_refs(state: object) -> list[tuple[int, int]]:
+    """(channel_id, message_id) pairs saved on the hunt state, drop records included."""
+    refs: list[tuple[int, int]] = []
+    seen: set[tuple[int, int]] = set()
+
+    def add(channel_id: object, message_id: object) -> None:
+        if isinstance(channel_id, bool) or isinstance(message_id, bool):
+            return
+        try:
+            cid = int(channel_id)  # type: ignore[arg-type]
+            mid = int(message_id)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return
+        if cid <= 0 or mid <= 0 or (cid, mid) in seen:
+            return
+        seen.add((cid, mid))
+        refs.append((cid, mid))
+
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            if "message_id" in node and "channel_id" in node:
+                add(node.get("channel_id"), node.get("message_id"))
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(state)
+    return refs
+
+
+def format_cleanup_report(rows: list[tuple[str, int, int, str]], *, dry_run: bool) -> str:
+    """Per-channel counts. `rows` is (label, matched, deleted, note)."""
+    if dry_run:
+        header = "Cleanup dry run. Nothing was deleted."
+    else:
+        header = "Cleanup deleted the bot's candy hunt messages."
+    if not rows:
+        return header + "\nNo drop channels were found."
+    lines = [header]
+    for label, matched, deleted, note in rows:
+        if note:
+            lines.append(f"{label}: {note}")
+        elif dry_run:
+            lines.append(f"{label}: {matched}")
+        else:
+            lines.append(f"{label}: deleted {deleted} of {matched}")
+    text = "\n".join(lines)
+    if len(text) > 1900:
+        return text[:1899] + "…"
+    return text
 
 
 def split_stale_drops(drops: list[dict], now: datetime) -> tuple[list[dict], list[dict], list[dict]]:
@@ -1015,6 +1843,9 @@ def reset_streaks_for_expiry(state: dict, drops: list[dict]) -> None:
     for drop in drops:
         if not isinstance(drop, dict):
             continue
+        if drop.get("extra"):
+            # Bonus multi-drop copies never break a streak.
+            continue
         if drop.get("dry_run"):
             saw_test = True
         else:
@@ -1042,7 +1873,7 @@ def _bump_real_streak(
     the next drop sooner than 60 seconds after itself.
     """
     state["streak"] = _streak_value(state.get("streak")) + 1
-    if settings is None:
+    if settings is None or state.get("frenzy"):
         return
     existing = parse_optional_dt(state.get("next_drop_at"))
     if existing is None:
@@ -1095,6 +1926,34 @@ def _bump_test_streak(
     session["next_drop_at"] = None if pulled is None else iso(pulled)
 
 
+def _remember_candy_type(drop: dict, rng: random.Random) -> str:
+    """Use the type stored on the drop, or pick one for a pre-upgrade drop."""
+    current = drop.get("candy_type")
+    if isinstance(current, str) and current in CANDY_TYPE_BY_KEY:
+        return current
+    picked = rng.choice(CANDY_TYPES)
+    type_key = picked.key if isinstance(picked, CandyType) else CANDY_TYPES[0].key
+    drop["candy_type"] = type_key
+    return type_key
+
+
+def _add_candy_type(bucket: dict, user_key: str, type_key: str, amount: int) -> None:
+    if amount <= 0 or type_key not in CANDY_TYPE_BY_KEY:
+        return
+    counts = bucket.get("candy_types")
+    if not isinstance(counts, dict):
+        counts = {}
+        bucket["candy_types"] = counts
+    user_counts = counts.get(user_key)
+    if not isinstance(user_counts, dict):
+        user_counts = {}
+        counts[user_key] = user_counts
+    previous = user_counts.get(type_key, 0)
+    if isinstance(previous, bool) or not isinstance(previous, int):
+        previous = 0
+    user_counts[type_key] = previous + amount
+
+
 def apply_claim(
     state: dict,
     drop_id: str,
@@ -1133,7 +1992,16 @@ def apply_claim(
         reset_streaks_for_expiry(state, [drop])
         return state, outcome("expired", mutated=True, drop=drop, dry_run=dry_run)
 
-    roll = roll_candy(rng, trick_chance=trick_chance)
+    treats = treats_at(settings, now) if settings is not None else TREATS
+    leader_bucket = state.get("test", {}) if dry_run else state
+    trick_chance, tricks = leader_trick_terms(
+        leader_bucket.get("totals") or {},
+        user_id,
+        trick_chance,
+        settings,
+        now if settings is not None else None,
+    )
+    roll = roll_candy(rng, trick_chance=trick_chance, treats=treats, tricks=tricks)
     if dry_run:
         bucket = state.setdefault("test", default_test())
     else:
@@ -1142,16 +2010,29 @@ def apply_claim(
     bucket.setdefault("claim_counts", {})
     key = str(user_id)
     old = int(bucket["totals"].get(key, 0))
-    bucket["totals"][key] = apply_amount(old, roll.amount)
+    new_total = apply_amount(old, roll.amount)
+    removed = max(0, old - new_total)
+    bucket["totals"][key] = new_total
     bucket["claim_counts"][key] = int(bucket["claim_counts"].get(key, 0)) + 1
     bucket["claims_total"] = int(bucket.get("claims_total", 0)) + 1
     drop["status"] = "claimed"
     drop["claimed_by"] = int(user_id)
     drop["claimed_at"] = iso(now)
+    if roll.kind == "treat":
+        type_key = _remember_candy_type(drop, rng)
+        if roll.amount > 0:
+            _add_candy_type(bucket, key, type_key, roll.amount)
     if dry_run:
         _bump_test_streak(state, drop, now, rng, settings)
-    else:
+    elif not drop.get("extra"):
         _bump_real_streak(state, drop, now, rng, settings)
+    if not dry_run:
+        batch = drop.get("created_at")
+        if not any(
+            other.get("status") == "active" and not other.get("dry_run") and other.get("created_at") == batch
+            for other in state["active_drops"]
+        ):
+            on_batch_finished(state, batch, now, rng, settings, all_claimed=True)
     rank, total, players = rank_for(bucket["totals"], user_id)
     return state, outcome(
         "won",
@@ -1162,6 +2043,7 @@ def apply_claim(
         rank=rank,
         players=players,
         dry_run=dry_run,
+        removed=removed,
     )
 
 
@@ -1192,6 +2074,32 @@ def _int_map(raw: object) -> dict[str, int]:
         if user_id < 0:
             continue
         cleaned[str(user_id)] = max(0, amount)
+    return cleaned
+
+
+def _candy_type_map(raw: object) -> dict[str, dict[str, int]]:
+    """user id -> {known type: positive count}. Missing or garbage is empty."""
+    if not isinstance(raw, dict):
+        return {}
+    cleaned: dict[str, dict[str, int]] = {}
+    for user_key, counts in raw.items():
+        if isinstance(user_key, bool):
+            continue
+        try:
+            user_id = int(user_key)
+        except (TypeError, ValueError):
+            continue
+        if user_id < 0 or not isinstance(counts, dict):
+            continue
+        kept: dict[str, int] = {}
+        for type_key, value in counts.items():
+            if not isinstance(type_key, str) or type_key not in CANDY_TYPE_BY_KEY:
+                continue
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                continue
+            kept[type_key] = value
+        if kept:
+            cleaned[str(user_id)] = kept
     return cleaned
 
 
@@ -1237,12 +2145,18 @@ def _drop_record(raw: object) -> dict | None:
     claimed_at = parse_optional_dt(raw.get("claimed_at"))
     if claimed_at is not None:
         record["claimed_at"] = iso(claimed_at)
+    candy_type = raw.get("candy_type")
+    if isinstance(candy_type, str) and candy_type in CANDY_TYPE_BY_KEY:
+        record["candy_type"] = candy_type
+    if _as_bool(raw.get("extra")):
+        record["extra"] = True
     return record
 
 
 def default_test() -> dict:
     return {
         "totals": {},
+        "candy_types": {},
         "claim_counts": {},
         "claims_total": 0,
         "drops_posted": 0,
@@ -1253,15 +2167,20 @@ def default_test() -> dict:
 def default_state() -> dict:
     return {
         "totals": {},
+        "candy_types": {},
         "claim_counts": {},
         "claims_total": 0,
         "active_drops": [],
         "next_drop_at": None,
         "drops_posted": 0,
         "wrap_up_done": False,
+        "lights_out_done": False,
+        "night_shift_done": False,
+        "witching_hour_done": False,
         "pumpkin_god": None,
         "event_disabled": False,
         "streak": 0,
+        "frenzy": None,
         "test": default_test(),
     }
 
@@ -1288,6 +2207,7 @@ def _test_bucket(raw: object) -> dict:
     if not isinstance(raw, dict):
         return bucket
     bucket["totals"] = _int_map(raw.get("totals"))
+    bucket["candy_types"] = _candy_type_map(raw.get("candy_types"))
     bucket["claim_counts"] = _int_map(raw.get("claim_counts"))
     bucket["claims_total"] = _nonneg_int(raw.get("claims_total"))
     bucket["drops_posted"] = _nonneg_int(raw.get("drops_posted"))
@@ -1370,6 +2290,11 @@ def _parse_dry_run(value: object) -> bool | None:
     return None
 
 
+def _candy_owner_id(settings) -> int:
+    """Owner the !candyadmin check compares against. Defaults to Nick."""
+    return getattr(settings, "owner_id", NICK_ID)
+
+
 def _command_is_candyadmin(command) -> bool:
     seen: set[int] = set()
     current = command
@@ -1389,7 +2314,7 @@ async def _candyadmin_allowed(ctx) -> bool:
     if cog is None:
         cog = getattr(getattr(ctx, "command", None), "cog", None)
     settings = getattr(cog, "settings", None)
-    owner_id = getattr(settings, "owner_id", NICK_ID)
+    owner_id = _candy_owner_id(settings)
     if author_id != owner_id:
         is_owner = getattr(getattr(ctx, "bot", None), "is_owner", None)
         allowed = False
@@ -1609,6 +2534,7 @@ def normalize_state(raw: object) -> dict:
         return default_state()
     state = default_state()
     state["totals"] = _int_map(raw.get("totals"))
+    state["candy_types"] = _candy_type_map(raw.get("candy_types"))
     state["claim_counts"] = _int_map(raw.get("claim_counts"))
     state["claims_total"] = _nonneg_int(raw.get("claims_total"))
     drops = []
@@ -1621,9 +2547,17 @@ def normalize_state(raw: object) -> dict:
     state["next_drop_at"] = None if nxt is None else iso(nxt)
     state["drops_posted"] = _nonneg_int(raw.get("drops_posted"))
     state["wrap_up_done"] = _as_bool(raw.get("wrap_up_done"))
+    state["lights_out_done"] = _as_bool(raw.get("lights_out_done"))
+    state["night_shift_done"] = _as_bool(raw.get("night_shift_done"))
+    state["witching_hour_done"] = _as_bool(raw.get("witching_hour_done"))
     state["event_disabled"] = _as_bool(raw.get("event_disabled"))
     state["pumpkin_god"] = _pumpkin(raw.get("pumpkin_god"))
     state["streak"] = _streak_value(raw.get("streak"))
+    state["frenzy"] = _normalize_frenzy(raw.get("frenzy"))
+    # Retired one-shots. Keep them when an old file still has the keys.
+    for retired in ("witch_curse_done", "witch_refund_done", "witching_force_done"):
+        if retired in raw:
+            state[retired] = _as_bool(raw.get(retired))
     state["test"] = _test_bucket(raw.get("test"))
     return state
 
@@ -1636,8 +2570,10 @@ def make_drop(
     expires_at: datetime,
     *,
     dry_run: bool,
+    candy_type: str | None = None,
+    extra: bool = False,
 ) -> dict:
-    return {
+    record = {
         "drop_id": drop_id,
         "channel_id": int(channel_id),
         "message_id": None if message_id is None else int(message_id),
@@ -1647,6 +2583,11 @@ def make_drop(
         "dry_run": bool(dry_run),
         "claimed_by": None,
     }
+    if isinstance(candy_type, str) and candy_type in CANDY_TYPE_BY_KEY:
+        record["candy_type"] = candy_type
+    if extra:
+        record["extra"] = True
+    return record
 
 
 def new_drop_id(existing: set[str]) -> str:
@@ -1714,11 +2655,209 @@ def _bounded_minutes(value: object, *, high: int = 24 * 60) -> int | None:
     return None
 
 
+def _positive_int(value: object, *, high: int = 10_000) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        number = value
+    elif isinstance(value, float):
+        if value != int(value):
+            return None
+        number = int(value)
+    elif isinstance(value, str) and value.strip().isdigit():
+        number = int(value.strip())
+    else:
+        return None
+    if 1 <= number <= high:
+        return number
+    return None
+
+
+def _nonneg_float(value: object, *, high: float) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if number != number or number < 0 or number > high or number == float("inf"):
+        return None
+    return number
+
+
+def _unit_interval(value: object) -> float | None:
+    """A chance in [0, 1]. Booleans are rejected."""
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if number != number or number in (float("inf"), float("-inf")):
+        return None
+    if 0.0 <= number <= 1.0:
+        return number
+    return None
+
+
+def _strict_bool(value: object) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    return None
+
+
+def _grace_minutes(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, float):
+        if value != int(value):
+            return None
+        number = int(value)
+    elif isinstance(value, int):
+        number = value
+    elif isinstance(value, str) and value.strip().isdigit():
+        number = int(value.strip())
+    else:
+        return None
+    if 0 <= number <= 24 * 60:
+        return number
+    return None
+
+
+def _positive_id(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    text = value.strip()
+    if not text.isdigit():
+        return None
+    parsed = int(text)
+    return parsed if parsed > 0 else None
+
+
+def _treats_with_weights(base: tuple[Treat, ...], raw: object) -> tuple[Treat, ...] | None:
+    names = [treat.name for treat in base]
+    if isinstance(raw, dict):
+        if set(raw) != set(names):
+            return None
+        values = [raw[name] for name in names]
+    elif isinstance(raw, list):
+        if len(raw) != len(base):
+            return None
+        values = list(raw)
+    else:
+        return None
+    weights: list[int] = []
+    for value in values:
+        parsed = _positive_int(value)
+        if parsed is None:
+            return None
+        weights.append(parsed)
+    if all(weight == treat.weight for weight, treat in zip(weights, base)):
+        return base
+    return tuple(replace(treat, weight=weight) for treat, weight in zip(base, weights))
+
+
+def _tricks_with_weights(base: tuple[Trick, ...], raw: object) -> tuple[Trick, ...] | None:
+    if not isinstance(raw, list) or len(raw) != len(base):
+        return None
+    weights: list[int] = []
+    for value in raw:
+        parsed = _positive_int(value)
+        if parsed is None:
+            return None
+        weights.append(parsed)
+    if all(weight == trick.weight for weight, trick in zip(weights, base)):
+        return base
+    return tuple(replace(trick, weight=weight) for trick, weight in zip(base, weights))
+
+
+def _parse_odds(raw: object) -> tuple[tuple[int, float], ...] | None:
+    if not isinstance(raw, list) or not raw:
+        return None
+    odds: list[tuple[int, float]] = []
+    seen: set[int] = set()
+    for item in raw:
+        if not isinstance(item, (list, tuple)) or len(item) != 2:
+            return None
+        count = _positive_int(item[0], high=20)
+        weight = item[1]
+        if count is None or count in seen or isinstance(weight, bool):
+            return None
+        try:
+            weight_f = float(weight)
+        except (TypeError, ValueError):
+            return None
+        if weight_f != weight_f or weight_f <= 0 or weight_f == float("inf"):
+            return None
+        seen.add(count)
+        odds.append((count, weight_f))
+    return tuple(odds)
+
+
+def _parse_gap(raw: object) -> tuple[float, float] | None:
+    if not isinstance(raw, (list, tuple)) or len(raw) != 2:
+        return None
+    low = _nonneg_float(raw[0], high=120)
+    high = _nonneg_float(raw[1], high=120)
+    if low is None or high is None or low > high:
+        return None
+    return (low, high)
+
+
+def _parse_loss_amounts(raw: object) -> tuple[int, ...] | None:
+    if not isinstance(raw, list) or not raw:
+        return None
+    amounts: list[int] = []
+    for value in raw:
+        if isinstance(value, bool) or not isinstance(value, int) or value >= 0:
+            return None
+        amounts.append(value)
+    return tuple(amounts)
+
+
+def _parse_channel_names(raw: object) -> tuple[str, ...] | None:
+    if not isinstance(raw, list):
+        return None
+    names: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, str) or not item.strip():
+            return None
+        name = item.strip()
+        key = name.casefold()
+        if key in seen:
+            return None
+        seen.add(key)
+        names.append(name)
+    return tuple(names)
+
+
+def _take(changes: dict, field: str, parsed: object, current: object, key: str) -> None:
+    if parsed is None:
+        log.warning("candy hunt config ignored key=%s", key)
+    elif parsed != current:
+        changes[field] = parsed
+
+
 def apply_candy_hunt_overrides(base: CandyHuntSettings, raw: object) -> CandyHuntSettings:
     if not isinstance(raw, dict) or not raw:
         return base
     changes: dict = {}
     zone = base.zone
+    if "timezone" in raw or "timezone_name" in raw:
+        name = raw["timezone"] if "timezone" in raw else raw.get("timezone_name")
+        if isinstance(name, str) and name.strip():
+            try:
+                zone = ZoneInfo(name.strip())
+            except Exception:
+                log.warning("candy hunt config ignored key=timezone")
+            else:
+                if name.strip() != base.timezone_name:
+                    changes["timezone_name"] = name.strip()
+        else:
+            log.warning("candy hunt config ignored key=timezone")
 
     if "event_date" in raw:
         try:
@@ -1917,6 +3056,143 @@ def apply_candy_hunt_overrides(base: CandyHuntSettings, raw: object) -> CandyHun
         else:
             changes["late_floor"] = timedelta(minutes=minutes)
 
+    if "night_trick_chance" in raw:
+        _take(changes, "night_trick_chance", _unit_interval(raw["night_trick_chance"]), base.night_trick_chance, "night_trick_chance")
+
+    for key, field in (
+        ("multi_drop_start", "multi_drop_start_minute"),
+        ("multi_drop_late", "multi_drop_late_minute"),
+        ("frenzy_start", "frenzy_start_minute"),
+    ):
+        if key in raw:
+            _take(changes, field, parse_clock_minutes(raw[key]), getattr(base, field), key)
+
+    if "treat_weights" in raw:
+        _take(changes, "treats", _treats_with_weights(base.treats, raw["treat_weights"]), base.treats, "treat_weights")
+    if "night_treat_weights" in raw:
+        _take(
+            changes,
+            "night_treats",
+            _treats_with_weights(base.night_treats, raw["night_treat_weights"]),
+            base.night_treats,
+            "night_treat_weights",
+        )
+    if "trick_weights" in raw:
+        _take(changes, "tricks", _tricks_with_weights(base.tricks, raw["trick_weights"]), base.tricks, "trick_weights")
+    if "night_trick_weights" in raw:
+        _take(
+            changes,
+            "night_tricks",
+            _tricks_with_weights(base.night_tricks, raw["night_trick_weights"]),
+            base.night_tricks,
+            "night_trick_weights",
+        )
+    if "multi_drop_odds" in raw:
+        _take(changes, "multi_drop_odds", _parse_odds(raw["multi_drop_odds"]), base.multi_drop_odds, "multi_drop_odds")
+    if "multi_drop_odds_late" in raw:
+        _take(
+            changes,
+            "multi_drop_odds_late",
+            _parse_odds(raw["multi_drop_odds_late"]),
+            base.multi_drop_odds_late,
+            "multi_drop_odds_late",
+        )
+    if "main_drop_channel_id" in raw:
+        _take(
+            changes,
+            "main_drop_channel_id",
+            _positive_id(raw["main_drop_channel_id"]),
+            base.main_drop_channel_id,
+            "main_drop_channel_id",
+        )
+    if "multi_drop_channel_names" in raw:
+        _take(
+            changes,
+            "multi_drop_channel_names",
+            _parse_channel_names(raw["multi_drop_channel_names"]),
+            base.multi_drop_channel_names,
+            "multi_drop_channel_names",
+        )
+    if "frenzy_chance" in raw:
+        _take(changes, "frenzy_chance", _unit_interval(raw["frenzy_chance"]), base.frenzy_chance, "frenzy_chance")
+    if "frenzy_rounds" in raw:
+        _take(changes, "frenzy_rounds", _positive_int(raw["frenzy_rounds"], high=50), base.frenzy_rounds, "frenzy_rounds")
+    if "frenzy_drop_count" in raw:
+        _take(
+            changes,
+            "frenzy_drop_count",
+            _positive_int(raw["frenzy_drop_count"], high=20),
+            base.frenzy_drop_count,
+            "frenzy_drop_count",
+        )
+    if "frenzy_gap_seconds" in raw:
+        _take(changes, "frenzy_gap_seconds", _parse_gap(raw["frenzy_gap_seconds"]), base.frenzy_gap_seconds, "frenzy_gap_seconds")
+    if "frenzy_kick_delay" in raw:
+        _take(
+            changes,
+            "frenzy_kick_delay",
+            _nonneg_float(raw["frenzy_kick_delay"], high=60),
+            base.frenzy_kick_delay,
+            "frenzy_kick_delay",
+        )
+    if "leader_trick_chance" in raw:
+        _take(
+            changes,
+            "leader_trick_chance",
+            _unit_interval(raw["leader_trick_chance"]),
+            base.leader_trick_chance,
+            "leader_trick_chance",
+        )
+    if "leader_big_loss_multiplier" in raw:
+        _take(
+            changes,
+            "leader_big_loss_multiplier",
+            _positive_int(raw["leader_big_loss_multiplier"], high=20),
+            base.leader_big_loss_multiplier,
+            "leader_big_loss_multiplier",
+        )
+    if "leader_big_loss_amounts" in raw:
+        _take(
+            changes,
+            "leader_big_loss_amounts",
+            _parse_loss_amounts(raw["leader_big_loss_amounts"]),
+            base.leader_big_loss_amounts,
+            "leader_big_loss_amounts",
+        )
+    if any(key in changes for key in ("tricks", "leader_big_loss_multiplier", "leader_big_loss_amounts")):
+        built = leader_tricks_for(
+            changes.get("tricks", base.tricks),
+            changes.get("leader_big_loss_multiplier", base.leader_big_loss_multiplier),
+            changes.get("leader_big_loss_amounts", base.leader_big_loss_amounts),
+        )
+        if built != base.leader_tricks:
+            changes["leader_tricks"] = built
+    if "lights_out" in raw:
+        value = raw["lights_out"]
+        if value is None:
+            if base.lights_out_minute is not None:
+                changes["lights_out_minute"] = None
+        else:
+            _take(changes, "lights_out_minute", parse_clock_minutes(value), base.lights_out_minute, "lights_out")
+    if "night_shift_enabled" in raw:
+        _take(changes, "night_shift_enabled", _strict_bool(raw["night_shift_enabled"]), base.night_shift_enabled, "night_shift_enabled")
+    if "witching_hour_enabled" in raw:
+        _take(
+            changes,
+            "witching_hour_enabled",
+            _strict_bool(raw["witching_hour_enabled"]),
+            base.witching_hour_enabled,
+            "witching_hour_enabled",
+        )
+    if "announcement_grace_minutes" in raw:
+        _take(
+            changes,
+            "announcement_grace_minutes",
+            _grace_minutes(raw["announcement_grace_minutes"]),
+            base.announcement_grace_minutes,
+            "announcement_grace_minutes",
+        )
+
     if not changes:
         return base
     updated = replace(base, **changes)
@@ -1936,6 +3212,17 @@ def _warn_if_wrap_up_before_window(settings: CandyHuntSettings) -> None:
             "candy hunt wrap_up_at %s is before the window end %s",
             iso(settings.wrap_up_at),
             iso(end),
+        )
+    try:
+        lights = lights_out_at(settings)
+    except (OverflowError, OSError, ValueError):
+        log.warning("candy hunt lights_out could not be compared with wrap_up_at")
+        return
+    if as_utc(lights) >= as_utc(settings.wrap_up_at):
+        log.warning(
+            "candy hunt lights_out %s is not before wrap_up_at %s",
+            iso(lights),
+            iso(settings.wrap_up_at),
         )
 
 
@@ -2126,6 +3413,62 @@ def _section(eyebrow: str, title: str, image: str, description: str) -> discord.
     )
 
 
+def public_display_name(user) -> str:
+    """A name that cannot ping. Mentions and @everyone/@here are stripped."""
+    raw = None
+    for attr in ("display_name", "global_name", "name"):
+        value = getattr(user, attr, None)
+        if isinstance(value, str) and value.strip():
+            raw = value
+            break
+    if raw is None:
+        user_id = getattr(user, "id", None)
+        raw = "someone" if user_id is None else str(user_id)
+    return _strip_public_mentions(raw)
+
+
+def _strip_public_mentions(text: str) -> str:
+    cleaned = _PUBLIC_MENTION_RE.sub(" ", text or "")
+    cleaned = " ".join(cleaned.split())
+    return cleaned or "someone"
+
+
+def _candy_type_on(drop: dict | None) -> CandyType | None:
+    if not isinstance(drop, dict):
+        return None
+    key = drop.get("candy_type")
+    if not isinstance(key, str):
+        return None
+    return CANDY_TYPE_BY_KEY.get(key)
+
+
+def claim_public_text(outcome: ClaimOutcome, display_name: str) -> str:
+    """Short public line for a claimed drop. Dry runs start with ``TEST. ``."""
+    name = _strip_public_mentions(display_name)
+    roll = outcome.roll
+    if roll is not None and roll.kind == "trick" and roll.amount < 0:
+        line = f"🎃 TRICK! {name} lost {outcome.removed} candy"
+    elif roll is not None and roll.kind == "trick":
+        label = (roll.blurb or roll.name or "a trick").strip() or "a trick"
+        line = f"🎃 TRICK! {name} got {label} and no candy"
+    else:
+        amount = 0 if roll is None else roll.amount
+        line = f"🍬 Claimed by {name} for {amount} candy"
+        kind = _candy_type_on(outcome.drop)
+        if kind is not None:
+            line = f"{line} · {kind.emoji} {kind.name}"
+    if outcome.dry_run:
+        return f"TEST. {line}"
+    return line
+
+
+def build_claimed_drop_view(text: str) -> discord.ui.LayoutView:
+    """Buttonless claimed state. A finite timeout keeps it out of the persistent store."""
+    view = discord.ui.LayoutView(timeout=CARD_TIMEOUT)
+    view.add_item(discord.ui.TextDisplay(text))
+    return view
+
+
 def build_drop_view(drop_id: str, *, expires_at: datetime, dry_run: bool) -> discord.ui.LayoutView:
     view = discord.ui.LayoutView(timeout=None)
     accent = TRICK_COLOUR if dry_run else PUMPKIN_COLOUR
@@ -2182,7 +3525,39 @@ def build_candy_card(outcome: ClaimOutcome) -> discord.ui.LayoutView:
     return view
 
 
-def build_leaderboard_view(totals: dict, user_id: int, *, test: bool = False) -> discord.ui.LayoutView:
+def candy_type_breakdown(counts: object) -> str:
+    """``emoji name xN`` lines, highest count first. Empty when there is nothing to show."""
+    if not isinstance(counts, dict):
+        return ""
+    rows: list[tuple[int, str, CandyType]] = []
+    for key, value in counts.items():
+        kind = CANDY_TYPE_BY_KEY.get(key) if isinstance(key, str) else None
+        if kind is None or isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            continue
+        rows.append((value, kind.name, kind))
+    if not rows:
+        return ""
+    rows.sort(key=lambda item: (-item[0], item[1]))
+    return "\n".join(f"{kind.emoji} {kind.name} x{amount}" for amount, _name, kind in rows)
+
+
+def _user_candy_counts(bucket: object, user_id: int) -> dict:
+    if not isinstance(bucket, dict):
+        return {}
+    raw = bucket.get("candy_types")
+    if not isinstance(raw, dict):
+        return {}
+    counts = raw.get(str(user_id))
+    return counts if isinstance(counts, dict) else {}
+
+
+def build_leaderboard_view(
+    totals: dict,
+    user_id: int,
+    *,
+    test: bool = False,
+    type_counts: dict | None = None,
+) -> discord.ui.LayoutView:
     view = discord.ui.LayoutView(timeout=CARD_TIMEOUT)
     container = discord.ui.Container(accent_colour=PUMPKIN_COLOUR)
     if test:
@@ -2203,19 +3578,266 @@ def build_leaderboard_view(totals: dict, user_id: int, *, test: bool = False) ->
         you = f"You have **{total}** · rank **#{rank}** of {players}."
     else:
         you = "You haven't found any candy yet."
+    breakdown = candy_type_breakdown(type_counts)
+    if breakdown:
+        you = f"{you}\n{breakdown}"
     container.add_item(discord.ui.TextDisplay(f"{board}\n\n{you}"))
     view.add_item(container)
     return view
 
 
+WINNER_DECORATION_LINE = (
+    "The #1 winner also gets a gifted Discord profile decoration from Nick, coming soon."
+)
+
+# Next four score groups after the winner. A tie shares one title.
+HONOR_TITLES: tuple[str, ...] = (
+    "Vice Pumpkin",
+    "Candy Goblin",
+    "Porch Pirate",
+    "Bucket Understudy",
+)
+# Playful names for a candy-type pile. Only types the state actually stores.
+CANDY_STACK_TITLES: dict[str, str] = {
+    "candy_corn": "Corn Baron",
+    "chocolate_bar": "Chocolate Menace",
+    "lollipop": "Lollipop Legend",
+    "gummy_worms": "Worm Whisperer",
+    "caramel_apple": "Sticky Champion",
+    "peanut_butter_cup": "Cup Captain",
+}
+
+
+def _public_name(user_id: str, names: dict | None) -> str:
+    """Display name with pings stripped. A missing name falls back to the id."""
+    raw = None
+    if isinstance(names, dict):
+        raw = names.get(user_id)
+        if raw is None and str(user_id).isdigit():
+            raw = names.get(int(user_id))
+    if isinstance(raw, str) and raw.strip():
+        return _strip_public_mentions(raw)
+    return str(user_id)
+
+
+def _join_names(user_ids: list[str], names: dict | None) -> str:
+    labels = [_public_name(uid, names) for uid in user_ids]
+    if not labels:
+        return "someone"
+    if len(labels) == 1:
+        return labels[0]
+    if len(labels) == 2:
+        return f"{labels[0]} and {labels[1]}"
+    return ", ".join(labels[:-1]) + f", and {labels[-1]}"
+
+
+def _score_groups(totals: object) -> list[tuple[int, list[str]]]:
+    """Positive totals as (score, user ids), high score first. Ties share a group."""
+    if not isinstance(totals, dict):
+        return []
+    pairs: list[tuple[str, int]] = []
+    for key, value in totals.items():
+        if isinstance(key, bool) or isinstance(value, bool):
+            continue
+        try:
+            uid = int(key)
+            total = int(value)
+        except (TypeError, ValueError):
+            continue
+        if uid < 0 or total <= 0:
+            continue
+        pairs.append((str(uid), total))
+    pairs.sort(key=lambda item: (-item[1], int(item[0])))
+    groups: list[tuple[int, list[str]]] = []
+    for uid, total in pairs:
+        if not groups or groups[-1][0] != total:
+            groups.append((total, [uid]))
+        else:
+            groups[-1][1].append(uid)
+    return groups
+
+
+def tally_user_ids(state: object) -> list[int]:
+    """User ids mentioned by totals, claim counts, or candy-type piles."""
+    if not isinstance(state, dict):
+        return []
+    found: set[int] = set()
+
+    def take(raw: object) -> None:
+        if not isinstance(raw, dict):
+            return
+        for key in raw:
+            if isinstance(key, bool):
+                continue
+            try:
+                uid = int(key)
+            except (TypeError, ValueError):
+                continue
+            if uid >= 0:
+                found.add(uid)
+
+    take(state.get("totals"))
+    take(state.get("claim_counts"))
+    take(state.get("candy_types"))
+    return sorted(found)
+
+
+def wrap_up_superlatives(state: dict, names: dict | None = None) -> list[str]:
+    """Funny lines from fields the hunt actually stores.
+
+    Claim counts are grabs. A candy-type total is pieces won from drops of
+    that cosmetic type, not a count of those candies or of grabs. Tricks,
+    jackpots, and the size of a single loss are not stored, so they are
+    not invented here.
+    """
+    if not isinstance(state, dict):
+        return []
+    lines: list[str] = []
+    claims: dict[str, int] = {}
+    raw_claims = state.get("claim_counts")
+    if isinstance(raw_claims, dict):
+        for key, value in raw_claims.items():
+            if isinstance(key, bool) or isinstance(value, bool):
+                continue
+            try:
+                uid = int(key)
+                count = int(value)
+            except (TypeError, ValueError):
+                continue
+            if uid >= 0 and count > 0:
+                claims[str(uid)] = count
+    if claims:
+        best = max(claims.values())
+        holders = sorted((uid for uid, count in claims.items() if count == best), key=int)
+        lines.append(f"🖐️ Fastest Hands: {_join_names(holders, names)} grabbed the bowl {best} times.")
+
+    raw_types = state.get("candy_types")
+    stacks: list[tuple[int, str, str]] = []
+    variety: dict[str, int] = {}
+    if isinstance(raw_types, dict):
+        for key, counts in raw_types.items():
+            if isinstance(key, bool) or not isinstance(counts, dict):
+                continue
+            try:
+                uid = int(key)
+            except (TypeError, ValueError):
+                continue
+            if uid < 0:
+                continue
+            user_key = str(uid)
+            kinds = 0
+            for type_key, value in counts.items():
+                kind = CANDY_TYPE_BY_KEY.get(type_key) if isinstance(type_key, str) else None
+                if kind is None or isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                    continue
+                kinds += 1
+                stacks.append((value, user_key, type_key))
+            if kinds:
+                variety[user_key] = kinds
+    if stacks:
+        peak = max(item[0] for item in stacks)
+        peaked = [item for item in stacks if item[0] == peak]
+        peaked.sort(key=lambda item: (int(item[1]), item[2]))
+        for count, uid, type_key in peaked[:3]:
+            kind = CANDY_TYPE_BY_KEY[type_key]
+            title = CANDY_STACK_TITLES.get(type_key, kind.name)
+            lines.append(
+                f"{kind.emoji} {title}: {_public_name(uid, names)} hauled {count} candy out of {kind.name} drops."
+            )
+    if variety:
+        best_kinds = max(variety.values())
+        holders = sorted((uid for uid, kinds in variety.items() if kinds == best_kinds), key=int)
+        if best_kinds >= 2 and len(holders) == 1:
+            lines.append(
+                f"🧺 Variety Bucket: {_join_names(holders, names)} collected {best_kinds} kinds of candy."
+            )
+
+    totals = state.get("totals") if isinstance(state.get("totals"), dict) else {}
+    cursed: list[tuple[str, int]] = []
+    for uid, count in claims.items():
+        raw_total = totals.get(uid, 0) if isinstance(totals, dict) else 0
+        if isinstance(raw_total, bool):
+            total = 0
+        else:
+            try:
+                total = int(raw_total)
+            except (TypeError, ValueError):
+                total = 0
+        if total <= 0:
+            cursed.append((uid, count))
+    if cursed:
+        cursed.sort(key=lambda item: (-item[1], int(item[0])))
+        bits = [f"{_public_name(uid, names)} ({count} grabs)" for uid, count in cursed[:5]]
+        lines.append("🪣 Cursed Bucket: " + ", ".join(bits) + " finished on 0.")
+    return lines
+
+
+def wrap_up_announcement_body(state: dict, names: dict | None = None, *, pumpkin_days: int) -> str:
+    """Final leaderboard. Plain names, no pings. Ties share a line. Short lists stay short."""
+    groups = _score_groups(state.get("totals") if isinstance(state, dict) else None)
+    if not groups:
+        return "Nobody found any candy. The ghosts kept the bowl."
+    lines: list[str] = []
+    winning_score, winners = groups[0]
+    if len(winners) == 1:
+        lines.append(
+            f"🥇 **Pumpkin God** — {_public_name(winners[0], names)} — **{winning_score}** candy"
+        )
+    else:
+        lines.append("🥇 **Pumpkin God** — it's a tie!")
+        for uid in winners:
+            lines.append(f"🎃 {_public_name(uid, names)} — **{winning_score}** candy")
+        lines.append(f"The crown goes to {_public_name(winners[0], names)}.")
+    honors = groups[1:5]
+    if honors:
+        lines.append("")
+        lines.append("Honorable mentions")
+        for index, (score, user_ids) in enumerate(honors):
+            title = HONOR_TITLES[index] if index < len(HONOR_TITLES) else "Honorable Mention"
+            for uid in user_ids:
+                lines.append(f"{title} — {_public_name(uid, names)} — **{score}** candy")
+    extras = wrap_up_superlatives(state if isinstance(state, dict) else {}, names)
+    if extras:
+        lines.append("")
+        lines.extend(extras)
+    reign = f"The Pumpkin God reigns for {pumpkin_days} days."
+    lines.append("")
+    lines.append(reign)
+    lines.append(WINNER_DECORATION_LINE)
+    return "\n".join(lines)
+
+
+def owner_decoration_dm(
+    *,
+    display_name: str,
+    username: str,
+    user_id: int,
+    candy: int,
+    dry_run: bool = False,
+) -> str:
+    """Owner reminder to gift the #1 winner a Discord Shop profile decoration."""
+    text = (
+        f"Display name: {display_name}\n"
+        f"Username: {username}\n"
+        f"User ID: {user_id}\n"
+        f"Candy: {candy}\n"
+        "Reminder: gift them a profile decoration from the Discord Shop."
+    )
+    if dry_run:
+        return f"[DRY RUN] {text}"
+    return text
+
+
 def build_winner_view(
     *,
-    top: list[tuple[str, int]],
+    top: list[tuple[str, int]] | None = None,
     drops_posted: int,
     claims_total: int,
     pumpkin_days: int,
     preview: bool = False,
     test: bool = False,
+    state: dict | None = None,
+    names: dict | None = None,
 ) -> discord.ui.LayoutView:
     view = discord.ui.LayoutView(timeout=CARD_TIMEOUT)
     container = discord.ui.Container(accent_colour=PUMPKIN_COLOUR)
@@ -2229,15 +3851,10 @@ def build_winner_view(
         _section(eyebrow, "### 🎃 The pumpkin bucket is empty", PUMPKIN_IMAGE, "Pumpkin")
     )
     container.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.large))
-    if not top:
-        body = "Nobody found any candy. The ghosts kept the bowl."
-    else:
-        lines = []
-        for index, (uid, total) in enumerate(top):
-            medal = MEDALS[index] if index < len(MEDALS) else "🍬"
-            lines.append(f"{medal} <@{uid}> — **{total}** candy")
-        reign = f"The Pumpkin God reigns for {pumpkin_days} days."
-        body = "\n".join(lines) + f"\n\n{reign}"
+    snapshot = dict(state) if isinstance(state, dict) else {}
+    if not snapshot.get("totals") and top:
+        snapshot["totals"] = {str(uid): int(total) for uid, total in top}
+    body = wrap_up_announcement_body(snapshot, names, pumpkin_days=pumpkin_days)
     container.add_item(discord.ui.TextDisplay(body))
     container.add_item(discord.ui.Separator())
     container.add_item(
@@ -2383,7 +4000,10 @@ class CandyHunt(Cog):
             f"active={len(self.store.state['active_drops'])} "
             f"next={self.store.state.get('next_drop_at') or 'none'} "
             f"disabled={str(bool(self.store.state['event_disabled'])).lower()} "
-            f"wrap_up_done={str(bool(self.store.state['wrap_up_done'])).lower()}"
+            f"wrap_up_done={str(bool(self.store.state['wrap_up_done'])).lower()} "
+            f"lights_out_done={str(bool(self.store.state.get('lights_out_done'))).lower()} "
+            f"night_shift_done={str(bool(self.store.state.get('night_shift_done'))).lower()} "
+            f"witching_hour_done={str(bool(self.store.state.get('witching_hour_done'))).lower()}"
         )
         # Snapshot the flag now. It is acted on after ready, then deleted.
         self._autostart = read_autostart(self.autostart_path)
@@ -2509,6 +4129,27 @@ class CandyHunt(Cog):
         finally:
             delete_flag_file(path)
 
+    def _kick_frenzy(self) -> bool:
+        """Run a tick right away when a frenzy round is due, instead of waiting for the 30s loop."""
+        frenzy = self.store.state.get("frenzy")
+        if not isinstance(frenzy, dict) or frenzy.get("batch") or getattr(self, "_frenzy_kick_pending", False):
+            return False
+        self._frenzy_kick_pending = True
+
+        async def _run() -> None:
+            try:
+                await asyncio.sleep(self.settings.frenzy_kick_delay)
+                await self.tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("candy frenzy kick failed")
+            finally:
+                self._frenzy_kick_pending = False
+
+        asyncio.get_running_loop().create_task(_run())
+        return True
+
     @tasks.loop(seconds=LOOP_SECONDS)
     async def candy_loop(self) -> None:
         try:
@@ -2524,7 +4165,11 @@ class CandyHunt(Cog):
         moment = now if now is not None else discord.utils.utcnow()
         await self.remove_pumpkin_god_if_due(moment)
         await self.expire_drops(moment)
+        await self.maybe_night_shift(moment)
+        await self.maybe_witching_hour(moment)
+        await self.maybe_lights_out(moment)
         await self.maybe_wrap_up(moment)
+        await self.maybe_announce_frenzy()
         await self.maybe_drop(moment)
         await self.maybe_test_session(moment)
 
@@ -2671,13 +4316,24 @@ class CandyHunt(Cog):
         dry_run: bool,
         now: datetime | None = None,
         expiry: timedelta | None = None,
+        extra: bool = False,
     ) -> dict:
         moment = now if now is not None else discord.utils.utcnow()
         lifetime = self.settings.drop_expiry if expiry is None else expiry
         expires = moment + lifetime
         async with self.store._lock:
             drop_id = new_drop_id({drop["drop_id"] for drop in self.store.state["active_drops"]})
-            record = make_drop(drop_id, channel.id, None, moment, expires, dry_run=dry_run)
+            candy_type = self.rng.choice(CANDY_TYPES).key
+            record = make_drop(
+                drop_id,
+                channel.id,
+                None,
+                moment,
+                expires,
+                dry_run=dry_run,
+                candy_type=candy_type,
+                extra=extra,
+            )
             self.store.state["active_drops"].append(record)
             bucket = self.store.state["test"] if dry_run else self.store.state
             bucket["drops_posted"] = int(bucket.get("drops_posted", 0)) + 1
@@ -2707,8 +4363,28 @@ class CandyHunt(Cog):
         )
         return record
 
+    async def maybe_announce_frenzy(self) -> None:
+        frenzy = self.store.state.get("frenzy")
+        if not isinstance(frenzy, dict) or frenzy.get("announced"):
+            return
+        async with self.store._lock:
+            frenzy["announced"] = True
+            self.store.save()
+        channel = self._cached_channel(self.settings.main_drop_channel_id)
+        if channel is None:
+            channel = await self._fetch_channel(self.settings.main_drop_channel_id)
+        if channel is None:
+            log.warning("candy frenzy banner skipped reason=no_channel")
+            return
+        try:
+            await channel.send(frenzy_banner(self.rng), allowed_mentions=discord.AllowedMentions.none())
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            log.warning("candy frenzy banner failed error=%s", type(exc).__name__)
+
     async def maybe_drop(self, now: datetime) -> None:
         if self.store.state.get("event_disabled") or self.store.state.get("wrap_up_done"):
+            return
+        if frenzy_batch_active(self.store.state):
             return
         start, end = window_bounds(self.settings)
         async with self.store._lock:
@@ -2740,18 +4416,78 @@ class CandyHunt(Cog):
                 _log_info("candy drop skipped reason=outside_window")
                 return
             self.store.state["next_drop_at"] = new_iso
+            frenzy_round = begin_frenzy_round(self.store.state, iso(now), self.settings)
             self.store.save()
+        # Scheduled real drops use the streak lifetime. Test sessions pass
+        # their own expiry and do not use this value.
+        lifetime = real_drop_lifetime(self.settings, streak, now)
+        count = frenzy_drop_count(
+            frenzy_round is not None,
+            roll_multi_drop_count(self.settings, now, self.rng),
+            self.settings,
+        )
+        if count > 1 and await self._post_multi_drop(count, now, lifetime):
+            return
         channel = self.choose_drop_channel(now)
         if channel is None:
             _log_info("candy drop skipped reason=no_channel")
             return
-        # Scheduled real drops use the streak lifetime. Test sessions pass
-        # their own expiry and do not use this value.
-        lifetime = real_drop_lifetime(self.settings, streak, now)
         try:
             await self.post_drop(channel, dry_run=False, now=now, expiry=lifetime)
         except (discord.Forbidden, discord.HTTPException) as exc:
             _log_info(f"candy drop failed channel={getattr(channel, 'id', None)} error={type(exc).__name__}")
+
+    def multi_drop_channels(self) -> tuple[discord.TextChannel | None, list[discord.TextChannel]]:
+        """Eligible #general plus the eligible named extra channels."""
+        guild = self._guild()
+        if guild is None:
+            return None, []
+        broad_roles = self._broad_roles(guild)
+        wanted = {name.casefold() for name in self.settings.multi_drop_channel_names}
+        main = None
+        extras: list[discord.TextChannel] = []
+        for channel in getattr(guild, "text_channels", []):
+            if not isinstance(channel, discord.TextChannel):
+                continue
+            is_main = channel.id == self.settings.main_drop_channel_id
+            if not is_main and str(channel.name).lower() not in wanted:
+                continue
+            if not is_eligible(self._channel_snapshot(guild, channel, broad_roles)):
+                continue
+            if is_main:
+                main = channel
+            else:
+                extras.append(channel)
+        return main, extras
+
+    async def _post_multi_drop(self, count: int, now: datetime, lifetime: timedelta) -> bool:
+        """Post a multi-drop. False means fall back to a normal single drop."""
+        main, extras = self.multi_drop_channels()
+        if main is None or not extras:
+            _log_info(f"candy multi-drop fallback count={count} main={main is not None} extras={len(extras)}")
+            return False
+        lookup = {channel.id: channel for channel in extras}
+        ids = pick_multi_drop_channels(main.id, lookup.keys(), count, self.rng)
+        extra_ids = ids[1:]
+        try:
+            await main.send(
+                multi_drop_banner(len(ids), extra_ids, self.rng),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            log.warning("candy multi-drop banner failed channel=%s error=%s", main.id, type(exc).__name__)
+        drop_ids: list[str] = []
+        for cid in ids:
+            channel = main if cid == main.id else lookup[cid]
+            try:
+                record = await self.post_drop(
+                    channel, dry_run=False, now=now, expiry=lifetime, extra=cid != main.id
+                )
+                drop_ids.append(record["drop_id"])
+            except (discord.Forbidden, discord.HTTPException) as exc:
+                _log_info(f"candy drop failed channel={cid} error={type(exc).__name__}")
+        _log_info(f"candy multi-drop count={len(ids)} channels={ids} drop_ids={drop_ids}")
+        return True
 
     async def handle_claim(self, interaction: discord.Interaction, drop_id: str) -> None:
         user = interaction.user
@@ -2762,7 +4498,7 @@ class CandyHunt(Cog):
             now,
             self.rng,
             is_bot=bool(getattr(user, "bot", False)),
-            trick_chance=self.settings.trick_chance,
+            trick_chance=trick_chance_at(self.settings, now),
             settings=self.settings,
         )
         if outcome.status == "bot":
@@ -2786,9 +4522,11 @@ class CandyHunt(Cog):
             f"amount={roll.amount if roll else 0} total={outcome.total} rank={outcome.rank} "
             f"dry_run={str(outcome.dry_run).lower()}"
         )
+        self._kick_frenzy()
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=True)
-        await self._cleanup_drop(outcome.drop, interaction)
+        text = claim_public_text(outcome, public_display_name(user))
+        await self._cleanup_drop(outcome.drop, interaction, claimed_text=text)
         await self._deliver_card(interaction, user, outcome)
 
     async def _deliver_card(self, interaction: discord.Interaction, user, outcome: ClaimOutcome) -> None:
@@ -2804,10 +4542,21 @@ class CandyHunt(Cog):
             return
         await interaction.followup.send("You got it. The candy card is in your DMs.", ephemeral=True)
 
-    async def _cleanup_drop(self, drop: dict | None, interaction: discord.Interaction | None = None) -> None:
+    async def _cleanup_drop(
+        self,
+        drop: dict | None,
+        interaction: discord.Interaction | None = None,
+        *,
+        claimed_text: str | None = None,
+    ) -> None:
         if drop is None:
             return
-        await self._delete_drop_message(drop, interaction)
+        if claimed_text is None:
+            await self._delete_drop_message(drop, interaction)
+        else:
+            edited = await self._edit_claimed_message(drop, interaction, claimed_text)
+            if not edited:
+                await self._delete_drop_message(drop, interaction)
         drop_id = drop.get("drop_id")
         if not drop_id:
             return
@@ -2816,6 +4565,30 @@ class CandyHunt(Cog):
                 item for item in self.store.state["active_drops"] if item.get("drop_id") != drop_id
             ]
             self.store.save()
+
+    async def _edit_claimed_message(
+        self,
+        drop: dict,
+        interaction: discord.Interaction | None,
+        text: str,
+    ) -> bool:
+        """Replace the live drop with a short buttonless claim. False falls back to delete."""
+        message = getattr(interaction, "message", None) if interaction is not None else None
+        edit = getattr(message, "edit", None)
+        if not callable(edit):
+            return False
+        try:
+            await edit(
+                view=build_claimed_drop_view(text),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return True
+        except Exception as exc:
+            _log_info(
+                f"candy drop edit failed channel={drop.get('channel_id')} "
+                f"drop={drop.get('drop_id')} error={type(exc).__name__}"
+            )
+            return False
 
     async def _delete_drop_message(self, drop: dict, interaction: discord.Interaction | None = None) -> bool:
         if interaction is not None and getattr(interaction, "message", None) is not None:
@@ -2867,12 +4640,150 @@ class CandyHunt(Cog):
             self.store.state["active_drops"] = keep
             if expired:
                 reset_streaks_for_expiry(self.store.state, expired)
+                live = {d.get("created_at") for d in keep if not d.get("dry_run")}
+                for batch in sorted({d.get("created_at") for d in expired if not d.get("dry_run")}):
+                    if batch not in live:
+                        on_batch_finished(self.store.state, batch, now, self.rng, self.settings, all_claimed=False)
             self.store.save()
+        if expired:
+            self._kick_frenzy()
         for drop in expired:
             await self._delete_drop_message(drop)
             _log_info(f"candy drop expired channel={drop.get('channel_id')} drop={drop.get('drop_id')}")
         for drop in finished:
             await self._delete_drop_message(drop)
+
+    def _text_channel_rows(self, guild) -> list[tuple[int, discord.TextChannel]]:
+        rows: list[tuple[int, discord.TextChannel]] = []
+        for channel in getattr(guild, "text_channels", []) or []:
+            if isinstance(channel, discord.TextChannel):
+                rows.append((int(channel.id), channel))
+        return rows
+
+    def _night_shift_mentions(self, guild) -> list[str]:
+        rows = self._text_channel_rows(guild)
+        by_id = {cid: channel for cid, channel in rows}
+        mentions: list[str] = []
+        main = by_id.get(int(self.settings.main_drop_channel_id))
+        if main is not None:
+            mentions.append(f"<#{main.id}>")
+        else:
+            mentions.extend(mentions_for_names([(cid, channel.name) for cid, channel in rows], ("general",)))
+        for mention in mentions_for_names(
+            [(cid, channel.name) for cid, channel in rows],
+            self.settings.multi_drop_channel_names,
+        ):
+            if mention not in mentions:
+                mentions.append(mention)
+        return mentions
+
+    def _main_drop_mention(self, guild) -> str:
+        rows = self._text_channel_rows(guild)
+        for cid, _channel in rows:
+            if cid == int(self.settings.main_drop_channel_id):
+                return f"<#{cid}>"
+        named = mentions_for_names([(cid, channel.name) for cid, channel in rows], ("general",))
+        if named:
+            return named[0]
+        return "#general"
+
+    async def _post_scheduled_announcement(
+        self,
+        now: datetime,
+        *,
+        due,
+        done_key: str,
+        label: str,
+        render,
+    ) -> None:
+        """Post one announcements-channel note. The done flag is saved before the send."""
+        if self.store.state.get("event_disabled") or self.store.state.get(done_key) is True:
+            return
+        if not due(self.settings, self.store.state, now):
+            return
+        guild = self._guild()
+        channel = self._announcement_channel(guild) if guild is not None else None
+        if channel is None:
+            _log_info(f"candy {label} skipped reason=no_announcement_channel")
+            return
+        async with self.store._lock:
+            if self.store.state.get(done_key) is True:
+                return
+            if not due(self.settings, self.store.state, now):
+                return
+            self.store.state[done_key] = True
+            self.store.save()
+        text = render(guild)
+        try:
+            await channel.send(text, allowed_mentions=discord.AllowedMentions.none())
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            _log_info(f"candy {label} failed channel={getattr(channel, 'id', None)} error={type(exc).__name__}")
+            return
+        _log_info(f"candy {label} posted channel={channel.id}")
+
+    async def maybe_night_shift(self, now: datetime) -> None:
+        """Post the 6 PM night-shift note once, in the wrap-up announcements channel."""
+        await self._post_scheduled_announcement(
+            now,
+            due=night_shift_due,
+            done_key="night_shift_done",
+            label="night shift",
+            render=lambda guild: night_shift_announcement(self._night_shift_mentions(guild), self.settings),
+        )
+
+    async def maybe_witching_hour(self, now: datetime) -> None:
+        """Post the 7:30 Witching Hour note once, in the wrap-up announcements channel."""
+        await self._post_scheduled_announcement(
+            now,
+            due=witching_hour_due,
+            done_key="witching_hour_done",
+            label="witching hour",
+            render=lambda guild: witching_hour_announcement(self._main_drop_mention(guild), self.settings),
+        )
+
+    async def _mark_lights_out_done(self) -> None:
+        async with self.store._lock:
+            if self.store.state.get("lights_out_done"):
+                return
+            self.store.state["lights_out_done"] = True
+            self.store.save()
+
+    async def maybe_lights_out(self, now: datetime) -> None:
+        """Post the 6 AM lights-out note once, in the same announcements channel as wrap-up."""
+        if self.store.state.get("event_disabled") or self.store.state.get("lights_out_done"):
+            return
+        # At or after wrap-up the finale is the crown, so close the flag and stay quiet.
+        if self.store.state.get("wrap_up_done") or as_utc(now) >= as_utc(self.settings.wrap_up_at):
+            await self._mark_lights_out_done()
+            return
+        if not lights_out_due(self.settings, self.store.state, now):
+            return
+        guild = self._guild()
+        channel = self._announcement_channel(guild) if guild is not None else None
+        if channel is None:
+            _log_info("candy lights out skipped reason=no_announcement_channel")
+            return
+        async with self.store._lock:
+            if self.store.state.get("lights_out_done"):
+                return
+            if self.store.state.get("wrap_up_done") or as_utc(now) >= as_utc(self.settings.wrap_up_at):
+                self.store.state["lights_out_done"] = True
+                self.store.save()
+                return
+            if not lights_out_due(self.settings, self.store.state, now):
+                return
+            # Persist before the send so a restart cannot post a second copy.
+            self.store.state["lights_out_done"] = True
+            self.store.save()
+        text = lights_out_banner(self.rng)
+        try:
+            await channel.send(text, allowed_mentions=discord.AllowedMentions.none())
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            _log_info(
+                f"candy lights out failed channel={getattr(channel, 'id', None)} error={type(exc).__name__}"
+            )
+            return
+        _log_info(f"candy lights out posted channel={channel.id}")
 
     async def maybe_wrap_up(self, now: datetime) -> None:
         if self.store.state.get("event_disabled"):
@@ -2922,12 +4833,20 @@ class CandyHunt(Cog):
                 drops_posted = int(bucket.get("drops_posted") or 0)
                 claims_total = int(bucket.get("claims_total") or 0)
             else:
+                bucket = self.store.state
                 totals = dict(self.store.state["totals"])
                 drops_posted = int(self.store.state.get("drops_posted") or 0)
                 claims_total = int(self.store.state.get("claims_total") or 0)
+            snapshot = {
+                "totals": dict(totals),
+                "claim_counts": dict(bucket.get("claim_counts") or {}),
+                "candy_types": copy.deepcopy(bucket.get("candy_types") or {}),
+            }
         top = podium(totals, 3)
         winner_id = int(top[0][0]) if top else None
+        winner_candy = int(top[0][1]) if top else 0
         days = max(1, int(self.settings.pumpkin_god_duration.total_seconds() // 86400))
+        names = await self._public_names(tally_user_ids(snapshot))
         view = build_winner_view(
             top=top,
             drops_posted=drops_posted,
@@ -2935,8 +4854,11 @@ class CandyHunt(Cog):
             pumpkin_days=days,
             preview=dry_run,
             test=test_tally,
+            state=snapshot,
+            names=names,
         )
         if dry_run:
+            await self._dm_decoration_reminder(winner_id, winner_candy, dry_run=True)
             return WrapResult("preview", view=view, winner_id=winner_id)
 
         guild = self._guild()
@@ -2962,7 +4884,7 @@ class CandyHunt(Cog):
                     self.store.save()
 
         try:
-            await channel.send(view=view)
+            await channel.send(view=view, allowed_mentions=discord.AllowedMentions.none())
         except (discord.Forbidden, discord.HTTPException) as exc:
             _log_info(f"candy wrapup failed channel={channel.id} error={type(exc).__name__}")
             async with self.store._lock:
@@ -2975,7 +4897,110 @@ class CandyHunt(Cog):
             f"winner={winner_id if winner_id is not None else 'none'} "
             f"drops={drops_posted} claims={claims_total}"
         )
+        await self._dm_decoration_reminder(winner_id, winner_candy, dry_run=False)
         return WrapResult("posted", view=view, winner_id=winner_id)
+
+    async def _dm_decoration_reminder(self, winner_id: int | None, candy: int, *, dry_run: bool) -> None:
+        """DM the owner to gift the decoration. Any failure is logged and swallowed."""
+        if winner_id is None:
+            return
+        try:
+            owner = await self._candy_owner_user()
+            if owner is None:
+                _log_info("candy wrapup owner dm failed error=owner_not_found")
+                return
+            display_name, username = await self._winner_labels(int(winner_id))
+            text = owner_decoration_dm(
+                display_name=display_name,
+                username=username,
+                user_id=int(winner_id),
+                candy=int(candy),
+                dry_run=dry_run,
+            )
+            await owner.send(text)
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            _log_info(f"candy wrapup owner dm failed error={type(exc).__name__}")
+        except Exception as exc:
+            _log_info(f"candy wrapup owner dm failed error={type(exc).__name__}")
+
+    async def _candy_owner_user(self):
+        """User for settings.owner_id, the same id !candyadmin treats as the owner."""
+        owner_id = _candy_owner_id(self.settings)
+        getter = getattr(self.bot, "get_user", None)
+        if callable(getter):
+            try:
+                found = getter(owner_id)
+            except Exception:
+                found = None
+            if found is not None:
+                return found
+        fetcher = getattr(self.bot, "fetch_user", None)
+        if not callable(fetcher):
+            return None
+        try:
+            return await fetcher(owner_id)
+        except discord.NotFound:
+            return None
+
+    async def _public_names(self, user_ids: list[int]) -> dict[str, str]:
+        """Plain display names for the wrap-up. Failures fall back to the id."""
+        names: dict[str, str] = {}
+        for user_id in user_ids:
+            try:
+                display, _username = await self._winner_labels(int(user_id))
+            except Exception:
+                display = str(user_id)
+            names[str(int(user_id))] = display
+        return names
+
+    async def _winner_labels(self, user_id: int) -> tuple[str, str]:
+        user = None
+        try:
+            user = await self._lookup_user(user_id)
+        except Exception:
+            user = None
+        display = getattr(user, "display_name", None) if user is not None else None
+        username = getattr(user, "name", None) if user is not None else None
+        if not isinstance(display, str) or not display.strip():
+            display = str(user_id)
+        if not isinstance(username, str) or not username.strip():
+            username = str(user_id)
+        return display.strip(), username.strip()
+
+    async def _lookup_user(self, user_id: int):
+        guild = self._guild()
+        if guild is not None:
+            getter = getattr(guild, "get_member", None)
+            if callable(getter):
+                try:
+                    member = getter(int(user_id))
+                except Exception:
+                    member = None
+                if member is not None:
+                    return member
+            fetcher = getattr(guild, "fetch_member", None)
+            if callable(fetcher):
+                try:
+                    member = await fetcher(int(user_id))
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    member = None
+                if member is not None:
+                    return member
+        getter = getattr(self.bot, "get_user", None)
+        if callable(getter):
+            try:
+                user = getter(int(user_id))
+            except Exception:
+                user = None
+            if user is not None:
+                return user
+        fetcher = getattr(self.bot, "fetch_user", None)
+        if not callable(fetcher):
+            return None
+        try:
+            return await fetcher(int(user_id))
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            return None
 
     async def _grant_pumpkin_god(self, guild, user_id: int, now: datetime) -> dict | None:
         name = self.settings.pumpkin_god_role_name
@@ -3205,11 +5230,22 @@ class CandyHunt(Cog):
     @app_commands.guilds(*CANDY_GUILD_IDS)
     @app_commands.guild_only()
     async def candy(self, interaction: discord.Interaction) -> None:
+        user_id = interaction.user.id
         if interaction.guild_id == self.settings.guild_id:
-            view = build_leaderboard_view(self.store.state["totals"], interaction.user.id)
+            bucket = self.store.state
+            view = build_leaderboard_view(
+                bucket["totals"],
+                user_id,
+                type_counts=_user_candy_counts(bucket, user_id),
+            )
         elif interaction.guild_id == SUPPORT_GUILD_ID:
-            totals = (self.store.state.get("test") or {}).get("totals") or {}
-            view = build_leaderboard_view(totals, interaction.user.id, test=True)
+            bucket = self.store.state.get("test") or {}
+            view = build_leaderboard_view(
+                bucket.get("totals") or {},
+                user_id,
+                test=True,
+                type_counts=_user_candy_counts(bucket, user_id),
+            )
         else:
             await interaction.response.send_message(
                 "The candy hunt is only running in Menaces to Sobriety.",
@@ -3221,10 +5257,130 @@ class CandyHunt(Cog):
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
+    def _cleanup_channels(self, guild) -> list:
+        """Drop channels in this guild, never #announcements."""
+        announce_id = self.settings.announcement_channel_id
+        found = []
+        for channel in getattr(guild, "text_channels", []) or []:
+            if not isinstance(channel, discord.TextChannel):
+                continue
+            name = str(getattr(channel, "name", "") or "")
+            if not is_drop_channel(channel.id, name, self.settings):
+                continue
+            if cleanup_skip_channel(channel.id, name, announcement_channel_id=announce_id):
+                continue
+            found.append(channel)
+        found.sort(key=lambda channel: int(channel.id))
+        return found
+
+    async def _cleanup_matches(self, channel, bot_id: int, stored_ids: set[int], after: datetime) -> tuple[list, str]:
+        """Bot candy-hunt messages after `after`, plus stored ids in this channel."""
+        matched = []
+        seen: set[int] = set()
+        try:
+            history = channel.history(limit=None, after=after, oldest_first=True)
+            async for message in history:
+                author_id = getattr(getattr(message, "author", None), "id", None)
+                if author_id != bot_id:
+                    continue
+                if not is_candy_hunt_message(getattr(message, "content", None), message):
+                    continue
+                message_id = getattr(message, "id", None)
+                if isinstance(message_id, int):
+                    if message_id in seen:
+                        continue
+                    seen.add(message_id)
+                matched.append(message)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _log_info(
+                f"candy cleanup history failed channel={getattr(channel, 'id', None)} error={type(exc).__name__}"
+            )
+            return matched, "could not read history"
+        for message_id in sorted(stored_ids):
+            if message_id in seen:
+                continue
+            fetcher = getattr(channel, "fetch_message", None)
+            if not callable(fetcher):
+                continue
+            try:
+                message = await fetcher(int(message_id))
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                continue
+            except Exception as exc:
+                _log_info(
+                    f"candy cleanup fetch failed channel={getattr(channel, 'id', None)} "
+                    f"message={message_id} error={type(exc).__name__}"
+                )
+                continue
+            author_id = getattr(getattr(message, "author", None), "id", None)
+            if author_id != bot_id:
+                continue
+            seen.add(message_id)
+            matched.append(message)
+        return matched, ""
+
+    async def cleanup_candy_messages(self, *, dry_run: bool) -> list[tuple[str, int, int, str]]:
+        """Count or delete this bot's candy-hunt spam in the drop channels."""
+        user = getattr(self.bot, "user", None)
+        bot_id = getattr(user, "id", None)
+        if not isinstance(bot_id, int):
+            return []
+        guild = self._guild()
+        if guild is None:
+            return []
+        start, _end = window_bounds(self.settings)
+        after = as_utc(start) - timedelta(seconds=1)
+        stored: dict[int, set[int]] = {}
+        for channel_id, message_id in stored_candy_message_refs(self.store.state):
+            stored.setdefault(channel_id, set()).add(message_id)
+        rows: list[tuple[str, int, int, str]] = []
+        for channel in self._cleanup_channels(guild):
+            label = f"#{channel.name} ({channel.id})"
+            matched, note = await self._cleanup_matches(
+                channel,
+                bot_id,
+                stored.get(int(channel.id), set()),
+                after,
+            )
+            deleted = 0
+            if note or dry_run:
+                rows.append((label, len(matched), 0, note))
+                _log_info(
+                    f"candy cleanup dry_run={str(dry_run).lower()} channel={channel.id} "
+                    f"matched={len(matched)} deleted=0 note={note or 'ok'}"
+                )
+                continue
+            for index, message in enumerate(matched):
+                if index:
+                    await asyncio.sleep(CLEANUP_DELETE_PAUSE)
+                try:
+                    await message.delete()
+                    deleted += 1
+                except discord.NotFound:
+                    deleted += 1
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    _log_info(
+                        f"candy cleanup delete failed channel={channel.id} "
+                        f"message={getattr(message, 'id', None)} error={type(exc).__name__}"
+                    )
+            rows.append((label, len(matched), deleted, ""))
+            _log_info(
+                f"candy cleanup dry_run=false channel={channel.id} matched={len(matched)} deleted={deleted}"
+            )
+        return rows
+
     async def _admin_reply(self, ctx, content: str | None = None, *, view=None) -> None:
         if view is not None:
             # Components v2 rejects a content body. The preview card already says PREVIEW.
-            await ctx.reply(view=view, mention_author=False)
+            await ctx.reply(
+                view=view,
+                mention_author=False,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
             return
         await ctx.reply(content, mention_author=False)
 
@@ -3410,6 +5566,33 @@ class CandyHunt(Cog):
             ctx,
             "Wrap-up did not post. I couldn't find Menaces to Sobriety or its announcements channel.",
         )
+
+    @candyadmin.command(name="cleanup", hidden=True)
+    @_candyadmin_check
+    async def admin_cleanup(self, ctx: commands.Context, dry_run: str | None = None) -> None:
+        """Count or delete this bot's candy-hunt messages in the drop channels.
+
+        True (the default) only counts. False deletes, with a pause between
+        deletes. Announcements are never touched. Menaces to Sobriety only.
+        """
+        if not await _candyadmin_allowed(ctx):
+            return
+        preview = _parse_dry_run(dry_run)
+        if preview is None:
+            await self._admin_reply(ctx, CANDYADMIN_CLEANUP_USAGE)
+            return
+        guild_id = getattr(getattr(ctx, "guild", None), "id", None)
+        if guild_id != self.settings.guild_id:
+            await self._admin_reply(
+                ctx,
+                "Cleanup only runs in Menaces to Sobriety. It will not delete messages here.",
+            )
+            return
+        if getattr(getattr(self.bot, "user", None), "id", None) is None:
+            await self._admin_reply(ctx, "I can't see my own user yet, so I didn't delete anything.")
+            return
+        rows = await self.cleanup_candy_messages(dry_run=preview)
+        await self._admin_reply(ctx, format_cleanup_report(rows, dry_run=preview))
 
 
 async def setup(bot: commands.Bot) -> None:

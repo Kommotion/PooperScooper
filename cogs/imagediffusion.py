@@ -1,8 +1,11 @@
 import asyncio
 import functools
 from io import BytesIO
+import random
+import re
 import time
 import typing
+import unicodedata
 from typing import Literal, Optional
 import discord
 import logging
@@ -11,6 +14,17 @@ from discord.ext import commands, tasks
 from discord.ext.commands import Cog
 from discord import app_commands, ui
 from cogs.utils.constants import *
+from cogs.utils.identity_edit import (
+    AVATAR_EDIT_SIZE,
+    HALLOWEEN_FRAMES,
+    apply_halloween_frame,
+    build_identity_edit_creation,
+    enqueue_identity_edit,
+    identity_edit_output_size,
+    normalize_halloween_frame,
+    resolve_identity_edit_source,
+    static_png_avatar,
+)
 from cogs.utils.image_models import (
     Models,
     NsfwLevel,
@@ -39,15 +53,52 @@ PROMPT_PREVIEW_MAX_CHARS = 160
 DISCORD_EMBED_FIELD_MAX = 1024
 
 
-# Fixed instruction for /halloweenify. Callers cannot change it.
-HALLOWEENIFY_PROMPT = (
-    "Transform this into a spooky Halloween version: give the subject a fun Halloween costume "
-    "and face paint, glowing jack-o'-lanterns, bats, a full moon, and purple-orange night lighting. "
-    "Keep the same subject, identity, pose, and composition, recognizable and fun, not gory."
+# Guardrails shared by every /halloweenify costume. The costume line is appended.
+HALLOWEENIFY_BASE_PROMPT = (
+    "Transform this into a spooky Halloween version of the same picture. "
+    "Keep the same subject, identity, face, pose, and composition, recognizable and fun. "
+    "Use Halloween night lighting with glowing jack-o'-lanterns, bats, and a full moon. "
+    "Not gory, no blood, no nudity."
 )
-HALLOWEENIFY_SIZE = 1024
-# Shipped off so /halloweenify is not on the app command tree and no sync can publish it.
-HALLOWEENIFY_ENABLED = False
+# One instruction for every costume and every AI edit. Appended to the built prompt.
+# The edit must stay the original picture plus a Halloween element.
+HALLOWEENIFY_STYLE_PRESERVATION = (
+    "Edit the original image in place and preserve its art style exactly: "
+    "anime stays anime, cartoon stays cartoon, pixel art stays pixel art, and a photo stays a photo. "
+    "Keep the same character identity, face, pose, composition, framing, and color palette. "
+    "Add only the Halloween element on top of this same picture. Do not generate a new picture."
+)
+# Krea 2 Identity Edit samples an empty latent, so KSampler denoise does not keep
+# the source (lowering it would keep empty-latent noise). The fidelity dial is
+# ref_boost: higher clings harder to the original. The workflow default is 4.
+# 6 is more conservative for every costume and stays under the over-copy cliff near 10.
+HALLOWEENIFY_EDIT_STRENGTH = 6.0
+# Older name for the guardrail text. The full job prompt is build_halloweenify_prompt().
+HALLOWEENIFY_PROMPT = HALLOWEENIFY_BASE_PROMPT
+HALLOWEENIFY_SIZE = AVATAR_EDIT_SIZE
+HALLOWEENIFY_DETAILS_MAX = 200
+HALLOWEENIFY_AVATAR_FILENAME = "halloweenify_avatar.png"
+# Shipped on so /halloweenify is on the app command tree and a sync can publish it.
+# No date cutoff: set this to False to hide the command. Nothing else in code has to change.
+HALLOWEENIFY_ENABLED = True
+QUEUE_FULL_MESSAGE = "The image queue is full right now, try again in a minute."
+
+# Costume key -> sentence appended to the base prompt. "random" is not a costume.
+HALLOWEENIFY_COSTUMES = {
+    "vampire": "an elegant vampire with a high-collared cape, pale makeup, and small fangs",
+    "witch": "a classic witch with a pointed hat, dark cloak, and a broom",
+    "skeleton": "a skeleton costume with bone-white face paint and a black suit",
+    "zombie": "a friendly zombie with pale green makeup, messy hair, and torn clothes",
+    "pumpkin king": "a pumpkin king with a carved jack-o'-lantern crown, a regal cape, and candlelight",
+    "werewolf": "a werewolf with furred ears, a moonlit cloak, and light facial fur",
+    "ghost": "a friendly ghost in a flowing white sheet with a soft glow",
+}
+HALLOWEENIFY_PRESET_ORDER = tuple(HALLOWEENIFY_COSTUMES)
+_MENTION_RE = re.compile(
+    r"<@!?\d+>|<@&\d+>|<#\d+>|(?<!\w)@(?:everyone|here)\b",
+    re.IGNORECASE,
+)
+_WORD_BOUNDARY_SLACK = 40
 
 
 def app_commands_for_tree(commands):
@@ -61,36 +112,126 @@ def app_commands_for_tree(commands):
     return [command for command in commands if getattr(command, "name", None) != "halloweenify"]
 
 
-def static_png_avatar(asset):
-    """1024px PNG of a display avatar. Animated avatars use the static frame.
+def halloweenify_preset_label(preset: str) -> str:
+    """Display name for a costume key, e.g. ``pumpkin king`` -> ``Pumpkin King``."""
+    return " ".join(part.capitalize() for part in str(preset).split())
 
-    ``replace(static_format=...)`` leaves an animated asset on its gif URL.
-    ``format='png'`` asks Discord for the first frame.
+
+def _normalize_halloween_preset(preset) -> str:
+    """Return a costume key or ``random``. Raise ValueError when it is unknown."""
+    key = "random" if preset is None else str(preset).strip().lower()
+    if key in {"", "random"}:
+        return "random"
+    if key not in HALLOWEENIFY_COSTUMES:
+        raise ValueError(f"unknown halloween costume: {preset}")
+    return key
+
+
+def sanitize_halloween_details(text: str | None) -> str:
+    """Clean optional /halloweenify details. Empty means the line is omitted.
+
+    Strips Discord mentions, drops control characters, collapses whitespace,
+    and caps the result at 200 characters, on a word boundary when one is close.
     """
-    if asset.is_animated():
-        return asset.replace(size=HALLOWEENIFY_SIZE, format="png")
-    return asset.replace(size=HALLOWEENIFY_SIZE, static_format="png")
+    if text is None:
+        return ""
+    cleaned = _MENTION_RE.sub(" ", str(text))
+    cleaned = "".join(" " if unicodedata.category(ch) == "Cc" else ch for ch in cleaned)
+    cleaned = " ".join(cleaned.split())
+    if len(cleaned) <= HALLOWEENIFY_DETAILS_MAX:
+        return cleaned
+    window = cleaned[:HALLOWEENIFY_DETAILS_MAX]
+    space = window.rfind(" ")
+    if space >= 0 and (HALLOWEENIFY_DETAILS_MAX - space) <= _WORD_BOUNDARY_SLACK:
+        window = window[:space]
+    return window.rstrip()
 
 
-def build_halloweenify_image(source_bytes: bytes, interaction) -> ImageCreation:
-    """Identity-edit job for the caller's own avatar. No user-supplied prompt."""
+def build_halloweenify_prompt(preset, details=None, rng=None) -> tuple[str, str]:
+    """Return ``(resolved_preset, prompt)`` for a halloweenify job.
+
+    ``preset`` is a costume key or ``random``. ``random`` picks one of the seven
+    costumes. Pass ``rng`` (a ``random.Random``) to make that pick repeatable.
+    Sanitized ``details`` are appended as ``Extra details: ...`` when anything
+    is left after cleaning. ``HALLOWEENIFY_STYLE_PRESERVATION`` is always
+    appended so every costume is an edit of the original picture.
+    """
+    key = _normalize_halloween_preset(preset)
+    if key == "random":
+        chooser = rng if rng is not None else random
+        key = chooser.choice(HALLOWEENIFY_PRESET_ORDER)
+    description = HALLOWEENIFY_COSTUMES[key]
+    prompt = f"{HALLOWEENIFY_BASE_PROMPT} Costume: {description}."
+    extra = sanitize_halloween_details(details)
+    if extra:
+        prompt = f"{prompt} Extra details: {extra}"
+    return key, f"{prompt} {HALLOWEENIFY_STYLE_PRESERVATION}"
+
+
+def build_halloweenify_image(
+    source_bytes: bytes,
+    interaction,
+    preset: str = "random",
+    details: str | None = None,
+    rng=None,
+    *,
+    filename: str = HALLOWEENIFY_AVATAR_FILENAME,
+    width: int = HALLOWEENIFY_SIZE,
+    height: int = HALLOWEENIFY_SIZE,
+    frame: str | None = None,
+) -> ImageCreation:
+    """Identity-edit job. ``preset`` is resolved once and stored on the image."""
     if not source_bytes:
         raise ValueError("halloweenify requires the caller's avatar bytes")
-    return ImageCreation(
-        HALLOWEENIFY_PROMPT,
-        Models.KREA2_IDENTITY_EDIT,
-        interaction=interaction,
-        negative_prompt="",
-        use_default_negative=False,
-        use_default_positive=False,
-        nsfw=NsfwLevel.NOT_SPECIFIED,
-        llm_prompt_enhance=False,
-        source_image_bytes=source_bytes,
-        source_image_filename="halloweenify_avatar.png",
-        edit_width=HALLOWEENIFY_SIZE,
-        edit_height=HALLOWEENIFY_SIZE,
+    resolved, prompt = build_halloweenify_prompt(preset, details, rng=rng)
+    label = halloweenify_preset_label(resolved)
+    creation = build_identity_edit_creation(
+        (source_bytes, filename, width, height),
+        interaction,
+        prompt,
+        caption_label=f"**Halloweenify** ({label})",
         retain_source=True,
+        preset=label,
+        details=sanitize_halloween_details(details),
+        edit_strength=HALLOWEENIFY_EDIT_STRENGTH,
     )
+    creation.halloween_frame = frame or ""
+    return creation
+
+
+def _png_file(data: bytes, filename: str) -> discord.File:
+    """A PNG attachment. Non-PNG bytes are re-encoded so the name matches the file."""
+    buffer = BytesIO()
+    try:
+        with PILImage.open(BytesIO(data)) as image:
+            image.convert("RGBA").save(buffer, format="PNG")
+    except Exception:
+        buffer = BytesIO(data)
+    buffer.seek(0)
+    return discord.File(buffer, filename=filename)
+
+
+def halloweenify_result_files(
+    source_bytes: bytes | None,
+    result: PILImage.Image,
+    frame: str | None = None,
+) -> list[discord.File]:
+    """Original first, then the framed result. ``frame`` is drawn on the result only."""
+    image = result
+    if frame:
+        try:
+            image = apply_halloween_frame(result, frame)
+        except Exception:
+            log.warning("Could not draw Halloween frame %s", frame, exc_info=True)
+            image = result
+    files: list[discord.File] = []
+    if source_bytes:
+        files.append(_png_file(source_bytes, "original.png"))
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    buffer.seek(0)
+    files.append(discord.File(buffer, filename="halloweenified.png"))
+    return files
 
 
 def release_source_bytes(image: ImageCreation) -> None:
@@ -101,11 +242,60 @@ def release_source_bytes(image: ImageCreation) -> None:
 
 def generation_caption(image: ImageCreation, preview: str) -> str:
     mention = image.interaction.user.mention
+    label = getattr(image, "caption_label", "") or ""
+    if label:
+        return f"{label} — {mention}"
     if image.model == Models.KREA2_IDENTITY_EDIT and image.retain_source:
         return f"**Halloweenify** — {mention}"
     if image.model == Models.KREA2_IDENTITY_EDIT:
         return f"**Edit:** {preview} — `{image.model}` — {mention}"
     return f"**{preview} — `{image.model}` — {mention}**"
+
+
+async def _send_ephemeral(interaction, message: str) -> None:
+    response = getattr(interaction, "response", None)
+    if response is None:
+        return
+    is_done = getattr(response, "is_done", None)
+    if callable(is_done) and is_done():
+        return
+    await response.send_message(message, ephemeral=True)
+
+
+async def _send_frame_only(interaction, data: bytes, frame_key: str) -> None:
+    """Draw a local frame on the caller's image and send both files. No AI."""
+    try:
+        with PILImage.open(BytesIO(data)) as image:
+            files = halloweenify_result_files(data, image, frame=frame_key)
+    except Exception:
+        log.warning("Could not draw a frame-only halloweenify", exc_info=True)
+        await _send_ephemeral(
+            interaction,
+            "Could not read that image. Attach a PNG, JPG, WEBP, or GIF.",
+        )
+        return
+    label = HALLOWEEN_FRAMES.get(frame_key, frame_key)
+    try:
+        await interaction.response.send_message(
+            content=f"**Halloweenify** ({label})",
+            files=files,
+        )
+    finally:
+        for item in files:
+            item.close()
+
+
+HALLOWEENIFY_COSTUME_CHOICES = [
+    app_commands.Choice(name="None (frame only)", value="none"),
+    app_commands.Choice(name="Random", value="random"),
+    *[
+        app_commands.Choice(name=halloweenify_preset_label(key), value=key)
+        for key in HALLOWEENIFY_PRESET_ORDER
+    ],
+]
+HALLOWEEN_FRAME_CHOICES = [
+    app_commands.Choice(name=label, value=key) for key, label in HALLOWEEN_FRAMES.items()
+]
 
 
 def _preview_prompt(text: str, max_chars: int = PROMPT_PREVIEW_MAX_CHARS) -> str:
@@ -409,6 +599,11 @@ class PromptDetailButton(ui.View):
         self.edit_width = image.edit_width
         self.edit_height = image.edit_height
         self.retain_source = bool(getattr(image, "retain_source", False))
+        self.caption_label = getattr(image, "caption_label", "") or ""
+        self.prompt_preset = getattr(image, "prompt_preset", "") or ""
+        self.prompt_details = getattr(image, "prompt_details", "") or ""
+        self.halloween_frame = getattr(image, "halloween_frame", "") or ""
+        self.edit_strength = getattr(image, "edit_strength", None)
         self.author_id = author_id
         self.gen_time = gen_time
         self.guild_id = guild_id
@@ -434,6 +629,10 @@ class PromptDetailButton(ui.View):
             color=discord.Color.blurple()
         )
 
+        if self.prompt_preset:
+            embed.add_field(name="Costume", value=self.prompt_preset, inline=False)
+        if self.prompt_details:
+            embed.add_field(name="Extra details", value=self.prompt_details, inline=False)
         _add_long_embed_field(embed, "User Prompt", self.user_prompt)
         _add_long_embed_field(embed, "Positive Prompt", self.positive)
         _add_long_embed_field(embed, "Negative Prompt", self.negative or "None")
@@ -524,6 +723,11 @@ class PromptDetailButton(ui.View):
             edit_width=self.edit_width,
             edit_height=self.edit_height,
             retain_source=self.retain_source,
+            caption_label=self.caption_label,
+            prompt_preset=self.prompt_preset,
+            prompt_details=self.prompt_details,
+            halloween_frame=self.halloween_frame,
+            edit_strength=self.edit_strength,
         )
 
         cog = interaction.client.get_cog("ImageDiffusion")
@@ -782,15 +986,7 @@ class ImageDiffusion(Cog):
             with PILImage.open(BytesIO(source_bytes)) as im:
                 sw, sh = im.size
             if sw > 0 and sh > 0:
-                target_mp = 1_048_576  # ~1MP
-                scale = (target_mp / (sw * sh)) ** 0.5
-                edit_w = max(64, int(sw * scale) // 64 * 64)
-                edit_h = max(64, int(sh * scale) // 64 * 64)
-                # Cap ~2MP training range
-                if edit_w * edit_h > 2_000_000:
-                    scale2 = (2_000_000 / (edit_w * edit_h)) ** 0.5
-                    edit_w = max(64, int(edit_w * scale2) // 64 * 64)
-                    edit_h = max(64, int(edit_h * scale2) // 64 * 64)
+                edit_w, edit_h = identity_edit_output_size(sw, sh)
         except Exception:
             log.warning("Could not parse source image size; using 1024x1024")
 
@@ -833,46 +1029,99 @@ class ImageDiffusion(Cog):
 
     @app_commands.command(
         name="halloweenify",
-        description="Turn your own avatar into a Halloween version.",
+        description="Add a Halloween frame, or edit your picture into a costume.",
     )
+    @app_commands.describe(
+        frame="Border drawn on your picture: pumpkin, vines, bats, candy corn, or orange and black.",
+        costume="Costume to apply. None, the default, adds only a frame. Random picks one.",
+        details="Optional extra details. Mentions are removed. Max 200 characters.",
+        image="Optional PNG, JPG, WEBP, or GIF to use instead of your avatar.",
+    )
+    @app_commands.choices(frame=HALLOWEEN_FRAME_CHOICES, costume=HALLOWEENIFY_COSTUME_CHOICES)
     @app_commands.guild_only()
-    async def halloweenify(self, interaction: discord.Interaction) -> None:
-        """Restyle the caller's display avatar. There is no target and no prompt option."""
+    async def halloweenify(
+        self,
+        interaction: discord.Interaction,
+        frame: Optional[str] = None,
+        costume: str = "none",
+        details: Optional[str] = None,
+        image: Optional[discord.Attachment] = None,
+    ) -> None:
+        """Frame the caller's picture, or identity-edit a costume onto it.
+
+        Omitting the costume adds only a local frame and does not call the AI.
+        No other member's avatar is used.
+        """
         guild_id = getattr(interaction, "guild_id", None)
         channel_id = getattr(interaction, "channel_id", None)
         if guild_id is None or channel_id is None or not self._is_allowed_channel(guild_id, channel_id):
-            await interaction.response.send_message(
-                "This command is not allowed in this channel!",
-                ephemeral=True,
-            )
+            await _send_ephemeral(interaction, "This command is not allowed in this channel!")
             return
 
-        user = interaction.user
         try:
-            asset = static_png_avatar(user.display_avatar)
-            source_bytes = await asset.read()
-        except Exception:
-            log.exception(
-                "Failed to fetch avatar for halloweenify user=%s",
-                getattr(user, "id", None),
+            frame_key = normalize_halloween_frame(frame)
+        except ValueError:
+            await _send_ephemeral(
+                interaction,
+                "Unknown frame. Choose a pumpkin border, spooky vines, bats, candy corn, or orange and black.",
             )
-            source_bytes = b""
-
-        if not source_bytes:
-            if not interaction.response.is_done():
-                await interaction.response.send_message(
-                    "I couldn't fetch your avatar, so nothing was queued.",
-                    ephemeral=True,
-                )
             return
 
-        image_entry = build_halloweenify_image(source_bytes, interaction)
-        if await self.enqueue_image(
-            image_entry,
+        costume_key = "none" if costume is None else str(costume).strip().lower()
+        if not costume_key:
+            costume_key = "none"
+        if costume_key == "none":
+            if frame_key is None:
+                await _send_ephemeral(interaction, "Pick a frame to use without a costume.")
+                return
+        else:
+            try:
+                _normalize_halloween_preset(costume_key)
+            except ValueError:
+                names = ", ".join((*HALLOWEENIFY_PRESET_ORDER, "random", "none"))
+                await _send_ephemeral(interaction, f"Unknown costume. Choose one of: {names}.")
+                return
+
+        source = await resolve_identity_edit_source(
             interaction,
-            queued_message="Queued a Halloween version of your avatar (1024×1024).",
-        ):
-            log.info("Queued halloweenify for user=%s", getattr(user, "id", None))
+            image,
+            avatar_filename=HALLOWEENIFY_AVATAR_FILENAME,
+            avatar_size=HALLOWEENIFY_SIZE,
+        )
+        if isinstance(source, str):
+            await _send_ephemeral(interaction, source)
+            return
+
+        data, filename, width, height = source
+        if costume_key == "none":
+            await _send_frame_only(interaction, data, frame_key)
+            return
+
+        image_entry = build_halloweenify_image(
+            data,
+            interaction,
+            costume,
+            details,
+            filename=filename,
+            width=width,
+            height=height,
+            frame=frame_key,
+        )
+        subject = "avatar" if image is None else "image"
+        queued_message = (
+            f"Queued a Halloween version of your {subject} "
+            f"({image_entry.edit_width}×{image_entry.edit_height})."
+        )
+        if await enqueue_identity_edit(self, interaction, image_entry, queued_message):
+            log.info(
+                "Queued halloweenify for user=%s preset=%s size=%sx%s attachment=%s frame=%s",
+                getattr(interaction.user, "id", None),
+                image_entry.prompt_preset,
+                image_entry.edit_width,
+                image_entry.edit_height,
+                image is not None,
+                frame_key or "none",
+            )
 
     async def enqueue_image(
         self,
@@ -898,7 +1147,7 @@ class ImageDiffusion(Cog):
 
         if self.image_queue.full():
             await interaction.response.send_message(
-                "Queue is full! Please wait and try again.",
+                QUEUE_FULL_MESSAGE,
                 ephemeral=ephemeral,
             )
             return False
@@ -1037,15 +1286,26 @@ class ImageDiffusion(Cog):
             return
 
         img = output.images[0]
-        buffer = BytesIO()
-        img.save(buffer, format="PNG")
-        buffer.seek(0)
-        file = discord.File(buffer, filename="generated.png")
         author_id = image.interaction.user.id
 
         # Privacy: drop uploaded Identity Edit bytes once the result is in memory.
         # Halloweenify sets retain_source so Regenerate can reuse the caller's avatar.
         release_source_bytes(image)
+
+        result_files: list[discord.File] = []
+        single_file: discord.File | None = None
+        single_buffer: BytesIO | None = None
+        if image.retain_source:
+            result_files = halloweenify_result_files(
+                image.source_image_bytes,
+                img,
+                getattr(image, "halloween_frame", "") or None,
+            )
+        else:
+            single_buffer = BytesIO()
+            img.save(single_buffer, format="PNG")
+            single_buffer.seek(0)
+            single_file = discord.File(single_buffer, filename="generated.png")
 
         prompt_details = PromptDetailButton(
             user_prompt=image.prompt,
@@ -1067,22 +1327,32 @@ class ImageDiffusion(Cog):
             content += "\n-# Full prompt in **See prompt details**"
 
         try:
-            prompt_details.message = await image.interaction.channel.send(
-                content=content,
-                file=file,
-                view=prompt_details,
-                allowed_mentions=discord.AllowedMentions(users=True, replied_user=True)
-            )
+            send_kwargs = {
+                "content": content,
+                "view": prompt_details,
+                "allowed_mentions": discord.AllowedMentions(users=True, replied_user=True),
+            }
+            if result_files:
+                send_kwargs["files"] = result_files
+            else:
+                send_kwargs["file"] = single_file
+            prompt_details.message = await image.interaction.channel.send(**send_kwargs)
         except Exception as e:
             log.error(f"Error: {e}")
             await image.interaction.channel.send(content=f"Some error occurred while image generation:\n{e}",
                                                   allowed_mentions=discord.AllowedMentions(users=True))
         finally:
             # Drop large buffers once Discord has the file (or send failed).
-            try:
-                buffer.close()
-            except Exception:
-                pass
+            for item in result_files:
+                try:
+                    item.close()
+                except Exception:
+                    pass
+            if single_buffer is not None:
+                try:
+                    single_buffer.close()
+                except Exception:
+                    pass
             del img
             del output
 

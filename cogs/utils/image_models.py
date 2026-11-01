@@ -136,6 +136,11 @@ class ImageCreation:
         edit_width: int = 1024,
         edit_height: int = 1024,
         retain_source: bool = False,
+        caption_label: str = "",
+        prompt_preset: str = "",
+        prompt_details: str = "",
+        halloween_frame: str = "",
+        edit_strength: Optional[float] = None,
     ):
         self.interaction: discord.Interaction = interaction
         self.negative_prompt = negative_prompt
@@ -155,6 +160,18 @@ class ImageCreation:
         # Identity Edit drops the upload after the result is built. Halloweenify keeps
         # the caller's avatar bytes so the result view can regenerate.
         self.retain_source: bool = bool(retain_source)
+        # Public caption prefix, e.g. "**Halloweenify** (Vampire)". Empty uses the
+        # model-based caption in the cog.
+        self.caption_label: str = caption_label or ""
+        # Prompt-details button. Empty for a plain /imagegen edit.
+        self.prompt_preset: str = prompt_preset or ""
+        self.prompt_details: str = prompt_details or ""
+        # Local /halloweenify border drawn on the finished image. Empty skips it.
+        self.halloween_frame: str = halloween_frame or ""
+        # Identity-edit fidelity (Krea2 ref_boost). None leaves the workflow value.
+        # Higher keeps more of the original. Not KSampler denoise: that sampler
+        # starts from an empty latent, so a lower denoise would not keep the source.
+        self.edit_strength: Optional[float] = None if edit_strength is None else float(edit_strength)
 
 
 class ComfyOutput:
@@ -498,6 +515,9 @@ class ComfyKrea2IdentityEditModel(BaseComfyWorkflowModel):
 
     Requires custom nodes: comfyui-krea2edit (Krea2EditModelPatch + GroundedEncode).
     Turbo path: 10 steps, CFG 1, LoRA v1.2 @ strength 1.0, ref_boost 4.
+    ``ImageCreation.edit_strength``, when set, replaces ref_boost. Halloweenify
+    sets a higher value so every costume keeps more of the original. KSampler
+    denoise stays 1: the latent is empty, and lowering it would not keep the source.
     """
 
     def __init__(self):
@@ -528,6 +548,16 @@ class ComfyKrea2IdentityEditModel(BaseComfyWorkflowModel):
 
         if "53" in workflow and workflow["53"].get("class_type") == "KSampler":
             workflow["53"]["inputs"]["seed"] = seed
+
+        # ref_boost is the preservation dial. Leave denoise and cfg on the
+        # workflow defaults: denoise 1 fills the empty latent, cfg 1 is Turbo.
+        strength = getattr(image, "edit_strength", None)
+        if (
+            strength is not None
+            and "79" in workflow
+            and workflow["79"].get("class_type") == "Krea2EditModelPatch"
+        ):
+            workflow["79"]["inputs"]["ref_boost"] = float(strength)
 
         # Output resolution
         if "82" in workflow and workflow["82"].get("class_type") == "EmptySD3LatentImage":

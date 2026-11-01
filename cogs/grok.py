@@ -1,14 +1,19 @@
-"""Owner-only Grok commands that hand a prompt to a configured webhook.
+"""Grok commands that hand a prompt to a configured webhook.
 
-/grok is a slash command. Ask Grok is a message context menu. The webhook is
+/grok is a slash command. The owner can use it anywhere. In Menaces to
+Sobriety, any Menace role gets five successful uses per rolling week.
+Ask Grok is a message context menu and stays owner-only. The webhook is
 expected to edit the deferred original response later. This cog only
 acknowledges the interaction and posts the payload.
 """
 
 from __future__ import annotations
 
+import json
 import logging
-from datetime import datetime, timezone
+import os
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 
 import aiohttp
@@ -17,7 +22,9 @@ from discord import app_commands
 from discord.ext import commands
 
 from cogs.utils.config import load_config
+from cogs.utils.constants import DATA_DIR
 from cogs.utils.grok_refs import GROK_REFS_PATH, GrokRefs
+from cogs.utils.json_store import LockedJsonFile
 
 log = logging.getLogger(__name__)
 
@@ -29,6 +36,20 @@ _COMMAND_ERROR = "Something went wrong running that command."
 _MISSING_CONFIG = (
     "Grok webhook is not configured. Set grok_webhook_url and grok_webhook_key in config.json."
 )
+# Menaces to Sobriety. Match any of these role ids; names are only labels.
+MTS_GUILD_ID = 932057681307512922
+MENACE_ROLE_ID = 1170245970634739762
+MENACE_ROLE_IDS = frozenset({
+    MENACE_ROLE_ID,  # Menace
+    937926079291723816,  # Menace OG
+    1142145259862757396,  # Menace Initiate
+    1321648614472159302,  # Menace All
+})
+GROK_WEEKLY_LIMIT = 5
+GROK_USAGE_WINDOW = timedelta(days=7)
+GROK_USAGE_PATH = DATA_DIR / "grok_usage.json"
+_OWNER_ONLY = "This command can only be used by the bot owner."
+_MENACE_ROLE_REQUIRED = "You need a Menace role to use /grok here."
 _ASK_GROK_NAME = "Ask Grok"
 _ASK_PROMPT_LABEL = "What should I do with this?"
 _DEFAULT_MESSAGE_PROMPT = "Help me with this message."
@@ -40,9 +61,161 @@ class GrokConfigError(Exception):
     """Raised when grok webhook settings are missing."""
 
 
+class GrokCommandDenied(app_commands.CheckFailure):
+    """A /grok check failure that already has the ephemeral text to send."""
+
+    def __init__(self, message: str):
+        super().__init__(message)
+        self.public_message = message
+
+
+def _limit_message(frees_at: int) -> str:
+    return (
+        "You've used all 5 /grok requests this week. "
+        f"Your next one frees up <t:{int(frees_at)}:R>."
+    )
+
+
+def _usage_store(path: Path | None = None) -> LockedJsonFile:
+    return LockedJsonFile(path or GROK_USAGE_PATH, default=dict, indent=2)
+
+
+def _normalize_usage(data: object) -> dict[str, list[int]]:
+    if not isinstance(data, dict):
+        return {}
+    cleaned: dict[str, list[int]] = {}
+    for key, value in data.items():
+        try:
+            user_id = int(key)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(value, bool) or not isinstance(value, list):
+            continue
+        stamps: list[int] = []
+        for item in value:
+            if isinstance(item, bool):
+                continue
+            try:
+                stamps.append(int(item))
+            except (TypeError, ValueError):
+                continue
+        if stamps:
+            cleaned[str(user_id)] = stamps
+    return cleaned
+
+
+def _prune_usage(users: dict[str, list[int]], now: datetime) -> dict[str, list[int]]:
+    cutoff = _as_utc(now).timestamp() - GROK_USAGE_WINDOW.total_seconds()
+    pruned: dict[str, list[int]] = {}
+    for key, stamps in users.items():
+        fresh = [stamp for stamp in stamps if stamp > cutoff]
+        if fresh:
+            pruned[key] = fresh
+    return pruned
+
+
+def _save_usage(path: Path, users: dict[str, list[int]]) -> None:
+    """Atomic UTF-8 replace. No BOM. Used when the normal JSON reader cannot open the file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    payload = json.dumps(users, indent=2)
+    if not payload.endswith("\n"):
+        payload += "\n"
+    try:
+        with open(tmp, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
+def _mutate_usage(mutator, path: Path | None = None) -> dict[str, list[int]]:
+    store = _usage_store(path)
+    try:
+        return store.update(lambda data: mutator(_normalize_usage(data)))
+    except (UnicodeError, OSError, TimeoutError, json.JSONDecodeError) as exc:
+        log.warning("Grok usage file %s is unusable (%s); starting empty.", store.path, exc)
+        users = mutator({})
+        try:
+            _save_usage(store.path, users)
+        except OSError as write_exc:
+            log.warning("Couldn't rewrite Grok usage file %s: %s", store.path, write_exc)
+        return users
+
+
+def grok_uses_and_block(
+    user_id: int,
+    now: datetime | None = None,
+    *,
+    path: Path | None = None,
+) -> tuple[list[int], int | None]:
+    """Prune stamps older than 7 days. Return (fresh stamps, unix the next slot frees).
+
+    The second value is None when the user is under the weekly cap.
+    """
+    moment = _as_utc(now or datetime.now(timezone.utc))
+    users = _mutate_usage(lambda data: _prune_usage(data, moment), path)
+    stamps = list(users.get(str(int(user_id)), []))
+    if len(stamps) < GROK_WEEKLY_LIMIT:
+        return stamps, None
+    frees_at = int(min(stamps) + GROK_USAGE_WINDOW.total_seconds())
+    return stamps, frees_at
+
+
+def record_grok_use(user_id: int, when: datetime, *, path: Path | None = None) -> None:
+    """Append one successful /grok use and drop stamps older than 7 days."""
+    stamp = int(_as_utc(when).timestamp())
+    now = datetime.now(timezone.utc)
+
+    def mutate(users: dict[str, list[int]]) -> dict[str, list[int]]:
+        pruned = _prune_usage(users, now)
+        pruned.setdefault(str(int(user_id)), []).append(stamp)
+        return pruned
+
+    _mutate_usage(mutate, path)
+
+
+def _has_menace_role(user: object) -> bool:
+    roles = getattr(user, "roles", None) or []
+    for role in roles:
+        role_id = getattr(role, "id", role)
+        try:
+            if int(role_id) in MENACE_ROLE_IDS:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
 async def app_command_is_owner(interaction: discord.Interaction) -> bool:
     """App-command owner gate. Uses the same client.is_owner check as the other cogs."""
     return await interaction.client.is_owner(interaction.user)
+
+
+async def grok_slash_allowed(interaction: discord.Interaction) -> bool:
+    """Owner anywhere. Any Menace role in Menaces to Sobriety, five successes per week. Else owner-only."""
+    if await interaction.client.is_owner(interaction.user):
+        return True
+    if getattr(interaction, "guild_id", None) != MTS_GUILD_ID:
+        raise GrokCommandDenied(_OWNER_ONLY)
+    if not _has_menace_role(interaction.user):
+        raise GrokCommandDenied(_MENACE_ROLE_REQUIRED)
+    _stamps, frees_at = grok_uses_and_block(int(interaction.user.id))
+    if frees_at is not None:
+        raise GrokCommandDenied(_limit_message(frees_at))
+    return True
+
+
+def _as_utc(moment: datetime) -> datetime:
+    if moment.tzinfo is None:
+        return moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc)
 
 
 def _to_iso(moment: datetime) -> str:
@@ -305,10 +478,36 @@ async def _deliver(
             len(payload["recent_messages"]),
         )
         await _post_webhook(url, headers, payload)
+        # Count only a successful /grok in Menaces to Sobriety. Ask Grok passes a
+        # target message and stays owner-only, so it never spends the weekly cap.
+        if target_message is None:
+            try:
+                await _maybe_record_grok_use(interaction)
+            except Exception as exc:
+                log.warning("Failed to record Grok usage: %s", exc)
     except Exception as exc:
         message = _safe_error_text(exc, secret)
         log.warning("Grok webhook request failed: %s", message)
         await _dismiss_and_report(interaction, message)
+
+
+async def _maybe_record_grok_use(interaction: discord.Interaction) -> None:
+    """Record a successful non-owner /grok in Menaces to Sobriety. Owners are unlimited."""
+    if getattr(interaction, "guild_id", None) != MTS_GUILD_ID:
+        return
+    try:
+        if await interaction.client.is_owner(interaction.user):
+            return
+    except Exception as exc:
+        log.warning("Could not confirm Grok owner status: %s", exc)
+        return
+    user_id = getattr(getattr(interaction, "user", None), "id", None)
+    if user_id is None:
+        return
+    when = getattr(interaction, "created_at", None)
+    if not isinstance(when, datetime):
+        when = datetime.now(timezone.utc)
+    record_grok_use(int(user_id), when)
 
 
 def _record_grok_ref(interaction: discord.Interaction) -> None:
@@ -379,7 +578,7 @@ class Grok(commands.Cog):
         prompt="Prompt text to send.",
         attachment="Optional file to include with the prompt.",
     )
-    @app_commands.check(app_command_is_owner)
+    @app_commands.check(grok_slash_allowed)
     async def grok(
         self,
         interaction: discord.Interaction,
@@ -406,7 +605,7 @@ class Grok(commands.Cog):
         error: app_commands.AppCommandError,
     ) -> None:
         if isinstance(error, app_commands.CheckFailure):
-            message = "This command can only be used by the bot owner."
+            message = getattr(error, "public_message", None) or _OWNER_ONLY
             if interaction.response.is_done():
                 await interaction.followup.send(message, ephemeral=True)
             else:

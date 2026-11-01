@@ -1,10 +1,10 @@
-"""Owner-only /grok webhook command."""
+"""/grok webhook command. Owner anywhere; Menace role in Menaces to Sobriety."""
 
 from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -13,7 +13,18 @@ import pytest
 from discord import app_commands
 from discord.ext import commands
 
-from cogs.grok import Grok, _PUBLIC_FAILURE, app_command_is_owner
+from cogs.grok import (
+    MENACE_ROLE_ID,
+    MENACE_ROLE_IDS,
+    MTS_GUILD_ID,
+    Grok,
+    GrokCommandDenied,
+    _PUBLIC_FAILURE,
+    app_command_is_owner,
+    grok_slash_allowed,
+    grok_uses_and_block,
+    record_grok_use,
+)
 from cogs.utils.config import BotConfig
 
 CREATED_AT = datetime(2026, 10, 14, 15, 4, 5, tzinfo=timezone.utc)
@@ -23,8 +34,9 @@ WEBHOOK_KEY = "test-key"
 
 @pytest.fixture(autouse=True)
 def _isolate_grok_refs(tmp_path, monkeypatch):
-    """Successful /grok writes a ref file. Keep that out of data/."""
+    """Successful /grok writes ref and usage files. Keep those out of data/."""
     monkeypatch.setattr("cogs.grok.GROK_REFS_PATH", tmp_path / "grok_refs.json")
+    monkeypatch.setattr("cogs.grok.GROK_USAGE_PATH", tmp_path / "grok_usage.json")
 
 
 def _config(**overrides) -> BotConfig:
@@ -203,7 +215,9 @@ def test_grok_command_is_global_and_owner_only():
     assert cog.grok.name == "grok"
     assert cog.grok.guild_only is False
     assert cog.grok._guild_ids is None
-    assert app_command_is_owner in cog.grok.checks
+    assert grok_slash_allowed in cog.grok.checks
+    assert app_command_is_owner not in cog.grok.checks
+    assert app_command_is_owner in cog.ask_grok_menu.checks
     assert cog.has_app_command_error_handler()
     prompt = cog.grok.get_parameter("prompt")
     assert prompt is not None
@@ -1112,3 +1126,317 @@ def test_ask_grok_modal_errors(monkeypatch):
     asyncio.run(redacted_exception())
     asyncio.run(delete_fallback_fresh())
     asyncio.run(missing_config())
+
+
+def _usage_path():
+    from cogs import grok as grok_mod
+
+    return grok_mod.GROK_USAGE_PATH
+
+
+def _role(role_id, name="Menace"):
+    return SimpleNamespace(id=role_id, name=name)
+
+
+def _access_interaction(*, guild_id=MTS_GUILD_ID, owner=False, roles=None, created_at=None):
+    interaction = _interaction(guild_id=guild_id)
+    interaction.client.is_owner = AsyncMock(return_value=owner)
+    interaction.user.roles = list(roles or [])
+    if created_at is not None:
+        interaction.created_at = created_at
+    return interaction
+
+
+async def _run_check(cog: Grok, interaction):
+    try:
+        return await cog.grok._check_can_run(interaction), None
+    except app_commands.AppCommandError as exc:
+        await cog.cog_app_command_error(interaction, exc)
+        return None, exc
+
+
+def _ephemeral_text(interaction) -> str:
+    interaction.response.send_message.assert_awaited_once()
+    args, kwargs = interaction.response.send_message.await_args
+    assert kwargs["ephemeral"] is True
+    interaction.followup.send.assert_not_awaited()
+    return args[0]
+
+
+def test_grok_owner_is_unlimited_and_does_not_record_usage():
+    async def scenario():
+        cog = Grok(bot=None)
+        path = _usage_path()
+        when = datetime.now(timezone.utc)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"111": [int(when.timestamp())] * 5}),
+            encoding="utf-8",
+        )
+        before = path.read_bytes()
+        for guild_id in (None, 4242, MTS_GUILD_ID):
+            interaction = _access_interaction(guild_id=guild_id, owner=True, roles=[])
+            allowed, error = await _run_check(cog, interaction)
+            assert allowed is True
+            assert error is None
+            interaction.response.send_message.assert_not_awaited()
+            interaction.response.defer.assert_not_awaited()
+        assert path.read_bytes() == before
+
+    asyncio.run(scenario())
+
+
+def test_grok_non_owner_outside_mts_stays_owner_only():
+    async def scenario():
+        cog = Grok(bot=None)
+        path = _usage_path()
+        for guild_id in (None, 4242):
+            interaction = _access_interaction(
+                guild_id=guild_id,
+                owner=False,
+                roles=[_role(MENACE_ROLE_ID, "Menace")],
+            )
+            allowed, error = await _run_check(cog, interaction)
+            assert allowed is None
+            assert isinstance(error, GrokCommandDenied)
+            assert error.public_message == "This command can only be used by the bot owner."
+            assert _ephemeral_text(interaction) == "This command can only be used by the bot owner."
+        assert not path.exists()
+
+    asyncio.run(scenario())
+
+
+def test_grok_mts_matches_the_menace_role_id():
+    async def scenario():
+        cog = Grok(bot=None)
+        path = _usage_path()
+        wrong_id = _access_interaction(owner=False, roles=[_role(1, "Menace")])
+        allowed, error = await _run_check(cog, wrong_id)
+        assert allowed is None
+        assert error.public_message == "You need a Menace role to use /grok here."
+        assert _ephemeral_text(wrong_id) == "You need a Menace role to use /grok here."
+        assert not path.exists()
+
+        missing = _access_interaction(owner=False, roles=[])
+        _allowed, error = await _run_check(cog, missing)
+        assert error.public_message == "You need a Menace role to use /grok here."
+        assert not path.exists()
+
+        right_id = _access_interaction(owner=False, roles=[_role(MENACE_ROLE_ID, "Not Menace")])
+        allowed, error = await _run_check(cog, right_id)
+        assert allowed is True
+        assert error is None
+        right_id.response.send_message.assert_not_awaited()
+
+    asyncio.run(scenario())
+
+
+def test_grok_mts_each_listed_menace_role_qualifies():
+    async def scenario():
+        cog = Grok(bot=None)
+        path = _usage_path()
+        assert MENACE_ROLE_IDS == frozenset({
+            1170245970634739762,  # Menace
+            937926079291723816,  # Menace OG
+            1142145259862757396,  # Menace Initiate
+            1321648614472159302,  # Menace All
+        })
+        denied = _access_interaction(owner=False, roles=[_role(1, "Not listed")])
+        allowed, error = await _run_check(cog, denied)
+        assert allowed is None
+        assert isinstance(error, GrokCommandDenied)
+        assert error.public_message == "You need a Menace role to use /grok here."
+        assert _ephemeral_text(denied) == "You need a Menace role to use /grok here."
+        assert not path.exists()
+
+        for role_id in MENACE_ROLE_IDS:
+            interaction = _access_interaction(
+                owner=False,
+                roles=[_role(1, "Other"), _role(role_id, "Listed")],
+            )
+            allowed, error = await _run_check(cog, interaction)
+            assert allowed is True
+            assert error is None
+            interaction.response.send_message.assert_not_awaited()
+
+    asyncio.run(scenario())
+
+
+def test_grok_weekly_limit_counts_duplicate_timestamps():
+    async def scenario():
+        cog = Grok(bot=None)
+        path = _usage_path()
+        when = datetime.now(timezone.utc).replace(microsecond=0)
+        stamp = int(when.timestamp())
+        record_grok_use(111, when)
+        record_grok_use(111, when)
+        stored = json.loads(path.read_text(encoding="utf-8"))
+        assert stored["111"] == [stamp, stamp]
+        for _ in range(3):
+            record_grok_use(111, when)
+        interaction = _access_interaction(
+            owner=False,
+            roles=[_role(MENACE_ROLE_ID, "Friend")],
+            created_at=when,
+        )
+        allowed, error = await _run_check(cog, interaction)
+        assert allowed is None
+        frees = stamp + 7 * 86400
+        expected = (
+            "You've used all 5 /grok requests this week. "
+            f"Your next one frees up <t:{frees}:R>."
+        )
+        assert error.public_message == expected
+        assert _ephemeral_text(interaction) == expected
+        raw = path.read_bytes()
+        assert not raw.startswith(b"\xef\xbb\xbf")
+        assert json.loads(raw.decode("utf-8"))["111"].count(stamp) == 5
+        assert list(path.parent.glob("*.tmp")) == []
+
+    asyncio.run(scenario())
+
+
+def test_grok_usage_prunes_stamps_older_than_seven_days():
+    path = _usage_path()
+    now = datetime(2026, 10, 30, 12, 0, tzinfo=timezone.utc)
+    cutoff = int(now.timestamp() - timedelta(days=7).total_seconds())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"111": [cutoff, cutoff + 1, cutoff + 1], "222": [cutoff]}),
+        encoding="utf-8",
+    )
+    stamps, frees = grok_uses_and_block(111, now)
+    assert stamps == [cutoff + 1, cutoff + 1]
+    assert frees is None
+    loaded = json.loads(path.read_text(encoding="utf-8"))
+    assert loaded == {"111": [cutoff + 1, cutoff + 1]}
+    assert not path.read_bytes().startswith(b"\xef\xbb\xbf")
+
+    ancient = int((datetime.now(timezone.utc) - timedelta(days=30)).timestamp())
+    path.write_text(json.dumps({"5": [ancient, ancient]}), encoding="utf-8")
+    old_when = datetime.now(timezone.utc) - timedelta(days=7)
+    record_grok_use(5, old_when)
+    kept = json.loads(path.read_text(encoding="utf-8"))["5"]
+    assert ancient not in kept
+    assert kept == [int(old_when.timestamp())]
+    assert list(path.parent.glob("*.tmp")) == []
+
+
+def test_grok_usage_tolerates_a_missing_or_corrupt_file():
+    async def scenario():
+        path = _usage_path()
+        interaction = _access_interaction(owner=False, roles=[_role(MENACE_ROLE_ID, "x")])
+        assert not path.exists()
+        assert await grok_slash_allowed(interaction) is True
+
+        path.write_bytes(b"\xef\xbb\xbf{not json")
+        when = datetime.now(timezone.utc)
+        record_grok_use(111, when)
+        raw = path.read_bytes()
+        assert not raw.startswith(b"\xef\xbb\xbf")
+        loaded = json.loads(raw.decode("utf-8"))
+        assert loaded["111"] == [int(when.timestamp())]
+
+        path.write_bytes(b"\xff\xfe\x00")
+        stamps, frees = grok_uses_and_block(8, datetime.now(timezone.utc))
+        assert stamps == []
+        assert frees is None
+        rewritten = path.read_bytes()
+        assert not rewritten.startswith(b"\xef\xbb\xbf")
+        assert json.loads(rewritten.decode("utf-8")) == {}
+        assert list(path.parent.glob("*.tmp")) == []
+
+    asyncio.run(scenario())
+
+
+def test_grok_records_a_successful_non_owner_slash_use(monkeypatch):
+    async def scenario():
+        _use_config(monkeypatch, _config())
+        _patch_session(monkeypatch, status=204)
+        when = datetime.now(timezone.utc).replace(microsecond=0)
+        stamp = int(when.timestamp())
+        cog = Grok(bot=None)
+        first = _access_interaction(owner=False, roles=[_role(MENACE_ROLE_ID)], created_at=when)
+        await _invoke(cog, first, "count me")
+        first.delete_original_response.assert_not_awaited()
+        second = _access_interaction(owner=False, roles=[_role(MENACE_ROLE_ID)], created_at=when)
+        await _invoke(cog, second, "count me again")
+        stored = json.loads(_usage_path().read_text(encoding="utf-8"))
+        assert stored["111"] == [stamp, stamp]
+        assert not _usage_path().read_bytes().startswith(b"\xef\xbb\xbf")
+
+    asyncio.run(scenario())
+
+
+def test_grok_failed_webhook_does_not_record_usage(monkeypatch):
+    async def scenario():
+        _use_config(monkeypatch, _config())
+        _patch_session(monkeypatch, status=503, body="upstream down")
+        interaction = _access_interaction(owner=False, roles=[_role(MENACE_ROLE_ID)])
+        await _invoke(Grok(bot=None), interaction, "nope")
+        interaction.delete_original_response.assert_awaited_once_with()
+        assert not _usage_path().exists()
+
+    asyncio.run(scenario())
+
+
+def test_grok_owner_and_other_guild_successes_do_not_record_usage(monkeypatch):
+    async def scenario():
+        _use_config(monkeypatch, _config())
+        _patch_session(monkeypatch, status=204)
+        owner = _access_interaction(owner=True, roles=[])
+        await _invoke(Grok(bot=None), owner, "owner")
+        owner.delete_original_response.assert_not_awaited()
+        assert not _usage_path().exists()
+
+        other = _access_interaction(guild_id=4242, owner=False, roles=[_role(MENACE_ROLE_ID)])
+        await _invoke(Grok(bot=None), other, "elsewhere")
+        other.delete_original_response.assert_not_awaited()
+        assert not _usage_path().exists()
+
+    asyncio.run(scenario())
+
+
+def test_ask_grok_success_does_not_spend_weekly_uses(monkeypatch):
+    async def scenario():
+        _use_config(monkeypatch, _config())
+        _patch_session(monkeypatch, status=204)
+        cog = Grok(bot=None)
+        target = _chat_message(
+            message_id=4,
+            author_name="ada",
+            author_id=5,
+            created_at=CREATED_AT,
+            content="help",
+        )
+        _opener, modal = await _open_ask_grok(cog, target)
+        text_input = _modal_text_input(modal)
+        text_input._value = "look at this"
+        submit = _access_interaction(owner=False, roles=[_role(MENACE_ROLE_ID)])
+        await modal.on_submit(submit)
+        submit.delete_original_response.assert_not_awaited()
+        assert not _usage_path().exists()
+        assert app_command_is_owner in cog.ask_grok_menu.checks
+        assert grok_slash_allowed not in cog.ask_grok_menu.checks
+
+    asyncio.run(scenario())
+
+
+def test_grok_usage_write_failure_keeps_the_deferred_response(monkeypatch, caplog):
+    async def scenario():
+        _use_config(monkeypatch, _config())
+        _patch_session(monkeypatch, status=204)
+
+        def boom(*_args, **_kwargs):
+            raise OSError("disk full")
+
+        monkeypatch.setattr("cogs.grok.record_grok_use", boom)
+        interaction = _access_interaction(owner=False, roles=[_role(MENACE_ROLE_ID)])
+        with caplog.at_level("WARNING", logger="cogs.grok"):
+            await _invoke(Grok(bot=None), interaction, "still fine")
+        interaction.delete_original_response.assert_not_awaited()
+        interaction.followup.send.assert_not_awaited()
+        interaction.edit_original_response.assert_not_awaited()
+        assert any("Failed to record Grok usage" in record.message for record in caplog.records)
+
+    asyncio.run(scenario())

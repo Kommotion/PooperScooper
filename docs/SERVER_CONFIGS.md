@@ -101,7 +101,7 @@ Used by `cogs/eastereggs.py`. Missing or disabled sections do nothing.
 
 ### `candy_hunt`
 
-Optional overrides for the Halloween candy hunt (`cogs/candyhunt.py`). A missing section keeps the cog defaults. Invalid values are ignored.
+Optional overrides for the Halloween candy hunt (`cogs/candyhunt.py`). A missing section keeps the cog defaults. Invalid values are ignored. Running it again next year (calendar, channels, odds, announcements, and resetting `data/candy_hunt.json`) is documented in `docs/README_candyhunt.md`.
 
 The public slash command is `/candy`, registered only in Menaces to Sobriety and the support server. Owner controls are the hidden prefix group `!candyadmin` (not a slash command): `status`, `power on|off`, `test_session [minutes] [interval] [#channel]`, `test_session_stop`, and `wrapup [dry_run]`.
 
