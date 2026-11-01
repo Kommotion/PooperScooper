@@ -103,6 +103,8 @@ Used by `cogs/eastereggs.py`. Missing or disabled sections do nothing.
 
 Optional overrides for the Halloween candy hunt (`cogs/candyhunt.py`). A missing section keeps the cog defaults. Invalid values are ignored. Running it again next year (calendar, channels, odds, announcements, and resetting `data/candy_hunt.json`) is documented in `docs/README_candyhunt.md`.
 
+`halloween_enabled` is a bot-wide boolean in `config.json`, not a key in the guild file (see `config.example.json`). Missing means `false`: the candy hunt cog, the costume cog, and `/halloweenify` stay unloaded. Set it to `true` and restart to bring them back.
+
 The public slash command is `/candy`, registered only in Menaces to Sobriety and the support server. Owner controls are the hidden prefix group `!candyadmin` (not a slash command): `status`, `power on|off`, `test_session [minutes] [interval] [#channel]`, `test_session_stop`, and `wrapup [dry_run]`.
 
 | Field | Type | Description |

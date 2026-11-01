@@ -16,7 +16,17 @@ def _bot(app_info: SimpleNamespace) -> PooperScooper:
     return bot
 
 
-def test_setup_hook_team_app_uses_member_ids_and_clears_owner_id():
+def _halloween_on(monkeypatch) -> None:
+    """These tests cover owner detection with the full cog list loaded."""
+    monkeypatch.setattr(
+        "PooperScooper.load_config",
+        lambda *args, **kwargs: SimpleNamespace(halloween_enabled=True),
+    )
+
+
+def test_setup_hook_team_app_uses_member_ids_and_clears_owner_id(monkeypatch):
+    _halloween_on(monkeypatch)
+
     async def run():
         app = SimpleNamespace(
             team=SimpleNamespace(members=[SimpleNamespace(id=11), SimpleNamespace(id=22)]),
@@ -36,7 +46,9 @@ def test_setup_hook_team_app_uses_member_ids_and_clears_owner_id():
     asyncio.run(run())
 
 
-def test_setup_hook_user_owned_app_uses_owner_id():
+def test_setup_hook_user_owned_app_uses_owner_id(monkeypatch):
+    _halloween_on(monkeypatch)
+
     async def run():
         app = SimpleNamespace(team=None, owner=SimpleNamespace(id=42))
         bot = _bot(app)

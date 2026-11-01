@@ -72,6 +72,7 @@ def test_bot_config_validation():
     })
     assert config.token.get_secret_value() == "test-token"
     assert config.lavalink.host == "localhost"
+    assert config.halloween_enabled is False
 
 
 def test_env_overrides_take_precedence(monkeypatch):

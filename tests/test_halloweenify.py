@@ -18,7 +18,6 @@ from cogs.imagediffusion import (
     HALLOWEENIFY_COSTUMES,
     HALLOWEENIFY_DETAILS_MAX,
     HALLOWEENIFY_EDIT_STRENGTH,
-    HALLOWEENIFY_ENABLED,
     HALLOWEENIFY_PRESET_ORDER,
     HALLOWEENIFY_SIZE,
     HALLOWEENIFY_STYLE_PRESERVATION,
@@ -780,7 +779,6 @@ def _command_tree():
 
 
 def test_halloweenify_is_kept_off_the_tree_when_disabled(monkeypatch):
-    assert HALLOWEENIFY_ENABLED is True
     monkeypatch.setattr("cogs.imagediffusion.HALLOWEENIFY_ENABLED", False)
     assert ImageDiffusion.halloweenify.name == "halloweenify"
     assert [param.name for param in ImageDiffusion.halloweenify.parameters] == [
@@ -1090,7 +1088,6 @@ def test_frame_only_is_the_default_and_first_choice_and_skips_ai(monkeypatch):
     assert costume.default == "none"
     assert costume.choices[0].value == "none"
     assert costume.choices[0].name == "None (frame only)"
-    assert HALLOWEENIFY_ENABLED is True
 
     def fail_ai(*args, **kwargs):
         raise AssertionError("frame-only must not call the AI backend")

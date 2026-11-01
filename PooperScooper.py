@@ -11,6 +11,7 @@ from cogs.utils.config import load_config
 from cogs.utils.constants import LEGACY_DATA_FILES, PROJECT_ROOT
 from cogs.utils.json_store import migrate_legacy_data_files
 
+log = logging.getLogger(__name__)
 
 description = """
 Yo, this PooperScooper. Need any poop scooped? '!' me dawg. These my commands.
@@ -34,6 +35,70 @@ initial_extensions = [
     'cogs.costume',
     'cogs.malfoyd',
 ]
+
+# Candy hunt and costume are the Halloween cogs. Malfoyd stays either way.
+_HALLOWEEN_EXTENSIONS = frozenset({'cogs.candyhunt', 'cogs.costume'})
+
+
+def extensions_to_load(cfg) -> list[str]:
+    """Cog names to load. Halloween cogs stay out unless halloween_enabled is true.
+
+    A missing config object or a missing flag counts as off. ``cogs.malfoyd`` always stays.
+    """
+    if bool(getattr(cfg, 'halloween_enabled', False)):
+        return list(initial_extensions)
+    return [name for name in initial_extensions if name not in _HALLOWEEN_EXTENSIONS]
+
+
+def _config_for_startup():
+    """Return bot config, or None when it cannot be read. None leaves Halloween off."""
+    try:
+        return load_config()
+    except Exception:
+        log.error('Could not read config while choosing extensions; Halloween stays off')
+        return None
+
+
+async def sync_retired_halloween_commands(bot) -> None:
+    """Publish the current tree for each candy guild, then sync globally.
+
+    ``tree.sync(guild=...)`` replaces that guild's Discord commands with the
+    guild commands already on the tree. It does not call ``clear_commands`` or
+    ``copy_global_to``, so copied or other guild commands already on the tree
+    stay. Global ``tree.sync()`` drops /halloweenify when that command was left
+    off the tree. One failed sync is logged and skipped. This never raises.
+    The guild ids come from ``cogs.candyhunt.CANDY_GUILD_IDS`` without loading
+    that cog.
+    """
+    tree = getattr(bot, 'tree', None)
+    sync = getattr(tree, 'sync', None)
+    if not callable(sync):
+        log.error('halloween command sync failed error=no_tree')
+        return
+
+    guild_ids: tuple[int, ...] = ()
+    try:
+        from cogs.candyhunt import CANDY_GUILD_IDS
+        guild_ids = tuple(CANDY_GUILD_IDS)
+    except Exception:
+        log.exception('halloween command sync failed error=no_guild_ids')
+
+    for gid in guild_ids:
+        try:
+            synced = await sync(guild=discord.Object(id=gid))
+            synced = list(synced or [])
+            names = ','.join(str(getattr(command, 'name', '')) for command in synced)
+            log.info('halloween command sync guild=%s count=%s names=%s', gid, len(synced), names)
+        except Exception:
+            log.exception('halloween command sync failed guild=%s', gid)
+
+    try:
+        synced = await sync()
+        synced = list(synced or [])
+        names = ','.join(str(getattr(command, 'name', '')) for command in synced)
+        log.info('halloween command sync scope=global count=%s names=%s', len(synced), names)
+    except Exception:
+        log.exception('halloween command sync failed scope=global')
 
 LOG_FILE = "pooperscooper.log"
 LOG_MAX_BYTES = 5 * 1024 * 1024
@@ -90,6 +155,7 @@ class PooperScooper(commands.AutoShardedBot):
 
         self.client_id: str = client_id
         self.commands_executed = None
+        self._halloween_sunset_synced = False
 
     async def on_ready(self) -> None:
         """Event that occurs when PooperScooper is ready"""
@@ -122,11 +188,25 @@ class PooperScooper(commands.AutoShardedBot):
             self.owner_id = self.bot_app_info.owner.id
         self.commands_executed = 0
 
-        for extension in initial_extensions:
+        cfg = _config_for_startup()
+        for extension in extensions_to_load(cfg):
             try:
                 await self.load_extension(extension)
             except Exception as e:
                 log.exception('Failed to load extension {}\n{}'.format(extension, e))
+
+        if not bool(getattr(cfg, 'halloween_enabled', False)):
+            await self._retire_halloween_commands_once()
+
+    async def _retire_halloween_commands_once(self) -> None:
+        """Drop stale Halloween slash commands once per process. Never raises."""
+        if self._halloween_sunset_synced:
+            return
+        self._halloween_sunset_synced = True
+        try:
+            await sync_retired_halloween_commands(self)
+        except Exception:
+            log.exception('halloween command sync failed')
 
 
 async def run_bot(token: str, *, client_id: str):

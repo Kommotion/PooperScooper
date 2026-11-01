@@ -69,6 +69,8 @@ class BotConfig(BaseModel):
     grok_webhook_url: str = ""
     grok_webhook_key: SecretStr = SecretStr("")
     grok_webhook_key_header: str = ""
+    # Missing key stays off: candy hunt, costume, and /halloweenify do not load.
+    halloween_enabled: bool = False
 
     def to_credentials_dict(self) -> dict[str, Any]:
         """Legacy dict shape used by Lavalink helpers and Wavelink bootstrap."""

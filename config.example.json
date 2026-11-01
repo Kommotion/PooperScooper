@@ -1,6 +1,7 @@
 {
     "token": "YOUR_DISCORD_BOT_TOKEN",
     "client_id": "YOUR_DISCORD_APPLICATION_ID",
+    "halloween_enabled": false,
     "spotify_client_id": "YOUR_SPOTIFY_CLIENT_ID",
     "spotify_secret": "YOUR_SPOTIFY_CLIENT_SECRET",
     "lavalink": {

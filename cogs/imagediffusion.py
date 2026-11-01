@@ -40,6 +40,7 @@ from cogs.utils.image_models import (
 )
 from PIL import Image as PILImage
 from cogs.utils import comfy_client
+from cogs.utils.config import load_config
 from cogs.utils.server_config import get_guild_config
 
 log = logging.getLogger(__name__)
@@ -78,9 +79,20 @@ HALLOWEENIFY_PROMPT = HALLOWEENIFY_BASE_PROMPT
 HALLOWEENIFY_SIZE = AVATAR_EDIT_SIZE
 HALLOWEENIFY_DETAILS_MAX = 200
 HALLOWEENIFY_AVATAR_FILENAME = "halloweenify_avatar.png"
-# Shipped on so /halloweenify is on the app command tree and a sync can publish it.
-# No date cutoff: set this to False to hide the command. Nothing else in code has to change.
-HALLOWEENIFY_ENABLED = True
+
+
+def halloweenify_enabled_from_config() -> bool:
+    """True only when config.json sets halloween_enabled. Any read error hides the command."""
+    try:
+        return bool(load_config().halloween_enabled)
+    except Exception:
+        log.error("Could not read halloween_enabled; hiding /halloweenify")
+        return False
+
+
+# Follows config.json halloween_enabled. Missing key or a read error leaves
+# /halloweenify off the app command tree. Nothing else in this cog has to change.
+HALLOWEENIFY_ENABLED = halloweenify_enabled_from_config()
 QUEUE_FULL_MESSAGE = "The image queue is full right now, try again in a minute."
 
 # Costume key -> sentence appended to the base prompt. "random" is not a costume.
