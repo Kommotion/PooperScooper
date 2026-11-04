@@ -10,7 +10,7 @@ is a non-empty string starting with ``https://vxtwitter.com/``. Invalid
 entries are skipped and do not take a slot. Extra JSON fields are kept.
 
 Notify toggles the Malfoyd Ping role. Reroll moves to the next valid
-candidate. The whole server shares two rerolls a day. The bot owner can
+candidate. The whole server shares five rerolls a day. The bot owner can
 reroll without using one. ``!malfoyd_setup`` and ``!malfoyd_post`` are
 owner-only prefix commands; anyone else gets no reply.
 """
@@ -40,7 +40,7 @@ THREAD_ID = 1565459865134960811
 ROLE_NAME = "Malfoyd Ping"
 QUEUE_PATH = DATA_DIR / "malfoyd_queue.json"
 SETTINGS_PATH = DATA_DIR / "malfoyd_settings.json"
-MAX_REROLLS_PER_DAY = 2
+MAX_REROLLS_PER_DAY = 5
 POLL_SECONDS = 60
 TZ = ZoneInfo("America/Los_Angeles")
 
@@ -240,7 +240,11 @@ class MalfoydView(discord.ui.View):
             return
         await cog.handle_notify(interaction)
 
-    @discord.ui.button(label="Reroll (2 left)", emoji="🎲", custom_id=REROLL_CUSTOM_ID)
+    @discord.ui.button(
+        label=f"Reroll ({MAX_REROLLS_PER_DAY} left)",
+        emoji="🎲",
+        custom_id=REROLL_CUSTOM_ID,
+    )
     async def reroll(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         del button
         cog = _malfoyd_cog(interaction)

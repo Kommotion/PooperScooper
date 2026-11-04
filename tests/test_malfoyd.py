@@ -320,7 +320,7 @@ def test_extension_follows_costume_and_constants_match():
     assert ROLE_NAME == "Malfoyd Ping"
     assert QUEUE_PATH == DATA_DIR / "malfoyd_queue.json"
     assert SETTINGS_PATH == DATA_DIR / "malfoyd_settings.json"
-    assert MAX_REROLLS_PER_DAY == 2
+    assert MAX_REROLLS_PER_DAY == 5
     assert POLL_SECONDS == 60
     assert TZ.key == "America/Los_Angeles"
     assert Malfoyd.poll_loop.seconds == 60
@@ -369,7 +369,7 @@ def test_build_content_mention_is_optional_first_line():
 
 
 def test_view_custom_ids_timeout_and_reroll_label():
-    full = make_view(2)
+    full = make_view(MAX_REROLLS_PER_DAY)
     one = make_view(1)
     empty = make_view(0)
     assert full.timeout is None
@@ -384,7 +384,7 @@ def test_view_custom_ids_timeout_and_reroll_label():
     assert notify.label == "Notify me"
     assert _emoji(notify) == "🔔"
     assert notify.disabled is False
-    assert reroll.label == "Reroll (2 left)"
+    assert reroll.label == "Reroll (5 left)"
     assert _emoji(reroll) == "🎲"
     assert reroll.disabled is False
     assert _button(one, "malfoyd:reroll").label == "Reroll (1 left)"
@@ -473,7 +473,7 @@ def test_poll_posts_only_when_today_and_not_posted(tmp_path):
         assert allowed.users is False
         assert [item.id for item in allowed.roles] == [77]
         assert kwargs["view"].timeout is None
-        assert _button(kwargs["view"], "malfoyd:reroll").label == "Reroll (2 left)"
+        assert _button(kwargs["view"], "malfoyd:reroll").label == "Reroll (5 left)"
         saved = _saved(cog)
         assert saved["posted"] is True
         assert saved["message_id"] == 5001
@@ -559,7 +559,16 @@ def test_poll_channel_fallback_and_unarchive(tmp_path):
 
 def test_reroll_limit_owner_and_skipped_invalid(tmp_path):
     async def run():
-        candidates = [_candidate(1), {"vx_url": "https://x.com/skip", "id": "bad"}, _candidate(2), _candidate(3), _candidate(4)]
+        candidates = [
+            _candidate(1),
+            {"vx_url": "https://x.com/skip", "id": "bad"},
+            _candidate(2),
+            _candidate(3),
+            _candidate(4),
+            _candidate(5),
+            _candidate(6),
+            _candidate(7),
+        ]
         cog = _cog(tmp_path, _queue(candidates=candidates, message_id=5001))
         view = make_view(MAX_REROLLS_PER_DAY)
 
@@ -577,30 +586,36 @@ def test_reroll_limit_owner_and_skipped_invalid(tmp_path):
         assert "<@&" not in edit["content"]
         assert edit["allowed_mentions"].roles is False
         assert edit["allowed_mentions"].everyone is False
-        assert _button(edit["view"], "malfoyd:reroll").label == "Reroll (1 left)"
+        assert _button(edit["view"], "malfoyd:reroll").label == "Reroll (4 left)"
         assert _button(edit["view"], "malfoyd:reroll").disabled is False
         assert _saved(cog)["index"] == 1
         assert _saved(cog)["rerolls_used"] == 1
-        assert len(_saved(cog)["candidates"]) == 5
+        assert len(_saved(cog)["candidates"]) == 8
 
-        second = await click(12)
-        assert _button(second.response.edits[0]["view"], "malfoyd:reroll").label == "Reroll (0 left)"
-        assert _button(second.response.edits[0]["view"], "malfoyd:reroll").disabled is True
-        assert _candidate(3)["vx_url"] in second.response.edits[0]["content"]
-        assert _saved(cog)["rerolls_used"] == 2
-        assert _saved(cog)["index"] == 2
+        for number in range(3, 6):
+            step = await click(10 + number)
+            assert _candidate(number)["vx_url"] in step.response.edits[0]["content"]
+            assert _saved(cog)["rerolls_used"] == number - 1
+            assert _saved(cog)["index"] == number - 1
+
+        last = await click(16)
+        assert _button(last.response.edits[0]["view"], "malfoyd:reroll").label == "Reroll (0 left)"
+        assert _button(last.response.edits[0]["view"], "malfoyd:reroll").disabled is True
+        assert _candidate(6)["vx_url"] in last.response.edits[0]["content"]
+        assert _saved(cog)["rerolls_used"] == 5
+        assert _saved(cog)["index"] == 5
 
         before = cog.queue_path.read_bytes()
-        third = await click(13)
-        assert third.response.edits == []
-        assert third.response.sent[0][0] == "No rerolls left today"
-        assert third.response.sent[0][1]["ephemeral"] is True
+        blocked = await click(17)
+        assert blocked.response.edits == []
+        assert blocked.response.sent[0][0] == "No rerolls left today"
+        assert blocked.response.sent[0][1]["ephemeral"] is True
         assert cog.queue_path.read_bytes() == before
 
         owner = await click(99, owner=True)
-        assert _candidate(4)["vx_url"] in owner.response.edits[0]["content"]
-        assert _saved(cog)["rerolls_used"] == 2
-        assert _saved(cog)["index"] == 3
+        assert _candidate(7)["vx_url"] in owner.response.edits[0]["content"]
+        assert _saved(cog)["rerolls_used"] == 5
+        assert _saved(cog)["index"] == 6
         stuck = cog.queue_path.read_bytes()
         again = await click(99, owner=True)
         assert again.response.sent[0][0] == "No more picks today"
@@ -657,7 +672,7 @@ def test_expired_pick_does_not_change_the_queue(tmp_path):
 
 def test_reroll_callback_ignores_the_button_label(tmp_path):
     async def run():
-        cog = _cog(tmp_path, _queue(rerolls_used=2, message_id=5001))
+        cog = _cog(tmp_path, _queue(rerolls_used=5, message_id=5001))
         before = cog.queue_path.read_bytes()
         view = make_view(2)
         assert _button(view, "malfoyd:reroll").label == "Reroll (2 left)"
@@ -873,7 +888,7 @@ def test_cog_load_registers_persistent_view_and_unload_cancels(tmp_path):
             assert view.timeout is None
             assert view.is_persistent()
             assert {item.custom_id for item in view.children} == {"malfoyd:notify", "malfoyd:reroll"}
-            assert _button(view, "malfoyd:reroll").label == "Reroll (2 left)"
+            assert _button(view, "malfoyd:reroll").label == "Reroll (5 left)"
         finally:
             await cog.cog_unload()
             task = cog.poll_loop.get_task()
