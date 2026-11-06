@@ -14,14 +14,17 @@ from unittest.mock import AsyncMock
 import discord
 import pytest
 from discord.ext import commands
+from discord.ui.view import ViewStore
 from discord.ext.commands.view import StringView
 
+from cogs.malfoyd_media import Inspection, PreviewStatus
 from cogs.malfoyd import (
     GUILD_ID,
     HEADING,
     MAX_REROLLS_PER_DAY,
     POLL_SECONDS,
     QUEUE_PATH,
+    REFRESH_CUSTOM_ID,
     ROLE_NAME,
     SETTINGS_PATH,
     THREAD_ID,
@@ -107,6 +110,50 @@ class FakeMember:
         self.roles = [item for item in self.roles if getattr(item, "id", None) not in remove_ids]
 
 
+class _OkPreview:
+    """Existing tests keep the normal vx link. They do not touch the network."""
+
+    async def inspect(self, url, budget):
+        return Inspection(PreviewStatus.OK, "test")
+
+    async def download(self, candidate, limit, directory, budget):
+        raise AssertionError("valid previews are not downloaded")
+
+
+def _pop_failure(owner, name):
+    failure = getattr(owner, name, None)
+    if isinstance(failure, list):
+        if not failure:
+            return None
+        return failure.pop(0)
+    return failure
+
+
+def _snapshot_files(files) -> list[tuple[object, bytes]]:
+    saved = []
+    for item in files or []:
+        name = getattr(item, "filename", None)
+        payload = b""
+        fp = getattr(item, "fp", None)
+        if fp is not None and hasattr(fp, "read"):
+            payload = fp.read()
+            if hasattr(fp, "seek"):
+                fp.seek(0)
+        saved.append((name, payload))
+    return saved
+
+
+class FakeMessage:
+    def __init__(self, message_id: int, thread):
+        self.id = message_id
+        self.deleted = False
+        self._thread = thread
+
+    async def delete(self, *, delay=None, reason=None):
+        self.deleted = True
+        self._thread.deleted_ids.append(self.id)
+
+
 class FakeThread:
     def __init__(self, *, archived: bool = False, fail_edit: BaseException | None = None, fail_send: BaseException | None = None):
         self.id = THREAD_ID
@@ -117,6 +164,15 @@ class FakeThread:
         self.fail_edit = fail_edit
         self.fail_send = fail_send
         self._next = 5000
+        self.messages = {}
+        self.fetched_ids = []
+        self.deleted_ids = []
+        self.uploads = []
+
+    def seed(self, message_id: int) -> FakeMessage:
+        message = FakeMessage(int(message_id), self)
+        self.messages[int(message_id)] = message
+        return message
 
     async def edit(self, **kwargs):
         if self.fail_edit is not None:
@@ -125,13 +181,26 @@ class FakeThread:
         if "archived" in kwargs:
             self.archived = kwargs["archived"]
 
+    async def fetch_message(self, message_id: int):
+        self.fetched_ids.append(message_id)
+        message = self.messages.get(message_id)
+        if message is None or message.deleted:
+            raise discord.NotFound(SimpleNamespace(status=404, reason="Not Found"), "unknown message")
+        return message
+
     async def send(self, content=None, **kwargs):
-        if self.fail_send is not None:
-            raise self.fail_send
+        files = kwargs.get("files")
+        if files:
+            self.uploads.append(_snapshot_files(files))
+        failure = _pop_failure(self, "fail_send")
+        if failure is not None:
+            raise failure
         self.archived_at_send.append(self.archived)
         self._next += 1
+        message = FakeMessage(self._next, self)
+        self.messages[self._next] = message
         self.sent.append((content, kwargs))
-        return SimpleNamespace(id=self._next)
+        return message
 
 
 class FakeGuild:
@@ -174,12 +243,22 @@ class FakeGuild:
         return role
 
 
+class FakeFollowup:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, content=None, **kwargs):
+        self.sent.append((content, kwargs))
+
+
 class FakeResponse:
     def __init__(self, fail_edit: BaseException | None = None):
         self.sent = []
         self.edits = []
+        self.deferred = []
         self.done = False
         self.fail_edit = fail_edit
+        self.uploads = []
 
     def is_done(self) -> bool:
         return self.done
@@ -189,10 +268,18 @@ class FakeResponse:
         self.sent.append((content, kwargs))
 
     async def edit_message(self, **kwargs):
-        if self.fail_edit is not None:
-            raise self.fail_edit
+        files = kwargs.get("attachments")
+        if files:
+            self.uploads.append(_snapshot_files(files))
+        failure = _pop_failure(self, "fail_edit")
+        if failure is not None:
+            raise failure
         self.done = True
         self.edits.append(kwargs)
+
+    async def defer(self, *, ephemeral=False, thinking=False):
+        self.done = True
+        self.deferred.append({"ephemeral": ephemeral, "thinking": thinking})
 
 
 class FakeBot:
@@ -244,7 +331,7 @@ class FakeBot:
         return None
 
 
-def _cog(tmp_path, queue=None, settings=None, *, clock=None, guild=None, thread=None):
+def _cog(tmp_path, queue=None, settings=None, *, clock=None, guild=None, thread=None, monotonic=None, media=None):
     queue_path = tmp_path / "malfoyd_queue.json"
     settings_path = tmp_path / "malfoyd_settings.json"
     if queue is not None:
@@ -261,6 +348,8 @@ def _cog(tmp_path, queue=None, settings=None, *, clock=None, guild=None, thread=
         queue_path=queue_path,
         settings_path=settings_path,
         clock=clock or (lambda: NOW),
+        monotonic=monotonic,
+        media=media or _OkPreview(),
     )
     bot._cog = cog
     for command in cog.walk_commands():
@@ -275,6 +364,7 @@ def _interaction(cog, *, user, message_id, guild=None, fail_edit=None):
         client=cog.bot,
         message=SimpleNamespace(id=message_id),
         response=FakeResponse(fail_edit=fail_edit),
+        followup=FakeFollowup(),
     )
 
 
@@ -393,7 +483,17 @@ def test_view_custom_ids_timeout_and_reroll_label():
     assert _button(empty, "malfoyd:reroll").disabled is True
     assert _button(full, "malfoyd:notify").custom_id == _button(empty, "malfoyd:notify").custom_id
     assert _button(full, "malfoyd:reroll").custom_id == _button(empty, "malfoyd:reroll").custom_id
-    assert {item.custom_id for item in full.children} == {"malfoyd:notify", "malfoyd:reroll"}
+    assert REFRESH_CUSTOM_ID == "malfoyd:refresh"
+    assert [item.custom_id for item in full.children] == [
+        "malfoyd:notify",
+        "malfoyd:reroll",
+    ]
+    assert [item.custom_id for item in empty.children] == [
+        "malfoyd:notify",
+        "malfoyd:reroll",
+    ]
+    assert len(full.children) == 2
+    assert all(item.custom_id != REFRESH_CUSTOM_ID for item in full.children)
     assert full.reroll.disabled is False
 
 
@@ -887,8 +987,12 @@ def test_cog_load_registers_persistent_view_and_unload_cancels(tmp_path):
             assert message_id is None
             assert view.timeout is None
             assert view.is_persistent()
-            assert {item.custom_id for item in view.children} == {"malfoyd:notify", "malfoyd:reroll"}
+            assert [item.custom_id for item in view.children] == [
+                "malfoyd:notify",
+                "malfoyd:reroll",
+            ]
             assert _button(view, "malfoyd:reroll").label == "Reroll (5 left)"
+            assert any(name == "on_interaction" for name, _callback in cog.get_listeners())
         finally:
             await cog.cog_unload()
             task = cog.poll_loop.get_task()
@@ -898,5 +1002,98 @@ def test_cog_load_registers_persistent_view_and_unload_cancels(tmp_path):
                 except asyncio.CancelledError:
                     pass
         assert not cog.poll_loop.is_running()
+
+    asyncio.run(run())
+
+
+def test_retired_refresh_click_replies_and_leaves_the_queue(tmp_path, caplog):
+    async def run():
+        cog = _cog(
+            tmp_path,
+            _queue(posted=True, message_id=5001, rerolls_used=2, index=1),
+        )
+        before = cog.queue_path.read_bytes()
+        interaction = _interaction(cog, user=FakeMember(4, cog.bot.guild), message_id=5001)
+        interaction.data = {"custom_id": REFRESH_CUSTOM_ID, "component_type": 2}
+        live = make_view(MAX_REROLLS_PER_DAY)
+        assert live.is_persistent()
+        assert not live.is_finished()
+        store = ViewStore(None)
+        store.add_view(live)
+        store.dispatch_view(2, REFRESH_CUSTOM_ID, interaction)
+        assert interaction.response.sent == []
+        await cog.on_interaction(interaction)
+        assert interaction.response.sent == [("Refresh is no longer available.", {"ephemeral": True})]
+        assert interaction.response.deferred == []
+        assert interaction.response.edits == []
+        assert interaction.followup.sent == []
+        assert cog.queue_path.read_bytes() == before
+        assert _saved(cog)["rerolls_used"] == 2
+        assert _saved(cog)["index"] == 1
+        assert _saved(cog)["message_id"] == 5001
+
+        notify = _interaction(cog, user=FakeMember(4, cog.bot.guild), message_id=5001)
+        notify.data = {"custom_id": "malfoyd:notify"}
+        await cog.on_interaction(notify)
+        assert notify.response.sent == []
+
+        plain = _interaction(cog, user=FakeMember(4, cog.bot.guild), message_id=5001)
+        await cog.on_interaction(plain)
+        assert plain.response.sent == []
+
+        attributed = _interaction(cog, user=FakeMember(4, cog.bot.guild), message_id=5001)
+        attributed.data = SimpleNamespace(custom_id=REFRESH_CUSTOM_ID)
+        await cog.on_interaction(attributed)
+        assert attributed.response.sent == [("Refresh is no longer available.", {"ephemeral": True})]
+
+        done = _interaction(cog, user=FakeMember(4, cog.bot.guild), message_id=5001)
+        done.data = {"custom_id": REFRESH_CUSTOM_ID}
+        done.response.done = True
+        await cog.on_interaction(done)
+        assert done.response.sent == []
+
+        class Boom:
+            def is_done(self):
+                return False
+
+            async def send_message(self, content=None, **kwargs):
+                raise RuntimeError("boom")
+
+        broken = _interaction(cog, user=FakeMember(4, cog.bot.guild), message_id=5001)
+        broken.data = {"custom_id": REFRESH_CUSTOM_ID}
+        broken.response = Boom()
+        with caplog.at_level(logging.ERROR, logger="cogs.malfoyd"):
+            await cog.on_interaction(broken)
+        assert "Malfoyd retired refresh reply failed" in caplog.text
+        assert cog.queue_path.read_bytes() == before
+
+    asyncio.run(run())
+
+
+def test_persistent_registration_omits_refresh(tmp_path):
+    async def run():
+        bot = commands.Bot(command_prefix="!", intents=discord.Intents.none())
+        cog = Malfoyd(
+            bot,
+            queue_path=tmp_path / "queue.json",
+            settings_path=tmp_path / "settings.json",
+            clock=lambda: NOW,
+            media=_OkPreview(),
+        )
+        try:
+            await bot.add_cog(cog)
+            ids = [item.custom_id for view in bot.persistent_views for item in view.children]
+            assert ids == ["malfoyd:notify", "malfoyd:reroll"]
+            assert REFRESH_CUSTOM_ID not in ids
+            assert cog.on_interaction in bot.extra_events["on_interaction"]
+        finally:
+            await bot.remove_cog("Malfoyd")
+            task = cog.poll_loop.get_task()
+            if task is not None:
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            await bot.close()
 
     asyncio.run(run())
