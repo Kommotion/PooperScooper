@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import random
+import re
+import shutil
+import subprocess
+import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 from urllib.parse import parse_qs, urlparse
 
 import discord
@@ -14,7 +20,12 @@ import wavelink
 from discord.ext import commands, tasks
 from discord.ext.commands import Cog
 
-from cogs.utils.lavalink_server import LavalinkServerManager, load_lavalink_settings
+from cogs.utils.lavalink_server import (
+    DEFAULT_LAVALINK_DIR,
+    WRAPPER_NAME,
+    LavalinkServerManager,
+    load_lavalink_settings,
+)
 from cogs.utils.utils import load_credentials
 from cogs.utils.voice_status import VoiceStatusManager
 
@@ -24,7 +35,14 @@ ONE_MEMBER = 1
 DEFAULT_VOLUME = 100  # Wavelink/Lavalink scale: 100 = 100%, max 1000
 TRACK_END_GRACE_SECONDS = 20
 MAX_QUEUE = 2000
+# Same ceiling Lavalink's ytdlp playlistLoadLimit uses. Recovery never asks for more.
+YOUTUBE_PLAYLIST_RECOVERY_LIMIT = 1000
+YTDLP_PLAYLIST_LIST_TIMEOUT_SECONDS = 90
 IDLE_STATUS_NAME = "for a missed pile of 💩"
+_YOUTUBE_VIDEO_ID = re.compile(r"^[A-Za-z0-9_-]{11}$")
+_YOUTUBE_PLAYLIST_ID = re.compile(r"^[A-Za-z0-9_-]{10,80}$")
+_SKIP_PLAYLIST_ENTRY = object()
+_ENCODE_FAILURE = "Lavalink couldn't encode that playlist (HTTP 500)"
 PRESENCE_NAME_LIMIT = 128
 
 
@@ -127,6 +145,378 @@ def canonical_youtube_url(query: str) -> str:
     if video_id:
         return f"https://www.youtube.com/watch?v={video_id}"
     return raw
+
+
+def youtube_playlist_id(query: str) -> str | None:
+    """The id of a YouTube /playlist URL, when it is safe to hand to yt-dlp.
+
+    Radio mixes (list=RD...) are not included. A watch URL is not included
+    either; canonical_youtube_url turns a real playlist share into /playlist first.
+    """
+    raw = query.strip()
+    if not raw.lower().startswith(("http://", "https://")):
+        return None
+    parsed = urlparse(raw)
+    host = parsed.netloc.lower().removeprefix("www.")
+    if host not in {"youtube.com", "m.youtube.com", "music.youtube.com"}:
+        return None
+    if parsed.path.strip("/") != "playlist":
+        return None
+    playlist_id = (parse_qs(parsed.query).get("list") or [""])[0]
+    if _YOUTUBE_PLAYLIST_ID.fullmatch(playlist_id) is None:
+        return None
+    if playlist_id.startswith("RD"):
+        return None
+    return playlist_id
+
+
+def youtube_watch_url(video_id: str) -> str:
+    """One video, with no playlist parameter, so Lavalink does not reload the whole list."""
+    if _YOUTUBE_VIDEO_ID.fullmatch(video_id) is None:
+        raise ValueError("not a YouTube video id")
+    return f"https://www.youtube.com/watch?v={video_id}"
+
+
+def loadtracks_http_500(exc: BaseException) -> bool:
+    """True for the HTTP 500 that aborts an entire /v4/loadtracks response.
+
+    lavaplayer 2.2.6 encodeTrack line 226 is writeUTF(trackInfo.title). A null
+    title raises NullPointerException while Lavalink is still writing the
+    playlist it already loaded, and the client only receives this 500.
+    loadType=error bodies are LavalinkLoadException and are not this case.
+    """
+    if not isinstance(exc, wavelink.LavalinkException):
+        return False
+    if getattr(exc, "status", None) != 500:
+        return False
+    path = getattr(exc, "path", None)
+    if not isinstance(path, str):
+        return False
+    return path.split("?", 1)[0].rstrip("/") == "/v4/loadtracks"
+
+
+class PlaylistListingError(Exception):
+    """yt-dlp could not produce a playlist entry list. Nothing was queued."""
+
+
+def executable_from_ytdlp_wrapper(text: str) -> str | None:
+    """The quoted executable on a Lavalink yt-dlp wrapper line.
+
+    The wrapper is a command the Lavalink setup writes. It is not the
+    credentials file. The path is returned only as text; the caller checks
+    that it is a file before starting it.
+    """
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith('"'):
+            continue
+        end = stripped.find('"', 1)
+        if end <= 1:
+            continue
+        return stripped[1:end]
+    return None
+
+
+def locate_ytdlp_executable() -> str | None:
+    """Find yt-dlp without reading Lavalink or bot credentials."""
+    found = shutil.which("yt-dlp")
+    if found:
+        return found
+    wrapper = DEFAULT_LAVALINK_DIR / WRAPPER_NAME
+    try:
+        text = wrapper.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    path = executable_from_ytdlp_wrapper(text)
+    if path and Path(path).is_file():
+        return str(Path(path))
+    return None
+
+
+def _classify_playlist_entry(entry: object) -> str | None | object:
+    """A video id LavaSrc would try to encode, None if that entry is unusable, or skip.
+
+    Non-YouTube rows are ignored, matching YtdlpAudioSourceManager.parsePlaylist.
+    A YouTube row with no 11-character id cannot be loaded on its own.
+    Title is not consulted: a missing flat-playlist title is still loaded as a video.
+    """
+    if not isinstance(entry, dict):
+        return _SKIP_PLAYLIST_ENTRY
+    ie_key = entry.get("ie_key")
+    if not isinstance(ie_key, str) or ie_key.lower() != "youtube":
+        return _SKIP_PLAYLIST_ENTRY
+    video_id = entry.get("id")
+    if not isinstance(video_id, str) or _YOUTUBE_VIDEO_ID.fullmatch(video_id) is None:
+        return None
+    return video_id
+
+
+def parse_ytdlp_playlist(payload: object, *, limit: int) -> tuple[list[str], int, int]:
+    """Video ids in playlist order, plus unusable rows and rows past `limit`.
+
+    `playlist_count` is trusted only when it is a real int larger than the
+    entry list yt-dlp actually returned. A truncated count is left alone
+    rather than inventing a remainder.
+    """
+    if not isinstance(payload, dict):
+        raise PlaylistListingError("yt-dlp did not return a playlist object")
+    entries = payload.get("entries")
+    if not isinstance(entries, list):
+        raise PlaylistListingError("yt-dlp did not return a playlist entry list")
+    ids: list[str] = []
+    malformed = 0
+    not_attempted = 0
+    for entry in entries:
+        classified = _classify_playlist_entry(entry)
+        if classified is _SKIP_PLAYLIST_ENTRY:
+            continue
+        if classified is None:
+            if len(ids) < limit:
+                malformed += 1
+            else:
+                not_attempted += 1
+            continue
+        if len(ids) >= limit:
+            not_attempted += 1
+            continue
+        ids.append(classified)
+    playlist_count = payload.get("playlist_count")
+    if type(playlist_count) is int and playlist_count > len(entries):
+        not_attempted += playlist_count - len(entries)
+    return ids, malformed, not_attempted
+
+
+def _hidden_process_flag() -> int:
+    return subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+
+
+def _run_ytdlp(argv: list[str]) -> str:
+    """Run yt-dlp from an argument list. The playlist URL is one argument, never a shell line."""
+    if not isinstance(argv, list) or not argv or not all(isinstance(part, str) for part in argv):
+        raise PlaylistListingError("yt-dlp arguments must be a list of strings")
+    if any("\n" in part or "\r" in part for part in argv):
+        raise PlaylistListingError("yt-dlp arguments must be single-line")
+    try:
+        completed = subprocess.run(
+            argv,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=YTDLP_PLAYLIST_LIST_TIMEOUT_SECONDS,
+            shell=False,
+            check=False,
+            creationflags=_hidden_process_flag(),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise PlaylistListingError("yt-dlp timed out listing the playlist") from exc
+    except OSError as exc:
+        raise PlaylistListingError("yt-dlp could not be started") from exc
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip().replace("\n", " ")
+        if len(detail) > 180:
+            detail = detail[:180]
+        raise PlaylistListingError(detail or "yt-dlp failed to list the playlist")
+    if not completed.stdout:
+        raise PlaylistListingError("yt-dlp returned no playlist text")
+    return completed.stdout
+
+
+def list_youtube_playlist_video_ids(
+    playlist_id: str,
+    *,
+    limit: int = YOUTUBE_PLAYLIST_RECOVERY_LIMIT,
+    executable: str | None = None,
+    runner: Callable[[list[str]], str] | None = None,
+) -> tuple[list[str], int, int]:
+    """List up to `limit` video ids for a playlist id this process built.
+
+    The id must already match a YouTube playlist id. It is placed in one argv
+    element. Callers pass `runner` in tests so this never reaches the network.
+    """
+    if _YOUTUBE_PLAYLIST_ID.fullmatch(playlist_id) is None or playlist_id.startswith("RD"):
+        raise PlaylistListingError("Refusing to list a playlist id that is not a plain YouTube id")
+    if type(limit) is not int or limit < 1 or limit > YOUTUBE_PLAYLIST_RECOVERY_LIMIT:
+        raise PlaylistListingError("Playlist recovery limit is out of bounds")
+    if executable is not None and not executable.strip():
+        raise PlaylistListingError("yt-dlp is not available")
+    exe = executable or locate_ytdlp_executable()
+    if not exe:
+        raise PlaylistListingError("yt-dlp is not available")
+    argv = [
+        exe,
+        "-q",
+        "--no-warnings",
+        "--flat-playlist",
+        "--skip-download",
+        "--playlist-items",
+        f"1:{limit}",
+        "-J",
+        "--",
+        f"https://www.youtube.com/playlist?list={playlist_id}",
+    ]
+    stdout = (runner or _run_ytdlp)(argv)
+    if not isinstance(stdout, str) or not stdout.strip():
+        raise PlaylistListingError("yt-dlp returned no playlist text")
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise PlaylistListingError("yt-dlp did not return playlist JSON") from exc
+    return parse_ytdlp_playlist(payload, limit=limit)
+
+
+def first_loaded_track(result) -> wavelink.Playable | None:
+    """The one video a single watch URL resolved to.
+
+    A watch URL is one playlist row. Extra rows in that response are not
+    additional playlist entries, so they are not queued.
+    """
+    if isinstance(result, wavelink.Playlist):
+        tracks = list(result.tracks)
+    elif isinstance(result, list):
+        tracks = result
+    else:
+        return None
+    return tracks[0] if tracks else None
+
+
+@dataclass
+class TrackResolve:
+    tracks: list
+    unplayable: int = 0
+    not_attempted: int = 0
+    listing_failed: bool = False
+    empty_listing: bool = False
+    stopped_early: bool = False
+    recovered: bool = False
+
+
+@dataclass(frozen=True)
+class QueueNotice:
+    title: str
+    description: str
+    error: bool
+
+
+def _classic_queue_notice(url: str, queued: int, queue_skipped: int) -> QueueNotice:
+    if queued == 0 and queue_skipped == 0:
+        return QueueNotice(
+            "Error",
+            "Could not find any playable tracks for that query.",
+            True,
+        )
+    if queued == 0:
+        return QueueNotice(
+            "Queued up",
+            f"The queue is full ({MAX_QUEUE} tracks). Nothing new was added.",
+            False,
+        )
+    shown = url if queued == 1 else f"{queued} songs"
+    if queue_skipped:
+        return QueueNotice(
+            "Queued up",
+            f"{shown}. {queue_skipped} didn't fit because the queue is capped at {MAX_QUEUE}.",
+            False,
+        )
+    return QueueNotice("Queued up", shown, False)
+
+
+def _untried_sentence(count: int, *, stopped_early: bool) -> str:
+    if stopped_early:
+        return f"{count} more weren't tried because Lavalink stopped accepting track loads."
+    return (
+        f"{count} more weren't tried because playlist recovery stops at "
+        f"{YOUTUBE_PLAYLIST_RECOVERY_LIMIT}."
+    )
+
+
+def queue_result_copy(
+    url: str,
+    queued: int,
+    queue_skipped: int,
+    outcome: TrackResolve,
+) -> QueueNotice:
+    """What !play tells the user.
+
+    A normal load keeps the previous sentences. A playlist whose encode step
+    returned HTTP 500 says how many tracks were actually queued, how many
+    could not be loaded, and how many were never tried.
+    """
+    involved = bool(
+        outcome.recovered
+        or outcome.listing_failed
+        or outcome.empty_listing
+        or outcome.stopped_early
+        or outcome.unplayable
+        or outcome.not_attempted
+    )
+    if not involved:
+        return _classic_queue_notice(url, queued, queue_skipped)
+    if queued == 0 and queue_skipped > 0:
+        return _classic_queue_notice(url, queued, queue_skipped)
+    if queued == 0 and outcome.listing_failed:
+        return QueueNotice(
+            "Error",
+            f"{_ENCODE_FAILURE}, and the video list could not be read. Nothing was queued.",
+            True,
+        )
+    if queued == 0 and outcome.empty_listing:
+        return QueueNotice(
+            "Error",
+            f"{_ENCODE_FAILURE}. The playlist didn't include any videos. Nothing was queued.",
+            True,
+        )
+    if queued == 0 and outcome.stopped_early and outcome.unplayable == 0:
+        return QueueNotice(
+            "Error",
+            f"{_ENCODE_FAILURE}, then stopped accepting individual track loads. Nothing was queued.",
+            True,
+        )
+    if queued == 0 and outcome.unplayable:
+        if outcome.unplayable == 1:
+            sentence = f"{_ENCODE_FAILURE}. The track I checked couldn't be loaded."
+        else:
+            sentence = (
+                f"{_ENCODE_FAILURE}. None of the {outcome.unplayable} "
+                "tracks I checked could be loaded."
+            )
+        if outcome.not_attempted:
+            sentence += " " + _untried_sentence(
+                outcome.not_attempted,
+                stopped_early=outcome.stopped_early,
+            )
+        elif outcome.stopped_early:
+            sentence += " Lavalink then stopped accepting track loads."
+        return QueueNotice("Error", sentence, True)
+    if queued == 0:
+        sentence = f"{_ENCODE_FAILURE}. Nothing was queued."
+        if outcome.not_attempted:
+            sentence += " " + _untried_sentence(
+                outcome.not_attempted,
+                stopped_early=outcome.stopped_early,
+            )
+        return QueueNotice("Error", sentence, True)
+
+    notes: list[str] = []
+    if outcome.unplayable == 1:
+        notes.append("1 track couldn't be loaded and was skipped.")
+    elif outcome.unplayable:
+        notes.append(f"{outcome.unplayable} tracks couldn't be loaded and were skipped.")
+    if outcome.not_attempted:
+        notes.append(
+            _untried_sentence(outcome.not_attempted, stopped_early=outcome.stopped_early)
+        )
+    elif outcome.stopped_early:
+        notes.append("Lavalink stopped accepting track loads before the rest of the playlist.")
+    if queue_skipped:
+        notes.append(
+            f"{queue_skipped} didn't fit because the queue is capped at {MAX_QUEUE}."
+        )
+    shown = url if queued == 1 else f"{queued} songs"
+    if not notes:
+        return QueueNotice("Queued up", shown, False)
+    return QueueNotice("Queued up", f"{shown}. " + " ".join(notes), False)
 
 
 def music_presence(titles: list[str]) -> tuple[discord.ActivityType, str]:
@@ -1680,19 +2070,119 @@ class Music(Cog):
 
         return max(tracks, key=score)
 
+    def _tracks_from_result(self, query: str, result, *, single_track: bool) -> TrackResolve:
+        if not result:
+            return TrackResolve([])
+        if isinstance(result, wavelink.Playlist):
+            tracks = list(result.tracks)
+        else:
+            tracks = list(result)
+        if single_track:
+            best = self._pick_best_track(query, tracks)
+            return TrackResolve([best] if best else [])
+        return TrackResolve(tracks)
+
+    async def _recover_youtube_playlist(self, playlist_url: str) -> TrackResolve:
+        """Load a playlist one video at a time after /v4/loadtracks returned HTTP 500.
+
+        The playlist request is not repeated. Each watch URL is loaded once.
+        A 500 on one video is that video; any other Lavalink failure stops the walk.
+        """
+        playlist_id = youtube_playlist_id(playlist_url)
+        if playlist_id is None:
+            return TrackResolve([], recovered=True, listing_failed=True)
+        log.warning(
+            "Lavalink HTTP 500 on /v4/loadtracks for %s; loading videos individually",
+            playlist_url,
+        )
+        try:
+            video_ids, malformed, not_attempted = await asyncio.to_thread(
+                list_youtube_playlist_video_ids,
+                playlist_id,
+                limit=YOUTUBE_PLAYLIST_RECOVERY_LIMIT,
+            )
+        except PlaylistListingError as exc:
+            log.warning("Could not list videos for playlist %s: %s", playlist_id, exc)
+            return TrackResolve([], recovered=True, listing_failed=True)
+
+        if not video_ids and malformed == 0 and not_attempted == 0:
+            return TrackResolve([], recovered=True, empty_listing=True)
+
+        tracks = []
+        unplayable = malformed
+        stopped_early = False
+        for index, video_id in enumerate(video_ids):
+            if _YOUTUBE_VIDEO_ID.fullmatch(video_id) is None:
+                unplayable += 1
+                continue
+            watch = youtube_watch_url(video_id)
+            try:
+                result = await self._search(watch)
+            except wavelink.LavalinkLoadException:
+                unplayable += 1
+                continue
+            except wavelink.LavalinkException as exc:
+                if loadtracks_http_500(exc):
+                    unplayable += 1
+                    continue
+                stopped_early = True
+                not_attempted += len(video_ids) - index
+                log.warning(
+                    "Stopped playlist recovery for %s at %s: %s",
+                    playlist_id,
+                    video_id,
+                    exc,
+                )
+                break
+            except (wavelink.NodeException, wavelink.InvalidNodeException) as exc:
+                stopped_early = True
+                not_attempted += len(video_ids) - index
+                log.warning(
+                    "Stopped playlist recovery for %s at %s: %s",
+                    playlist_id,
+                    video_id,
+                    exc,
+                )
+                break
+            track = first_loaded_track(result)
+            if track is None:
+                unplayable += 1
+                continue
+            tracks.append(track)
+
+        log.warning(
+            "Playlist %s individual load kept %s, skipped %s, left %s untried",
+            playlist_id,
+            len(tracks),
+            unplayable,
+            not_attempted,
+        )
+        return TrackResolve(
+            tracks,
+            unplayable=unplayable,
+            not_attempted=not_attempted,
+            stopped_early=stopped_early,
+            recovered=True,
+        )
+
     async def _resolve_tracks(
         self,
         query: str,
         *,
         expand_collection: bool = False,
-    ) -> list[wavelink.Playable]:
+    ) -> TrackResolve:
         query = canonical_youtube_url(query.strip())
         result = None
         is_url = self._is_url(query)
         single_track = not is_url and not expand_collection
 
         if is_url:
-            result = await self._search(query)
+            try:
+                result = await self._search(query)
+            except wavelink.LavalinkException as exc:
+                if loadtracks_http_500(exc) and youtube_playlist_id(query):
+                    return await self._recover_youtube_playlist(query)
+                raise
         else:
             # Wavelink defaults to ytmsearch, which we do not have enabled.
             # Try Spotify first (albums/playlists), then YouTube via LavaSrc ytdlp.
@@ -1702,21 +2192,7 @@ class Music(Cog):
                     log.info("Resolved %r via %s", query, source)
                     break
 
-        if not result:
-            return []
-
-        if isinstance(result, wavelink.Playlist):
-            tracks = list(result.tracks)
-            if single_track:
-                best = self._pick_best_track(query, tracks)
-                return [best] if best else []
-            return tracks
-
-        tracks = list(result)
-        if single_track:
-            best = self._pick_best_track(query, tracks)
-            return [best] if best else []
-        return tracks
+        return self._tracks_from_result(query, result, single_track=single_track)
 
     async def _play(self, ctx, url, shuffle=False, expand_collection=False):
         if not self._lavalink_ready():
@@ -1730,38 +2206,27 @@ class Music(Cog):
 
         async with ctx.typing():
             try:
-                tracks = await self._resolve_tracks(url, expand_collection=expand_collection)
+                outcome = await self._resolve_tracks(url, expand_collection=expand_collection)
             except Exception as e:
                 log.warning("Failed to resolve tracks for %s: %s", url, e)
-                tracks = []
+                outcome = TrackResolve([])
 
-            if not tracks:
-                embed = discord.Embed(
-                    title='Error',
-                    description='Could not find any playable tracks for that query.',
-                    colour=discord.Colour.red(),
-                )
+            queued = 0
+            skipped = 0
+            if outcome.tracks:
+                if shuffle:
+                    random.shuffle(outcome.tracks)
+                queued, skipped = await self._enqueue(ctx, outcome.tracks)
+            notice = queue_result_copy(url, queued, skipped, outcome)
+            colour = discord.Colour.red() if notice.error else discord.Colour.blue()
+            embed = discord.Embed(
+                title=notice.title,
+                description=notice.description,
+                colour=colour,
+            )
+            if notice.error:
                 await ctx.send(embed=embed)
                 return
-
-            if shuffle:
-                random.shuffle(tracks)
-
-            queued, skipped = await self._enqueue(ctx, tracks)
-            if queued == 0:
-                description = f"The queue is full ({MAX_QUEUE} tracks). Nothing new was added."
-            elif skipped:
-                shown = url if queued == 1 else f"{queued} songs"
-                description = (
-                    f"{shown}. {skipped} didn't fit because the queue is capped at {MAX_QUEUE}."
-                )
-            else:
-                description = url if queued == 1 else f"{queued} songs"
-            embed = discord.Embed(
-                title='Queued up',
-                description=description,
-                colour=discord.Colour.blue(),
-            )
 
         await ctx.send(embed=embed)
 
