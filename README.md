@@ -6,7 +6,7 @@ Feel free to use this as a reference for your own bot.
 
 Per-guild settings use `server_configs/<guild_id>.json`. See [docs/SERVER_CONFIGS.md](docs/SERVER_CONFIGS.md).
 
-Runtime JSON data (gametime, birthdays, bingo, game picker) is stored under `data/`.
+Runtime JSON data (gametime, birthdays, bingo, game picker, candy hunt, turkey hunt) is stored under `data/`. The Thanksgiving turkey hunt is documented in [docs/README_turkeyhunt.md](docs/README_turkeyhunt.md). It stays loaded while the live event is off until `thanksgiving_enabled` is set.
 
 ## Key Features
 1. Music (Lavalink / Wavelink)

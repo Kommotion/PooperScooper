@@ -160,6 +160,12 @@ class ServerConfig:
         raw = self._data.get("candy_hunt", {})
         return raw if isinstance(raw, dict) else {}
 
+    @property
+    def turkey_hunt(self) -> dict[str, Any]:
+        """Optional turkey-hunt overrides. Missing section means use cog defaults."""
+        raw = self._data.get("turkey_hunt", {})
+        return raw if isinstance(raw, dict) else {}
+
     def is_image_diffusion_channel(self, channel_id: int) -> bool:
         return channel_id in self.image_diffusion_channel_ids
 

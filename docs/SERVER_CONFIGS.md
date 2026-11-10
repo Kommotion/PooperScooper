@@ -123,6 +123,45 @@ The default hunt runs from Oct 31 10:00 AM through Nov 1 6:00 AM Pacific. From 6
 
 The same object also accepts the other schedule keys the cog already reads (`event_date`, `min_interval_minutes`, `max_interval_minutes`, `drop_expiry_minutes`, `trick_chance`, and the announcement and wrap-up fields).
 
+### `turkey_hunt`
+
+Optional overrides for the Thanksgiving turkey hunt (`cogs/turkeyhunt.py`, planned by `cogs/hunt/`). A missing section keeps the cog defaults. Invalid values are ignored. `guild_id` is not overridable. The full operator note is `docs/README_turkeyhunt.md`.
+
+`thanksgiving_enabled` is a bot-wide boolean in `config.json`, not a key in the guild file (see `config.example.json`). Missing means `false`. The turkey cog still loads, so `!turkeyadmin` can preview and run test drops. The scheduled live event does nothing until the flag is `true` and the bot is restarted: no kickoff, drops, recaps, winner post, cleanup, or avatar change. This does not turn Halloween on. `cogs.turkeyhunt` is not a Halloween extension.
+
+Drops are posted only in the channel id `drop_channel_id`. The default is `932057681307512924`, MTS #general, the same id as `MAIN_DROP_CHANNEL_ID` in `cogs/candyhunt.py`. The bot looks that channel up by id. It does not search by name.
+
+The public slash command is `/turkeys`, registered for Menaces to Sobriety and the support server the same way as `/candy`. Loading this cog does not sync commands. After a later approved restart, Nick runs `!sync_commands ~` himself in each of those guilds. Owner controls are the hidden prefix group `!turkeyadmin` (not a slash command): `status`, `schedule [save]`, `cleanup [true|false]` (omitted means dry-run), `testdrop <channel>`, `test_session [minutes] [interval] [channel]`, `test_session_stop`, `simulate [iso]`, and `power on|off`. Test sessions and test drops are refused in Menaces to Sobriety and on the live drop channel. Cleanup runs only in Menaces to Sobriety.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `timezone` | string | IANA zone for every clock. Default: `America/Los_Angeles`. |
+| `drop_channel_id` | int | The only channel that receives live drops. Default: `932057681307512924` (MTS #general). |
+| `event_start` | string | ISO datetime for the kickoff and the first moment drops may post. Default: Friday 2026-11-20 05:00 Pacific. |
+| `drops_end` | string | ISO datetime when open turkeys close and no further drops post. Default: Sunday 2026-11-29 22:00 Pacific. |
+| `final_at` | string | ISO datetime for the winner post and cleanup. Default: Monday 2026-11-30 10:00 Pacific. |
+| `window_start` / `window_end` | string | Local `HH:MM` drop window. Defaults: `05:00` and `22:00`. |
+| `early_start` / `early_end` | string | Every day gets a drop in this range. Defaults: `05:00` and `08:00`. |
+| `late_start` / `late_end` | string | Every regular day gets a drop in this range. Defaults: `20:00` and `22:00`. |
+| `sunday_last_drop` | string | Last drop on the finale date (the local date of `drops_end`, Sunday 2026-11-29). Default: `21:30`. Sunday 2026-11-22 is a regular day and may drop through `22:00`. |
+| `recap_time` | string | Local `HH:MM` daily recap, including the finale Sunday. Default: `22:30`. |
+| `min_gap_minutes` / `max_gap_minutes` | int | Inclusive gap between drops on the same day. Defaults: `20` and `180`. |
+| `cluster_gap_minutes` | int | A cluster is a gap at or under this many minutes. Every day has at least one. Default: `30`. |
+| `lifetime_minutes` | int | How long a turkey stays up. Default: `45`. |
+| `thanksgiving_lifetime_minutes` | int | Lifetime on `thanksgiving_date`. Default: `30`. |
+| `regular_low` / `regular_high` / `regular_weights` | int / int / number[] | Count range and bias for days that are not Thanksgiving and not the finale. Defaults: `6`, `10`, `[1, 2, 4, 6, 5]`. |
+| `thanksgiving_date` | string | `YYYY-MM-DD`. Default: `2026-11-26`. |
+| `thanksgiving_low` / `thanksgiving_high` / `thanksgiving_weights` | int / int / number[] | Defaults: `18`, `22`, `[1, 2, 5, 2, 1]`. |
+| `finale_low` / `finale_high` / `finale_weights` | int / int / number[] | The `drops_end` date. Defaults: `8`, `10`, `[2, 5, 3]`. |
+| `target_total` | int | The planner nudges the biased draw onto this total when it sits inside the raw low/high bound. Default: `100`. The raw bound for these ranges is 74–112. |
+| `regular_weight` / `plump_weight` / `golden_weight` | float | Appearance odds, `0`–`1`. Defaults: `0.75`, `0.20`, `0.05`. |
+| `regular_points` / `plump_points` / `golden_points` | int | Defaults: `1`, `3`, `10`. |
+| `grease_chance` | float | Slip chance on Regular turkeys only. Default: `0.1`. |
+| `prize_line` | string | Shown on the winner post. Empty means `Prize: (not set yet)`. Role pings are rejected. |
+| `avatar_path` | string | Pilgrim avatar, relative to the repo. Default: `assets/avatars/pilgrim_shepherd.png`. A missing file skips the avatar change and still posts the kickoff. |
+| `guarantee_key` | string | Forced when the last Thanksgiving drop is rolled and that type has not appeared yet. Default: `golden`. |
+| `cleanup_skip_channel_ids` | int[] | Never delete in these channels. Default includes MTS announcements `1019352642977267743`. |
+
 ## Palworld operational config (separate file)
 
 Server process settings (auto-restart, backups, log rotation) are in **`palworld_config.json`** at the repo root, not in `server_configs/`.

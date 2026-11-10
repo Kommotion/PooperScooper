@@ -34,16 +34,19 @@ initial_extensions = [
     'cogs.candyhunt',
     'cogs.costume',
     'cogs.malfoyd',
+    'cogs.turkeyhunt',
 ]
 
-# Candy hunt and costume are the Halloween cogs. Malfoyd stays either way.
+# Candy hunt and costume are the Halloween cogs. Malfoyd and the turkey hunt stay either way.
 _HALLOWEEN_EXTENSIONS = frozenset({'cogs.candyhunt', 'cogs.costume'})
 
 
 def extensions_to_load(cfg) -> list[str]:
     """Cog names to load. Halloween cogs stay out unless halloween_enabled is true.
 
-    A missing config object or a missing flag counts as off. ``cogs.malfoyd`` always stays.
+    A missing config object or a missing flag counts as off. ``cogs.malfoyd`` and
+    ``cogs.turkeyhunt`` always stay. The live turkey event is gated by
+    ``thanksgiving_enabled``, not by this list.
     """
     if bool(getattr(cfg, 'halloween_enabled', False)):
         return list(initial_extensions)

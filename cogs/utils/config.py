@@ -71,6 +71,8 @@ class BotConfig(BaseModel):
     grok_webhook_key_header: str = ""
     # Missing key stays off: candy hunt, costume, and /halloweenify do not load.
     halloween_enabled: bool = False
+    # Missing key stays off: the turkey cog still loads, but the live hunt does nothing.
+    thanksgiving_enabled: bool = False
 
     def to_credentials_dict(self) -> dict[str, Any]:
         """Legacy dict shape used by Lavalink helpers and Wavelink bootstrap."""
@@ -179,6 +181,15 @@ def load_config(*, reload: bool = False) -> BotConfig:
     merged = _apply_env_overrides(file_data)
     _config = BotConfig.model_validate(merged)
     return _config
+
+
+def thanksgiving_enabled_from_config() -> bool:
+    """True only when config.json sets thanksgiving_enabled. A missing key or read error is off."""
+    try:
+        return bool(load_config().thanksgiving_enabled)
+    except Exception:
+        log.error("Could not read thanksgiving_enabled; the live turkey hunt stays off")
+        return False
 
 
 def load_palworld_config(*, reload: bool = False) -> PalworldConfig:
