@@ -992,11 +992,11 @@ def _identity_edit_workflow() -> dict:
     return {
         "53": {
             "class_type": "KSampler",
-            "inputs": {"seed": 0, "steps": 10, "cfg": 1, "denoise": 1},
+            "inputs": {"seed": 0, "steps": 8, "cfg": 1, "denoise": 1},
         },
         "79": {
             "class_type": "Krea2EditModelPatch",
-            "inputs": {"ref_boost": 4.0, "ref_boost_a": 1.0, "fit_mode": "fit"},
+            "inputs": {"ref_boost": 2.0, "ref_boost_a": 1.0, "fit_mode": "fit"},
         },
         "82": {
             "class_type": "EmptySD3LatentImage",
@@ -1046,7 +1046,7 @@ def test_preservation_instruction_and_strength_for_every_costume(preset):
     assert image.model is Models.KREA2_IDENTITY_EDIT
     assert image.edit_strength == HALLOWEENIFY_EDIT_STRENGTH
     assert image.retain_source is True
-    assert HALLOWEENIFY_EDIT_STRENGTH > 4.0
+    assert HALLOWEENIFY_EDIT_STRENGTH > 2.0
 
     workflow = _identity_edit_workflow()
     patched = ComfyKrea2IdentityEditModel()._apply_prompts_to_workflow(
@@ -1059,7 +1059,7 @@ def test_preservation_instruction_and_strength_for_every_costume(preset):
     # empty latent; ref_boost is the dial that keeps the original.
     assert patched["53"]["inputs"]["cfg"] == 1
     assert patched["53"]["inputs"]["denoise"] == 1
-    assert workflow["79"]["inputs"]["ref_boost"] == 4.0
+    assert workflow["79"]["inputs"]["ref_boost"] == 2.0
 
 
 def test_plain_identity_edit_keeps_the_workflow_strength():
@@ -1073,7 +1073,7 @@ def test_plain_identity_edit_keeps_the_workflow_strength():
     patched = ComfyKrea2IdentityEditModel()._apply_prompts_to_workflow(
         _identity_edit_workflow(), image.prompt, "", image
     )
-    assert patched["79"]["inputs"]["ref_boost"] == 4.0
+    assert patched["79"]["inputs"]["ref_boost"] == 2.0
     assert patched["53"]["inputs"]["denoise"] == 1
 
 

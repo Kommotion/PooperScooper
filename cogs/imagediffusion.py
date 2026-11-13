@@ -36,6 +36,7 @@ from cogs.utils.image_models import (
     ComfyOneObsessionAnimaModel,
     ComfyKrea2TurboModel,
     ComfyRedCraftModel,
+    ComfyFlux3KleinInt8Model,
     ComfyKrea2IdentityEditModel,
 )
 from PIL import Image as PILImage
@@ -71,8 +72,9 @@ HALLOWEENIFY_STYLE_PRESERVATION = (
 )
 # Krea 2 Identity Edit samples an empty latent, so KSampler denoise does not keep
 # the source (lowering it would keep empty-latent noise). The fidelity dial is
-# ref_boost: higher clings harder to the original. The workflow default is 4.
-# 6 is more conservative for every costume and stays under the over-copy cliff near 10.
+# ref_boost: higher clings harder to the original. The v2 workflow default is 2
+# (8 steps, CFG 1). 6 is 3x that default and stays under the over-copy cliff near 10.
+# TODO: re-tune HALLOWEENIFY_EDIT_STRENGTH for Identity Edit LoRA v2 before next Halloween.
 HALLOWEENIFY_EDIT_STRENGTH = 6.0
 # Older name for the guardrail text. The full job prompt is build_halloweenify_prompt().
 HALLOWEENIFY_PROMPT = HALLOWEENIFY_BASE_PROMPT
@@ -401,13 +403,13 @@ class ImageGenPrefView(ui.View):
                 discord.SelectOption(
                     label="One Obsession Illustrious (NSFW)",
                     value=Models.ONE_OBSESSION_ILLUSTRIOUS,
-                    description="One Obsession v23 Illustrious",
+                    description="One Obsession v24 Illustrious",
                     default=(default_model == Models.ONE_OBSESSION_ILLUSTRIOUS),
                 ),
                 discord.SelectOption(
                     label="One Obsession Anima (NSFW)",
                     value=Models.ONE_OBSESSION_ANIMA,
-                    description="One Obsession Anima v2.0",
+                    description="One Obsession Anima v5.0",
                     default=(default_model == Models.ONE_OBSESSION_ANIMA),
                 ),
                 discord.SelectOption(
@@ -421,6 +423,12 @@ class ImageGenPrefView(ui.View):
                     value=Models.REDCRAFT,
                     description="RedCraft 2.3 Krea2 INT8/INT4/FP8",
                     default=(default_model == Models.REDCRAFT),
+                ),
+                discord.SelectOption(
+                    label="FLUX 3 Klein INT8",
+                    value=Models.FLUX3_KLEIN_INT8,
+                    description="FLUX 3 Klein distilled INT8 (16 steps)",
+                    default=(default_model == Models.FLUX3_KLEIN_INT8),
                 ),
             ]
         )
@@ -786,6 +794,7 @@ class ImageDiffusion(Cog):
             Models.ONE_OBSESSION_ANIMA,
             Models.KREA2_TURBO,
             Models.REDCRAFT,
+            Models.FLUX3_KLEIN_INT8,
             Models.KREA2_IDENTITY_EDIT,
         ]
 
@@ -798,6 +807,7 @@ class ImageDiffusion(Cog):
             Models.ONE_OBSESSION_ANIMA: ComfyOneObsessionAnimaModel(),
             Models.KREA2_TURBO: ComfyKrea2TurboModel(),
             Models.REDCRAFT: ComfyRedCraftModel(),
+            Models.FLUX3_KLEIN_INT8: ComfyFlux3KleinInt8Model(),
             Models.KREA2_IDENTITY_EDIT: ComfyKrea2IdentityEditModel(),
         }
 
@@ -904,6 +914,7 @@ class ImageDiffusion(Cog):
         app_commands.Choice(name="One Obsession Anima (NSFW)", value=Models.ONE_OBSESSION_ANIMA.value),
         app_commands.Choice(name="Krea 2 Turbo", value=Models.KREA2_TURBO.value),
         app_commands.Choice(name="RedCraft", value=Models.REDCRAFT.value),
+        app_commands.Choice(name="FLUX 3 Klein INT8", value=Models.FLUX3_KLEIN_INT8.value),
     ])
     @app_commands.guild_only()
     async def generate(self, interaction: discord.Interaction,

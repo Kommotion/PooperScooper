@@ -39,14 +39,17 @@ Browser UI   ─────────►  http://127.0.0.1:8188
 | `z_image_turbo_fp8` | `ComfyZImageTurboModel` | `Z_IMAGE_TURBO_FP8_API.json` | |
 | `anima_aesthetic` | `ComfyAnimaAestheticModel` | `ANIMA_AESTHETIC_API.json` | Base Anima aesthetic v1.1 |
 | `one_obsession_illustrious` | `ComfyOneObsessionIllustriousModel` | `ONE_OBSESSION_ILLUSTRIOUS_API.json` | Label **(NSFW)** |
-| `one_obsession_anima` | `ComfyOneObsessionAnimaModel` | `ONE_OBSESSION_ANIMA_API.json` | Label **(NSFW)** |
+| `one_obsession_anima` | `ComfyOneObsessionAnimaModel` | `ONE_OBSESSION_ANIMA_API.json` | One Obsession Anima v5.0 (v5 turbo). Label **(NSFW)** |
 | `krea2_turbo` | `ComfyKrea2TurboModel` | `KREA2_TURBO_INT8_API.json` / `_ENHANCE` | INT8 Turbo |
 | `redcraft` | `ComfyRedCraftModel` | `REDCRAFT_KREA2_API.json` / `_ENHANCE` | RedCraft 2.3 Krea2 INT8/INT4/FP8 |
+| `flux3_klein_int8` | `ComfyFlux3KleinInt8Model` | `KLEIN_API.json` | Distilled INT8, 16 steps, cfg 1. No prompt upsampler (8 GB VRAM) |
 | `krea2_identity_edit` | `ComfyKrea2IdentityEditModel` | `KREA2_IDENTITY_EDIT_API.json` | Instruction edit + source image |
 
 **Removed from Discord:** WAI ANIMA (`anime_wai_anima`) — replaced by base **Anima Aesthetic**.
 
-**Krea LLM enhance:** slash `/imagegen generate` option `llm_prompt_enhance` (default **No**). Pref-view button still available for regenerate flow. When Yes + Krea-family (Krea 2 Turbo, RedCraft), uses `TextGenerate` before sampling.
+**Krea LLM enhance:** slash `/imagegen generate` option `llm_prompt_enhance` (default **No**). Pref-view button still available for regenerate flow. When Yes + Krea-family (Krea 2 Turbo, RedCraft), uses `TextGenerate` before sampling. FLUX 3 Klein is not in that set.
+
+**FLUX 3 Klein INT8:** `/imagegen generate` choice after RedCraft. Natural-language captions (empty default positive and negative). Workflow `KLEIN_API.json` is the official distilled INT8 path: 16 steps, cfg 1, euler/simple. The optional official 9B prompt upsampler is omitted so the model fits in 8 GB VRAM.
 
 **RedCraft weights:** `ComfyUI_New/models/diffusion_models/redcraft23INT8INT4FP8_30Krea2.safetensors` (same CLIP/VAE as Krea 2: `qwen3vl_4b_fp8_scaled` + `qwen_image_vae`).
 

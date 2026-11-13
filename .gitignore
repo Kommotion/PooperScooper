@@ -120,6 +120,8 @@ agent-tools/
 terminals/
 task_scheduler_xmls/
 ComfyUI_New/
+ComfyUI_045/
+_imagegen_tests/
 
 # virtualenv
 .venv

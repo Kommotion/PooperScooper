@@ -20,8 +20,8 @@ from cogs.utils import comfy_client
 from cogs.utils.constants import *
 
 
-WAI_ILLUSTRIOUS_PATH = r".\ComfyUI_New\models\checkpoints\waiIllustriousSDXL_v160.safetensors"
-Z_IMAGE_TURBO_PATH = r".\ComfyUI_New\models\checkpoints\z-image-turbo-fp8-e4m3fn.safetensors"
+WAI_ILLUSTRIOUS_PATH = r".\ComfyUI_New\models\checkpoints\waiIllustriousSDXL_v170.safetensors"
+Z_IMAGE_TURBO_PATH = r".\ComfyUI_New\models\diffusion_models\zImageTurboQuantized_fp8ScaledE4m3fnKJ.safetensors"
 
 Z_IMAGE_VAE = r".\ComfyUI_New\models\vae\zimage_turbo_fp8_vae.sft"
 
@@ -36,6 +36,7 @@ KREA2_TURBO_ENHANCE_WORKFLOW_PATH = r".\ComfyUI_New\user\default\workflows\KREA2
 REDCRAFT_WORKFLOW_PATH = r".\ComfyUI_New\user\default\workflows\REDCRAFT_KREA2_API.json"
 REDCRAFT_ENHANCE_WORKFLOW_PATH = r".\ComfyUI_New\user\default\workflows\REDCRAFT_KREA2_API_ENHANCE.json"
 KREA2_IDENTITY_EDIT_WORKFLOW_PATH = r".\ComfyUI_New\user\default\workflows\KREA2_IDENTITY_EDIT_API.json"
+KLEIN_WORKFLOW_PATH = r".\ComfyUI_New\user\default\workflows\KLEIN_API.json"
 
 # System prompt used by the official Krea UI "prompt enhance" path (shortened slightly for Discord UX).
 KREA2_LLM_ENHANCE_SYSTEM_PROMPT = (
@@ -106,6 +107,7 @@ class Models(StrEnum):
     ONE_OBSESSION_ANIMA = "one_obsession_anima"
     KREA2_TURBO = "krea2_turbo"
     REDCRAFT = "redcraft"
+    FLUX3_KLEIN_INT8 = "flux3_klein_int8"
     KREA2_IDENTITY_EDIT = "krea2_identity_edit"
 
     @classmethod
@@ -339,7 +341,7 @@ class ComfyAnimaAestheticModel(BaseComfyWorkflowModel):
 
 
 class ComfyOneObsessionIllustriousModel(BaseComfyWorkflowModel):
-    """One Obsession v23 (Illustrious / SDXL full checkpoint: model+CLIP+VAE baked)."""
+    """One Obsession v24 (Illustrious / SDXL full checkpoint: model+CLIP+VAE baked)."""
 
     def __init__(self):
         super().__init__(
@@ -351,7 +353,10 @@ class ComfyOneObsessionIllustriousModel(BaseComfyWorkflowModel):
 
 
 class ComfyOneObsessionAnimaModel(BaseComfyWorkflowModel):
-    """One Obsession Anima v2.0 — diffusion-only Anima + Qwen3 0.6B CLIP + Qwen-Image VAE."""
+    """One Obsession Anima v5.0 — One Obsession Anima v5 turbo.
+
+    Diffusion-only Anima + Qwen3 0.6B CLIP + Qwen-Image VAE.
+    """
 
     def __init__(self):
         super().__init__(
@@ -510,11 +515,27 @@ class ComfyRedCraftModel(ComfyKrea2TurboModel):
         self._enhance_workflow_template: Optional[dict] = None
 
 
+class ComfyFlux3KleinInt8Model(BaseComfyWorkflowModel):
+    """FLUX 3 Klein distilled INT8 text-to-image (natural-language captions).
+
+    Official distilled path: 16 steps, cfg 1. The optional official 9B prompt
+    upsampler is omitted so the INT8 model fits in 8 GB VRAM.
+    """
+
+    def __init__(self):
+        super().__init__(
+            name=Models.FLUX3_KLEIN_INT8,
+            workflow_path=KLEIN_WORKFLOW_PATH,
+            default_pos=NO_DEFAULT_POSITIVE,
+            default_neg=NO_DEFAULT_NEGATIVE,
+        )
+
+
 class ComfyKrea2IdentityEditModel(BaseComfyWorkflowModel):
     """Krea 2 Identity Edit LoRA — instruction edit with source image.
 
-    Requires custom nodes: comfyui-krea2edit (Krea2EditModelPatch + GroundedEncode).
-    Turbo path: 10 steps, CFG 1, LoRA v1.2 @ strength 1.0, ref_boost 4.
+    Requires custom nodes: comfyui-krea2edit v2.0.0 (Krea2EditModelPatch + GroundedEncode).
+    Turbo path: 8 steps, CFG 1, LoRA v2.0 @ strength 1.0, ref_boost 2.
     ``ImageCreation.edit_strength``, when set, replaces ref_boost. Halloweenify
     sets a higher value so every costume keeps more of the original. KSampler
     denoise stays 1: the latent is empty, and lowering it would not keep the source.
