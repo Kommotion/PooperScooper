@@ -85,9 +85,9 @@ class TurkeySettings:
     regular_name: str = "Regular"
     plump_name: str = "Plump"
     golden_name: str = "Golden"
-    regular_points: int = 1
-    plump_points: int = 3
-    golden_points: int = 10
+    regular_points: int = 10
+    plump_points: int = 30
+    golden_points: int = 100
     regular_weight: float = 0.75
     plump_weight: float = 0.20
     golden_weight: float = 0.05

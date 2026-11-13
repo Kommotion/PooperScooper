@@ -3,7 +3,9 @@
 The cog is always loaded so owner admin commands work before the event.
 ``thanksgiving_enabled`` gates the live schedule: kickoff, drops, recaps, the
 winner post, cleanup, and the avatar. Test drops and simulations still run
-while that switch is off. This module does not publish slash commands.
+while that switch is off. A local inbox under ``data/turkey_hunt_ctl`` is
+polled on the same loop, including while the live event is off.
+This module does not publish slash commands.
 """
 
 from __future__ import annotations
@@ -27,6 +29,16 @@ from cogs.hunt.copy import (
     leaderboard_text,
     status_text,
 )
+from cogs.hunt.ctl import (
+    DEFAULT_TEST_CHANNEL_ID,
+    REJECT_TEXT,
+    ClaimedFile,
+    claim_pending,
+    default_ctl_root,
+    discard_claimed,
+    result_exists,
+    write_result,
+)
 from cogs.hunt.engine import HuntEngine
 from cogs.hunt.thanksgiving import ThanksgivingTheme, TurkeySettings, load_turkey_settings
 from cogs.utils.config import thanksgiving_enabled_from_config
@@ -46,6 +58,21 @@ TURKEYADMIN_USAGE = (
     "testdrop <channel> | test_session [minutes] [interval] [channel] | "
     "test_session_stop | simulate [iso] | power on|off"
 )
+TEST_DROP_REFUSED = "Test drops stay out of Menaces to Sobriety and the live drop channel."
+TEST_SESSION_REFUSED = "Test sessions stay out of Menaces to Sobriety and the live drop channel."
+TEST_SESSION_MTS = "Test sessions stay out of Menaces to Sobriety."
+TEST_CHANNEL_UNRESOLVED = "That channel could not be resolved. Nothing was posted."
+TEST_DROP_SEND_FAILED = "The test drop did not send. Live totals were left alone."
+TEST_DROP_POSTED = "Test turkey posted in <#{channel_id}>. It does not count on the live board."
+TEST_SESSION_STARTED = (
+    "Test session started in <#{channel_id}> for {minutes} minutes, "
+    "about every {interval} minutes. Claims go to the test tally."
+)
+TEST_SESSION_BUSY = "A test session is already running."
+TEST_SESSION_RANGE = "Usage: minutes must be 1-240 and interval must be 1-60."
+TEST_SESSION_STOPPED = "Test session stopped. Live totals were left alone."
+TEST_SESSION_IDLE = "No test session is running."
+TEST_SESSION_NEEDS_CHANNEL = "Give a channel outside Menaces to Sobriety."
 
 
 def _parse_dry_run(value: object) -> bool | None:
@@ -254,6 +281,7 @@ class TurkeyHunt(commands.Cog):
         rng: random.Random | None = None,
         enabled: bool | None = None,
         clock=None,
+        ctl_dir: str | Path | None = None,
     ):
         self.bot = bot
         self.settings = settings if settings is not None else load_turkey_settings()
@@ -261,6 +289,7 @@ class TurkeyHunt(commands.Cog):
         self._enabled = enabled
         self._clock = clock
         self._did_revert = False
+        self.ctl_root = Path(ctl_dir) if ctl_dir is not None else default_ctl_root()
         state_path = Path(path) if path is not None else self.settings.state_path()
         year = self.settings.final_at.astimezone(self.settings.zone).year
         archive = state_path.with_name(f"turkey_hunt_archive_{year}.json")
@@ -316,6 +345,12 @@ class TurkeyHunt(commands.Cog):
 
     async def tick(self, now: datetime | None = None) -> None:
         moment = self.now() if now is None else now
+        # The inbox is polled before the live-event return, and a failure here
+        # does not skip the test-session poll below.
+        try:
+            await self._poll_ctl(moment)
+        except Exception:
+            log.exception("turkey ctl poll failed")
         try:
             await self._poll_tests(moment)
         except Exception:
@@ -639,6 +674,267 @@ class TurkeyHunt(commands.Cog):
             return
         await self._send_test_drop(channel, drop)
 
+    def _test_channel_id_block(self, channel_id: int) -> str | None:
+        """Refuse the live drop channel and cleanup-skip channels by id alone."""
+        try:
+            cid = int(channel_id)
+        except (TypeError, ValueError):
+            return "channel"
+        if cid == int(self.settings.drop_channel_id):
+            return "channel"
+        if cid in {int(item) for item in self.settings.cleanup_skip_channel_ids}:
+            return "channel"
+        return None
+
+    async def _lookup_test_channel(self, channel_id: int):
+        """Resolve one channel by id. Never posts, and never substitutes another channel."""
+        blocked = self._test_channel_id_block(channel_id)
+        if blocked:
+            return None, blocked
+        channel = await self._channel(int(channel_id))
+        if not isinstance(channel, discord.TextChannel):
+            return None, "unresolved"
+        try:
+            found = int(channel.id)
+        except (TypeError, ValueError):
+            return None, "unresolved"
+        if found != int(channel_id):
+            return None, "unresolved"
+        block = self._test_channel_block(channel)
+        if block:
+            return None, block
+        return channel, None
+
+    def _ctl_refuse_text(self, action: str, reason: str) -> str:
+        if reason == "unresolved":
+            return TEST_CHANNEL_UNRESOLVED
+        if action == "testdrop":
+            return TEST_DROP_REFUSED
+        if reason == "mts":
+            return TEST_SESSION_MTS
+        return TEST_SESSION_REFUSED
+
+    def _ctl_finish(
+        self,
+        claimed: ClaimedFile,
+        *,
+        ok: bool,
+        action: str,
+        text: str,
+        channel_id: int | None = None,
+        error: str | None = None,
+    ) -> None:
+        if claimed.request_id:
+            try:
+                write_result(
+                    self.ctl_root,
+                    {
+                        "ok": ok,
+                        "action": action,
+                        "id": claimed.request_id,
+                        "text": text,
+                        "channel_id": channel_id,
+                        "error": error,
+                    },
+                )
+            except Exception:
+                log.exception("turkey ctl result write failed id=%s", claimed.request_id)
+        discard_claimed(claimed.path)
+
+    async def _poll_ctl(self, now: datetime) -> None:
+        try:
+            batch = claim_pending(self.ctl_root)
+        except Exception:
+            log.exception("turkey ctl inbox failed")
+            return
+        for claimed in batch:
+            try:
+                await self._dispatch_ctl(claimed, now)
+            except Exception:
+                log.exception("turkey ctl command failed id=%s", claimed.request_id)
+                try:
+                    self._ctl_finish(
+                        claimed,
+                        ok=False,
+                        action=claimed.raw_action,
+                        text="The control command failed.",
+                        error="internal",
+                    )
+                except Exception:
+                    log.exception("turkey ctl result write failed id=%s", claimed.request_id)
+                    discard_claimed(claimed.path)
+
+    async def _dispatch_ctl(self, claimed: ClaimedFile, now: datetime) -> None:
+        if claimed.request_id and result_exists(self.ctl_root, claimed.request_id):
+            discard_claimed(claimed.path)
+            return
+        if claimed.command is None:
+            if claimed.request_id is None:
+                log.info("turkey ctl discarded a file name=%s", claimed.path.name)
+                discard_claimed(claimed.path)
+                return
+            reason = claimed.error or "rejected"
+            self._ctl_finish(
+                claimed,
+                ok=False,
+                action=claimed.raw_action,
+                text=REJECT_TEXT.get(reason, REJECT_TEXT["rejected"]),
+                error=reason,
+            )
+            return
+        action = claimed.command.action
+        if action == "testdrop":
+            await self._ctl_testdrop(claimed, now)
+        elif action == "test_session_start":
+            await self._ctl_test_session_start(claimed, now)
+        elif action == "test_session_stop":
+            self._ctl_test_session_stop(claimed)
+        elif action == "status":
+            self._ctl_status(claimed)
+        elif action == "schedule":
+            self._ctl_schedule(claimed)
+        else:
+            self._ctl_finish(
+                claimed,
+                ok=False,
+                action=action,
+                text=REJECT_TEXT["unknown_action"],
+                error="unknown_action",
+            )
+
+    def _ctl_channel_id(self, claimed: ClaimedFile) -> int:
+        command = claimed.command
+        if command is not None and command.channel_id is not None:
+            return int(command.channel_id)
+        return int(DEFAULT_TEST_CHANNEL_ID)
+
+    async def _ctl_testdrop(self, claimed: ClaimedFile, now: datetime) -> None:
+        channel_id = self._ctl_channel_id(claimed)
+        channel, reason = await self._lookup_test_channel(channel_id)
+        if channel is None:
+            self._ctl_finish(
+                claimed,
+                ok=False,
+                action="testdrop",
+                text=self._ctl_refuse_text("testdrop", reason or "unresolved"),
+                channel_id=channel_id,
+                error="refused" if reason in {"mts", "channel"} else "unresolved",
+            )
+            return
+        drop = self.book.open_test_drop(int(channel.id), now, self.rng)
+        if drop is None:
+            self._ctl_finish(
+                claimed,
+                ok=False,
+                action="testdrop",
+                text=TEST_DROP_REFUSED,
+                channel_id=int(channel.id),
+                error="refused",
+            )
+            return
+        posted = await self._send_test_drop(channel, drop)
+        if not posted:
+            self._ctl_finish(
+                claimed,
+                ok=False,
+                action="testdrop",
+                text=TEST_DROP_SEND_FAILED,
+                channel_id=int(channel.id),
+                error="send_failed",
+            )
+            return
+        self._ctl_finish(
+            claimed,
+            ok=True,
+            action="testdrop",
+            text=TEST_DROP_POSTED.format(channel_id=channel.id),
+            channel_id=int(channel.id),
+        )
+
+    async def _ctl_test_session_start(self, claimed: ClaimedFile, now: datetime) -> None:
+        command = claimed.command
+        assert command is not None
+        minutes = 15 if command.minutes is None else int(command.minutes)
+        interval = 2 if command.interval is None else int(command.interval)
+        channel_id = self._ctl_channel_id(claimed)
+        channel, reason = await self._lookup_test_channel(channel_id)
+        if channel is None:
+            self._ctl_finish(
+                claimed,
+                ok=False,
+                action="test_session_start",
+                text=self._ctl_refuse_text("test_session_start", reason or "unresolved"),
+                channel_id=channel_id,
+                error="refused" if reason in {"mts", "channel"} else "unresolved",
+            )
+            return
+        guild_id = getattr(getattr(channel, "guild", None), "id", None)
+        if not isinstance(guild_id, int) or isinstance(guild_id, bool):
+            self._ctl_finish(
+                claimed,
+                ok=False,
+                action="test_session_start",
+                text=TEST_SESSION_NEEDS_CHANNEL,
+                channel_id=int(channel.id),
+                error="unresolved",
+            )
+            return
+        status = self.book.start_test_session(
+            guild_id=int(guild_id),
+            channel_id=int(channel.id),
+            minutes=minutes,
+            interval=interval,
+            now=now,
+        )
+        if status == "busy":
+            self._ctl_finish(
+                claimed,
+                ok=False,
+                action="test_session_start",
+                text=TEST_SESSION_BUSY,
+                channel_id=int(channel.id),
+                error="busy",
+            )
+            return
+        if status != "started":
+            self._ctl_finish(
+                claimed,
+                ok=False,
+                action="test_session_start",
+                text=TEST_SESSION_RANGE if status == "invalid" else TEST_SESSION_REFUSED,
+                channel_id=int(channel.id),
+                error="invalid" if status == "invalid" else "refused",
+            )
+            return
+        try:
+            await self._poll_tests(now)
+        except Exception:
+            log.exception("turkey test poll failed")
+        self._ctl_finish(
+            claimed,
+            ok=True,
+            action="test_session_start",
+            text=TEST_SESSION_STARTED.format(channel_id=channel.id, minutes=minutes, interval=interval),
+            channel_id=int(channel.id),
+        )
+
+    def _ctl_test_session_stop(self, claimed: ClaimedFile) -> None:
+        if not self.book.stop_test_session():
+            self._ctl_finish(claimed, ok=True, action="test_session_stop", text=TEST_SESSION_IDLE)
+            return
+        self._ctl_finish(claimed, ok=True, action="test_session_stop", text=TEST_SESSION_STOPPED)
+
+    def _ctl_status(self, claimed: ClaimedFile) -> None:
+        text = status_text(self.book.state, self.settings, self.now(), live_enabled=self.live_enabled())
+        self._ctl_finish(claimed, ok=True, action="status", text=text)
+
+    def _ctl_schedule(self, claimed: ClaimedFile) -> None:
+        # Preview only. This path must not save or replace the live schedule.
+        slots = self.book.preview_schedule(random.Random())
+        minutes = int(self.settings.cluster_gap.total_seconds() // 60)
+        text = "Unsaved preview.\n" + format_schedule_summary(slots, self.settings.zone, cluster_minutes=minutes)
+        self._ctl_finish(claimed, ok=True, action="schedule", text=text)
+
     def simulate(self, now: datetime) -> str:
         """Preview a tick on a copy. Does not save and does not touch Discord."""
         clone = HuntBook(
@@ -793,17 +1089,17 @@ class TurkeyHunt(commands.Cog):
             await self._reply(ctx, "Usage: !turkeyadmin testdrop <channel id>")
             return
         if self._test_channel_block(target):
-            await self._reply(ctx, "Test drops stay out of Menaces to Sobriety and the live drop channel.")
+            await self._reply(ctx, TEST_DROP_REFUSED)
             return
         drop = self.book.open_test_drop(int(target.id), self.now(), self.rng)
         if drop is None:
-            await self._reply(ctx, "Test drops stay out of Menaces to Sobriety and the live drop channel.")
+            await self._reply(ctx, TEST_DROP_REFUSED)
             return
         posted = await self._send_test_drop(target, drop)
         if not posted:
-            await self._reply(ctx, "The test drop did not send. Live totals were left alone.")
+            await self._reply(ctx, TEST_DROP_SEND_FAILED)
             return
-        await self._reply(ctx, f"Test turkey posted in <#{target.id}>. It does not count on the live board.")
+        await self._reply(ctx, TEST_DROP_POSTED.format(channel_id=target.id))
 
     @turkeyadmin.command(name="test_session", hidden=True)
     @_turkeyadmin_check
@@ -823,19 +1119,19 @@ class TurkeyHunt(commands.Cog):
             return
         guild_id = getattr(getattr(ctx, "guild", None), "id", None)
         if guild_id == self.settings.guild_id:
-            await self._reply(ctx, "Test sessions stay out of Menaces to Sobriety.")
+            await self._reply(ctx, TEST_SESSION_MTS)
             return
         target, problem = await self._admin_channel(ctx, channel)
         if problem == "dm" or target is None:
-            await self._reply(ctx, "Give a channel outside Menaces to Sobriety.")
+            await self._reply(ctx, TEST_SESSION_NEEDS_CHANNEL)
             return
         if self._test_channel_block(target):
-            await self._reply(ctx, "Test sessions stay out of Menaces to Sobriety and the live drop channel.")
+            await self._reply(ctx, TEST_SESSION_REFUSED)
             return
         if guild_id is None:
             guild_id = getattr(getattr(target, "guild", None), "id", None)
         if guild_id is None:
-            await self._reply(ctx, "Give a channel outside Menaces to Sobriety.")
+            await self._reply(ctx, TEST_SESSION_NEEDS_CHANNEL)
             return
         status = self.book.start_test_session(
             guild_id=int(guild_id),
@@ -845,15 +1141,14 @@ class TurkeyHunt(commands.Cog):
             now=self.now(),
         )
         if status == "busy":
-            await self._reply(ctx, "A test session is already running.")
+            await self._reply(ctx, TEST_SESSION_BUSY)
             return
         if status != "started":
-            await self._reply(ctx, "Test sessions stay out of Menaces to Sobriety and the live drop channel.")
+            await self._reply(ctx, TEST_SESSION_REFUSED)
             return
         await self._reply(
             ctx,
-            f"Test session started in <#{target.id}> for {minutes_i} minutes, "
-            f"about every {interval_i} minutes. Claims go to the test tally.",
+            TEST_SESSION_STARTED.format(channel_id=target.id, minutes=minutes_i, interval=interval_i),
         )
         await self._poll_tests(self.now())
 
@@ -863,9 +1158,9 @@ class TurkeyHunt(commands.Cog):
         if not await _turkeyadmin_allowed(ctx):
             return
         if not self.book.stop_test_session():
-            await self._reply(ctx, "No test session is running.")
+            await self._reply(ctx, TEST_SESSION_IDLE)
             return
-        await self._reply(ctx, "Test session stopped. Live totals were left alone.")
+        await self._reply(ctx, TEST_SESSION_STOPPED)
 
     @turkeyadmin.command(name="simulate", hidden=True)
     @_turkeyadmin_check

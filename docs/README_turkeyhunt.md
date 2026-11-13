@@ -8,7 +8,7 @@ Nothing in this implementation starts the live event. Drops, the kickoff, recaps
 
 `thanksgiving_enabled` lives in `config.json` (see `config.example.json`). A missing key is `false`.
 
-`cogs.turkeyhunt` is always loaded. It is not in the Halloween extension set, so `halloween_enabled` does not load or unload it. While `thanksgiving_enabled` is false, the scheduled live event does nothing. `!turkeyadmin` still works for status, a schedule preview, simulation, and test drops outside Menaces to Sobriety.
+`cogs.turkeyhunt` is always loaded. It is not in the Halloween extension set, so `halloween_enabled` does not load or unload it. While `thanksgiving_enabled` is false, the scheduled live event does nothing. `!turkeyadmin` still works for status, a schedule preview, simulation, and test drops outside Menaces to Sobriety. The local control inbox under `data/turkey_hunt_ctl/` is polled on the same loop, including while that switch is off.
 
 `!turkeyadmin power` is a second, local pause stored in `data/turkey_hunt.json`. Turning that local pause off does not override `thanksgiving_enabled: false`.
 
@@ -29,7 +29,7 @@ Times are `America/Los_Angeles`.
 - Regular days, including Sunday 2026-11-22, plan 6–10 turkeys. Thanksgiving 2026-11-26 plans 18–22, and those live 30 minutes. Sunday 2026-11-29 plans 8–10, and the last one is by 21:30.
 - The raw ranges add up to 74–112. The planner nudges a biased draw onto 100, which is inside that bound.
 - About 1 in 10 grabs of a Regular turkey slip. The turkey stays up. The score does not move. Plump and Golden do not grease.
-- Odds when a turkey appears: Regular 75% / 1 point, Plump 20% / 3 points, Golden 5% / 10 points. If Thanksgiving Day has not rolled a Golden yet, the last Nov 26 drop is Golden. Missed slots are not replaced.
+- Odds when a turkey appears: Regular 75% / 10 points, Plump 20% / 30 points, Golden 5% / 100 points. If Thanksgiving Day has not rolled a Golden yet, the last Nov 26 drop is Golden. Missed slots are not replaced.
 - Daily recap at 22:30 in #general, including Sunday Nov 29 (after the 22:00 close).
 - Sunday 2026-11-29 22:00: open turkeys are closed or deleted. Nothing can be caught after that instant.
 - Monday 2026-11-30 10:00: winner post with the top 10, fun stats, and an explicit tie line when places are shared, including a tie for first. The prize line is empty by default (`Prize: (not set yet)`). Nick can set `turkey_hunt.prize_line` later.
@@ -53,3 +53,29 @@ At kickoff, if this event has not already tried, the bot snapshots its current g
 - `power on|off` is the local pause.
 
 Test commands keep working while the live switch is off.
+
+## Local test control
+
+`!turkeyadmin` is a prefix command. The bot cannot invoke it as itself, and a test from this machine should not post in Discord as Nick. `scripts/turkeyhunt_ctl.py` writes a command file. The running turkey cog picks it up on the next `turkey_loop` tick (every 20 seconds), writes a result file, and the script prints that text. The script does not read `config.json`, does not use the bot token, and does not open a Discord connection or any other network listener.
+
+The default channel, when `--channel` is omitted, is `1045149015756521493`. That is `SUPPORT_TEST_CHANNEL_ID` in `cogs/candyhunt.py`, the PooperScooper support server test channel. The support guild is `SUPPORT_GUILD_ID` `1045144253627637830` in the same file. The cog looks channels up by id (`get_channel`, then `fetch_channel`). It does not search by name.
+
+From `C:\Users\jacqu\Desktop\PooperScooper`:
+
+```
+venv\Scripts\python.exe scripts\turkeyhunt_ctl.py testdrop --channel 1045149015756521493
+venv\Scripts\python.exe scripts\turkeyhunt_ctl.py testdrop
+venv\Scripts\python.exe scripts\turkeyhunt_ctl.py test_session start --minutes 15 --interval 2 --channel 1045149015756521493
+venv\Scripts\python.exe scripts\turkeyhunt_ctl.py test_session start
+venv\Scripts\python.exe scripts\turkeyhunt_ctl.py test_session stop
+venv\Scripts\python.exe scripts\turkeyhunt_ctl.py status
+venv\Scripts\python.exe scripts\turkeyhunt_ctl.py schedule
+```
+
+`--timeout` is seconds to wait for the cog (default 60), after the action: `status --timeout 60`.
+
+Commands and results live in `data/turkey_hunt_ctl/` (`inbox/`, `processing/`, `results/`). That directory is gitignored on its own. `data/*.json` does not ignore a subdirectory, and this rule does not ignore `data/*.png`. Each command file has a unique id, is written by a temp file in the same directory, then replaced. The cog writes `results/<id>.json` the same way and removes the command so it runs once. The result has `ok`, `action`, `id`, a human `text` field, and `channel_id` / `error` when those apply. The script prints `text` and exits non-zero on failure or timeout.
+
+`testdrop` and `test_session` use the same guards as `!turkeyadmin`: refused anywhere in Menaces to Sobriety (`932057681307512922`), on the live drop channel (`932057681307512924`), and on announcement / cleanup-skip channels. If the channel id cannot be resolved, nothing is posted anywhere else. Test catches stay on the test tally. `status` and `schedule` do not send a Discord message. `schedule` is a preview only and does not save or overwrite the live schedule.
+
+The process that is already running does not load this code until a later approved restart. This path does not sync slash commands, and `thanksgiving_enabled` still defaults to false.

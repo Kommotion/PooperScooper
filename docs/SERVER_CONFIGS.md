@@ -133,6 +133,8 @@ Drops are posted only in the channel id `drop_channel_id`. The default is `93205
 
 The public slash command is `/turkeys`, registered for Menaces to Sobriety and the support server the same way as `/candy`. Loading this cog does not sync commands. After a later approved restart, Nick runs `!sync_commands ~` himself in each of those guilds. Owner controls are the hidden prefix group `!turkeyadmin` (not a slash command): `status`, `schedule [save]`, `cleanup [true|false]` (omitted means dry-run), `testdrop <channel>`, `test_session [minutes] [interval] [channel]`, `test_session_stop`, `simulate [iso]`, and `power on|off`. Test sessions and test drops are refused in Menaces to Sobriety and on the live drop channel. Cleanup runs only in Menaces to Sobriety.
 
+`scripts/turkeyhunt_ctl.py` is the local file inbox for the same test actions (`testdrop`, `test_session start|stop`, `status`, `schedule`). It does not connect to Discord. The default channel is `1045149015756521493`, `SUPPORT_TEST_CHANNEL_ID` in `cogs/candyhunt.py`. `schedule` from that path is a preview and does not save the live plan. Details are in `docs/README_turkeyhunt.md`.
+
 | Field | Type | Description |
 |-------|------|-------------|
 | `timezone` | string | IANA zone for every clock. Default: `America/Los_Angeles`. |
@@ -155,7 +157,7 @@ The public slash command is `/turkeys`, registered for Menaces to Sobriety and t
 | `finale_low` / `finale_high` / `finale_weights` | int / int / number[] | The `drops_end` date. Defaults: `8`, `10`, `[2, 5, 3]`. |
 | `target_total` | int | The planner nudges the biased draw onto this total when it sits inside the raw low/high bound. Default: `100`. The raw bound for these ranges is 74–112. |
 | `regular_weight` / `plump_weight` / `golden_weight` | float | Appearance odds, `0`–`1`. Defaults: `0.75`, `0.20`, `0.05`. |
-| `regular_points` / `plump_points` / `golden_points` | int | Defaults: `1`, `3`, `10`. |
+| `regular_points` / `plump_points` / `golden_points` | int | Defaults: `10`, `30`, `100`. |
 | `grease_chance` | float | Slip chance on Regular turkeys only. Default: `0.1`. |
 | `prize_line` | string | Shown on the winner post. Empty means `Prize: (not set yet)`. Role pings are rejected. |
 | `avatar_path` | string | Pilgrim avatar, relative to the repo. Default: `assets/avatars/pilgrim_shepherd.png`. A missing file skips the avatar change and still posts the kickoff. |

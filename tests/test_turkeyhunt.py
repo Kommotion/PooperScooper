@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import inspect
 import json
 import random
 import re
+import subprocess
+import sys
+import threading
+import time
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -19,14 +24,32 @@ from discord.ext import commands
 from discord.ext.commands.view import StringView
 
 from PooperScooper import _HALLOWEEN_EXTENSIONS, extensions_to_load, initial_extensions
-from cogs.candyhunt import MAIN_DROP_CHANNEL_ID, MTS_GUILD_ID, NICK_ID, SUPPORT_GUILD_ID
+from cogs.candyhunt import (
+    MAIN_DROP_CHANNEL_ID,
+    MTS_GUILD_ID,
+    NICK_ID,
+    SUPPORT_GUILD_ID,
+    SUPPORT_TEST_CHANNEL_ID,
+)
 from cogs.hunt import load_theme
 from cogs.hunt.book import DeleteRef, HuntBook, closed_shell_keeps_winner
 from cogs.hunt.copy import (
+    catch_dm,
+    drop_text,
     is_deletable_hunt_message,
     kickoff_text,
+    recap_text,
     slip_text,
     winner_text,
+)
+from cogs.hunt.ctl import (
+    MAX_COMMANDS_PER_TICK,
+    default_ctl_root,
+    inbox_file_is_local,
+    new_request_id,
+    wait_for_result,
+    write_command,
+    write_result,
 )
 from cogs.hunt.engine import HuntEngine
 from cogs.hunt.halloween import HalloweenTheme
@@ -37,6 +60,7 @@ from cogs.hunt.thanksgiving import (
     DOCUMENTED_TARGET_TOTAL,
     TurkeySettings,
     apply_turkey_hunt_overrides,
+    load_turkey_settings,
 )
 from cogs.hunt.theme import contains_role_ping
 from cogs.turkeyhunt import (
@@ -48,8 +72,8 @@ from cogs.turkeyhunt import (
     build_drop_view,
 )
 from cogs.utils.config import BotConfig
-from cogs.utils.constants import PROJECT_ROOT
-from cogs.utils.server_config import ServerConfig
+from cogs.utils.constants import DATA_DIR, PROJECT_ROOT
+from cogs.utils.server_config import ServerConfig, get_server_config_manager
 
 PT = ZoneInfo("America/Los_Angeles")
 ROOT = Path(__file__).resolve().parents[1]
@@ -193,6 +217,7 @@ def _cog(
     settings: TurkeySettings | None = None,
     clock=None,
     path: Path | None = None,
+    ctl_dir: Path | None = None,
 ) -> tuple[TurkeyHunt, FakeBot]:
     bot = FakeBot()
     state_path = path or (tmp_path / "turkey_hunt.json")
@@ -204,6 +229,7 @@ def _cog(
         rng=rng or random.Random(0),
         enabled=enabled,
         clock=clock or (lambda: datetime(2026, 11, 10, 12, tzinfo=PT)),
+        ctl_dir=ctl_dir or (tmp_path / "turkey_hunt_ctl"),
     )
     bot._cog = cog
     return cog, bot
@@ -347,6 +373,7 @@ def test_general_channel_id_comes_from_candyhunt_constant():
     assert "cogs.hunt" not in source
     assert "turkeyhunt" not in source
     assert MAIN_DROP_CHANNEL_ID == GENERAL_ID
+    assert SUPPORT_CHANNEL_ID == SUPPORT_TEST_CHANNEL_ID
     assert TurkeySettings().drop_channel_id == GENERAL_ID
     assert TurkeySettings().guild_id == 932057681307512922
 
@@ -469,9 +496,31 @@ def test_unadjusted_draw_lands_near_one_hundred():
 
 
 def test_kickoff_lists_odds_lifetime_grease_and_the_clocks():
-    text = kickoff_text(TurkeySettings())
-    for piece in ("Regular", "Plump", "Golden", "75%", "20%", "5%", "45", "30", "1 in 10", "10:00 PM", "10:00 AM"):
+    settings = TurkeySettings()
+    assert (settings.regular_points, settings.plump_points, settings.golden_points) == (10, 30, 100)
+    text = kickoff_text(settings)
+    for piece in (
+        "Regular",
+        "Plump",
+        "Golden",
+        "75%",
+        "20%",
+        "5%",
+        "45",
+        "30",
+        "1 in 10",
+        "10:00 PM",
+        "10:00 AM",
+        "10 points",
+        "30 points",
+        "100 points",
+    ):
         assert piece in text
+    assert "Regular — 75% — 10 points." in text
+    assert "Plump — 20% — 30 points." in text
+    assert "Golden — 5% — 100 points." in text
+    assert "— 1 point." not in text
+    assert "— 3 points." not in text
     assert not contains_role_ping(text)
     assert "@everyone" not in text and "@here" not in text and "<@&" not in text
 
@@ -570,7 +619,7 @@ def test_grease_slips_regulars_only_and_does_not_change_the_score(tmp_path):
         "type_key": "regular",
         "name": "Regular",
         "emoji": "🦃",
-        "points": 1,
+        "points": 10,
         "grease_chance": item.grease_chance,
         "posted_at": when.isoformat(),
         "scheduled_at": when.isoformat(),
@@ -584,7 +633,7 @@ def test_grease_slips_regulars_only_and_does_not_change_the_score(tmp_path):
     book.state["drops"]["abcd1235"]["id"] = "abcd1235"
     book.state["drops"]["abcd1235"]["type_key"] = "plump"
     book.state["drops"]["abcd1235"]["name"] = "Plump"
-    book.state["drops"]["abcd1235"]["points"] = 3
+    book.state["drops"]["abcd1235"]["points"] = 30
     book.state["drops"]["abcd1235"]["grease_chance"] = 0.0
 
     async def run():
@@ -595,7 +644,9 @@ def test_grease_slips_regulars_only_and_does_not_change_the_score(tmp_path):
     slip, catch = asyncio.run(run())
     assert slip.status == "slip"
     assert book.state["drops"]["abcd1234"]["status"] == "open"
-    assert book.state["scores"] == {"5": 3}
+    assert book.state["scores"] == {"5": 30}
+    assert catch.total == 30
+    assert "30 points" in catch.dm_text
     assert book.state["slips"] == 1
     assert "Greased feathers" in slip.text
     assert catch.status == "caught"
@@ -663,7 +714,7 @@ def test_sunday_close_blocks_catches_and_monday_archives_the_tie(tmp_path):
         "type_key": "regular",
         "name": "Regular",
         "emoji": "🦃",
-        "points": 1,
+        "points": 10,
         "grease_chance": 0.1,
         "posted_at": scheduled.isoformat(),
         "scheduled_at": scheduled.isoformat(),
@@ -676,7 +727,7 @@ def test_sunday_close_blocks_catches_and_monday_archives_the_tie(tmp_path):
     book.state["schedule"] = [_slot(end - timedelta(minutes=5), "abcd5555", lifetime_min=45)]
     book.state["scores"] = {"5": 10, "6": 10}
     book.state["names"] = {"5": "Ada", "6": "Bea"}
-    book.state["catches"] = [{"user_id": "5", "type_key": "golden", "name": "Golden", "points": 10, "day": "2026-11-29"}]
+    book.state["catches"] = [{"user_id": "5", "type_key": "golden", "name": "Golden", "points": 100, "day": "2026-11-29"}]
     book.state["recaps"]["2026-11-29"] = {"channel_id": GENERAL_ID, "message_id": 70}
     book.state["kickoff_message"] = {"channel_id": GENERAL_ID, "message_id": 71}
 
@@ -920,14 +971,15 @@ def test_claims_grease_dm_failure_and_first_click(tmp_path):
         closed = AsyncMock(side_effect=discord.Forbidden(_HTTPResponse(), "closed"))
         catch = _interaction(cog, 5, name="Ada", send=closed)
         await cog.handle_claim(catch, "abcd1235")
-        assert cog.book.state["scores"] == {"5": 3}
+        assert cog.book.state["scores"] == {"5": 30}
         assert "@everyone" not in cog.book.state["names"]["5"]
         catch.response.edit_message.assert_awaited()
         _no_pings(catch.response.edit_message.await_args.kwargs)
         closed.assert_awaited()
+        assert "30 points" in closed.await_args.args[0]
         taken = _interaction(cog, 6)
         await cog.handle_claim(taken, "abcd1235")
-        assert cog.book.state["scores"] == {"5": 3}
+        assert cog.book.state["scores"] == {"5": 30}
         assert "already" in taken.response.send_message.await_args.args[0].casefold()
 
     asyncio.run(slip_then_catch())
@@ -947,7 +999,7 @@ def test_two_clicks_at_once_award_one_catch(tmp_path):
             cog.handle_claim(first, "abcd1234"),
             cog.handle_claim(second, "abcd1234"),
         )
-        assert sum(cog.book.state["scores"].values()) == 1
+        assert sum(cog.book.state["scores"].values()) == TurkeySettings().regular_points == 10
         edits = int(first.response.edit_message.await_count) + int(second.response.edit_message.await_count)
         assert edits == 1
 
@@ -960,10 +1012,10 @@ def test_recap_posts_after_sunday_close_and_monday_skips_a_late_recap(tmp_path):
     settings = cog.settings
     _arm(cog, [])
     cog.book.state["recap_done"].pop("2026-11-29", None)
-    cog.book.state["scores"] = {"5": 10}
+    cog.book.state["scores"] = {"5": 100}
     cog.book.state["names"] = {"5": "Ada"}
     cog.book.state["catches"] = [
-        {"user_id": "5", "type_key": "golden", "name": "Golden", "points": 10, "day": "2026-11-29"}
+        {"user_id": "5", "type_key": "golden", "name": "Golden", "points": 100, "day": "2026-11-29"}
     ]
     cog.book.save()
 
@@ -1359,3 +1411,507 @@ def test_deletable_markers_leave_kickoff_and_winner_alone():
     assert is_deletable_hunt_message("A turkey waddled into the channel.") is True
     assert is_deletable_hunt_message("Turkey tally for Sunday") is True
     assert not contains_role_ping(kickoff_text(settings))
+
+
+def _load_ctl_script():
+    path = ROOT / "scripts" / "turkeyhunt_ctl.py"
+    spec = importlib.util.spec_from_file_location("turkeyhunt_ctl_script", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _result(cog: TurkeyHunt, request_id: str) -> dict:
+    path = cog.ctl_root / "results" / f"{request_id}.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _raw_inbox(cog: TurkeyHunt, name: str, text: str) -> Path:
+    inbox = cog.ctl_root / "inbox"
+    inbox.mkdir(parents=True, exist_ok=True)
+    path = inbox / name
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def _watch_fetch(bot: FakeBot) -> list:
+    fetched: list = []
+    original = bot.fetch_channel
+
+    async def watch(channel_id):
+        fetched.append(channel_id)
+        return await original(channel_id)
+
+    bot.fetch_channel = watch
+    return fetched
+
+
+def test_turkey_point_defaults_are_10_30_100(tmp_path):
+    """Old 1/3/10 defaults, docs, or copy would fail this without banning '1 in 10'."""
+    settings = TurkeySettings()
+    assert (settings.regular_points, settings.plump_points, settings.golden_points) == (10, 30, 100)
+    items = {item.key: item.points for item in settings.items()}
+    assert items == {"regular": 10, "plump": 30, "golden": 100}
+    get_server_config_manager().clear_cache(MTS_GUILD_ID)
+    loaded = load_turkey_settings()
+    assert (loaded.regular_points, loaded.plump_points, loaded.golden_points) == (10, 30, 100)
+
+    for name in ("example.json", "932057681307512922.json"):
+        raw = json.loads((ROOT / "server_configs" / name).read_text(encoding="utf-8"))
+        hunt = raw["turkey_hunt"]
+        assert (hunt["regular_points"], hunt["plump_points"], hunt["golden_points"]) == (10, 30, 100)
+        applied = apply_turkey_hunt_overrides(TurkeySettings(), hunt)
+        assert (applied.regular_points, applied.plump_points, applied.golden_points) == (10, 30, 100)
+
+    readme = (ROOT / "docs" / "README_turkeyhunt.md").read_text(encoding="utf-8")
+    configs = (ROOT / "docs" / "SERVER_CONFIGS.md").read_text(encoding="utf-8")
+    assert "Regular 75% / 10 points, Plump 20% / 30 points, Golden 5% / 100 points." in readme
+    assert "Regular 75% / 1 point" not in readme
+    assert "Defaults: `10`, `30`, `100`." in configs
+    assert "Defaults: `1`, `3`, `10`." not in configs
+    copy_source = (ROOT / "cogs" / "hunt" / "copy.py").read_text(encoding="utf-8")
+    assert "1 point" not in copy_source
+    assert "3 points" not in copy_source
+    assert "10 points" not in copy_source
+
+    kickoff = kickoff_text(settings)
+    assert "Regular — 75% — 10 points." in kickoff
+    assert "Plump — 20% — 30 points." in kickoff
+    assert "Golden — 5% — 100 points." in kickoff
+    assert "1 in 10" in kickoff
+    assert "10:00 PM" in kickoff
+    assert "10:00 AM" in kickoff
+    when = datetime(2026, 11, 21, 12, tzinfo=PT)
+    for item in settings.items():
+        posted = drop_text(item, when + timedelta(minutes=45), test=False, drops_end=settings.drops_end)
+        assert f"{item.points} points" in posted
+        note = catch_dm("Ada", item, item.points, 1, test=False)
+        assert f"That's {item.points} points" in note
+
+    book = _book(tmp_path)
+    day = "2026-11-21"
+    catches = []
+    total = 0
+    for item in settings.items():
+        drop_id = f"{item.key[:4]}1234"
+        book.state["drops"][drop_id] = {
+            "id": drop_id,
+            "channel_id": GENERAL_ID,
+            "message_id": 9,
+            "type_key": item.key,
+            "name": item.name,
+            "emoji": item.emoji,
+            "points": item.points,
+            "grease_chance": 0.0,
+            "posted_at": when.isoformat(),
+            "scheduled_at": when.isoformat(),
+            "expires_at": (when + timedelta(minutes=45)).isoformat(),
+            "status": "open",
+            "caught_by": None,
+            "day": day,
+            "test": False,
+        }
+
+        async def claim(drop_id=drop_id):
+            return await book.claim(drop_id, 5, when, ScriptedRng([0.99]), name="Ada", is_bot=False)
+
+        result = asyncio.run(claim())
+        total += item.points
+        assert result.status == "caught"
+        assert result.total == total
+        assert f"That's {item.points} points" in result.dm_text
+        catches.append(
+            {"user_id": "5", "type_key": item.key, "name": item.name, "points": item.points, "day": day}
+        )
+    assert book.state["scores"] == {"5": 140}
+    assert book.state["test_scores"] == {}
+    recap = recap_text(settings, when.date(), book.state["scores"], {"5": "Ada"}, catches)
+    assert "Ada — Regular — 10" in recap
+    assert "Ada — Plump — 30" in recap
+    assert "Ada — Golden — 100" in recap
+    final = winner_text(settings, book.state["scores"], {"5": "Ada"}, catches, 0)
+    assert "140 points" in final
+    assert "Ada wins the turkey hunt" in final
+
+
+def test_ctl_cli_writes_a_command_and_prints_the_result(tmp_path, capsys):
+    script = _load_ctl_script()
+    source = (ROOT / "scripts" / "turkeyhunt_ctl.py").read_text(encoding="utf-8")
+    ctl_source = (ROOT / "cogs" / "hunt" / "ctl.py").read_text(encoding="utf-8")
+    hunt_source = (ROOT / "cogs" / "turkeyhunt.py").read_text(encoding="utf-8")
+    assert "from cogs.candyhunt import SUPPORT_TEST_CHANNEL_ID" in source
+    assert "from cogs.candyhunt import SUPPORT_TEST_CHANNEL_ID" in ctl_source
+    for text in (source, ctl_source, hunt_source):
+        assert "1045149015756521493" not in text
+        assert "HTTPServer" not in text
+        assert "socket.socket" not in text
+        assert "asyncio.start_server" not in text
+    assert "import discord" not in source
+    assert "load_config" not in source
+    assert "discord.Client" not in source
+    assert default_ctl_root() == DATA_DIR / "turkey_hunt_ctl"
+    ignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+    assert "data/turkey_hunt_ctl/" in ignore
+    assert "data/*.json" in ignore
+    assert "data/*.png" not in ignore
+
+    cases = (
+        (["testdrop"], "testdrop", SUPPORT_TEST_CHANNEL_ID, None, None),
+        (["testdrop", "--channel", "5"], "testdrop", 5, None, None),
+        (["test_session", "start"], "test_session_start", SUPPORT_TEST_CHANNEL_ID, 15, 2),
+        (["test_session", "stop"], "test_session_stop", None, None, None),
+        (["status"], "status", None, None, None),
+        (["schedule"], "schedule", None, None, None),
+    )
+    for argv, action, channel_id, minutes, interval in cases:
+        payload = script.command_from_args(script.build_parser().parse_args(argv), request_id="a" * 32)
+        assert payload["action"] == action
+        assert payload["id"] == "a" * 32
+        assert payload.get("channel_id") == channel_id
+        assert payload.get("minutes") == minutes
+        assert payload.get("interval") == interval
+
+    root = tmp_path / "cli"
+    request_id = "b" * 32
+    payload = script.command_from_args(script.build_parser().parse_args(["status"]), request_id=request_id)
+    path = write_command(root, payload)
+    assert path.parent == root / "inbox"
+    assert path.is_file()
+    assert list(path.parent.glob("*.tmp")) == []
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved["action"] == "status"
+    write_result(
+        root,
+        {"ok": True, "action": "status", "id": request_id, "text": "live switch: off", "channel_id": None, "error": None},
+    )
+    found = wait_for_result(root, request_id, 1)
+    assert found is not None
+    assert found["ok"] is True
+    assert found["text"] == "live switch: off"
+
+    def serve_failure():
+        deadline = time.time() + 10
+        inbox = root / "fail" / "inbox"
+        while time.time() < deadline:
+            files = list(inbox.glob("*.json")) if inbox.exists() else []
+            if files:
+                body = json.loads(files[0].read_text(encoding="utf-8"))
+                write_result(
+                    root / "fail",
+                    {
+                        "ok": False,
+                        "action": body["action"],
+                        "id": body["id"],
+                        "text": "Test drops stay out of Menaces to Sobriety and the live drop channel.",
+                        "channel_id": body.get("channel_id"),
+                        "error": "refused",
+                    },
+                )
+                return
+            time.sleep(0.05)
+
+    worker = threading.Thread(target=serve_failure)
+    worker.start()
+    code = script.main(["--root", str(root / "fail"), "testdrop", "--timeout", "8"])
+    worker.join(timeout=5)
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "stay out" in captured.out.casefold()
+
+    code = script.main(["--root", str(tmp_path / "empty"), "--timeout", "0.3", "schedule"])
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "Timed out waiting for the turkey hunt cog." in captured.out
+
+    proc = subprocess.Popen(
+        [sys.executable, str(ROOT / "scripts" / "turkeyhunt_ctl.py"), "--root", str(root / "sub"), "--timeout", "20", "status"],
+        cwd=str(ROOT),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    deadline = time.time() + 30
+    body = None
+    inbox = root / "sub" / "inbox"
+    while time.time() < deadline:
+        files = list(inbox.glob("*.json")) if inbox.exists() else []
+        if files:
+            body = json.loads(files[0].read_text(encoding="utf-8"))
+            break
+        if proc.poll() is not None:
+            break
+        time.sleep(0.05)
+    assert body is not None
+    assert body["action"] == "status"
+    write_result(
+        root / "sub",
+        {"ok": True, "action": "status", "id": body["id"], "text": "status from the cog", "channel_id": None, "error": None},
+    )
+    stdout, stderr = proc.communicate(timeout=20)
+    assert proc.returncode == 0
+    assert stdout.strip() == "status from the cog"
+    assert "Traceback" not in stderr
+
+
+def test_ctl_testdrop_refuses_live_targets_and_keeps_the_test_tally(tmp_path):
+    when = datetime(2026, 11, 21, 12, tzinfo=PT)
+    # 0.0 rolls Regular. The next draw is the grab, and 0.0 would slip on a 1-in-10 Regular.
+    cog, bot = _cog(tmp_path, enabled=False, rng=ScriptedRng([0.0, 0.99]), clock=lambda: when)
+    assert cog.live_enabled() is False
+    general = _wire(cog, bot)
+    support = HuntChannel(SUPPORT_CHANNEL_ID, "bot-test", SUPPORT_GUILD_ID)
+    support.speaker = bot.user
+    side = HuntChannel(424242424242, "side-room", MTS_GUILD_ID)
+    side.speaker = bot.user
+    announce_id = cog.settings.cleanup_skip_channel_ids[0]
+    announce = HuntChannel(announce_id, "announcements", SUPPORT_GUILD_ID)
+    announce.speaker = bot.user
+    bot.channels[support.id] = support
+    bot.channels[side.id] = side
+    bot.channels[announce.id] = announce
+    fetched = _watch_fetch(bot)
+    _arm(cog, [_slot(when, "abcd1234")])
+
+    async def run():
+        refused = (
+            ("testdrop", GENERAL_ID),
+            ("testdrop", announce_id),
+            ("testdrop", side.id),
+            ("test_session_start", GENERAL_ID),
+            ("test_session_start", announce_id),
+            ("test_session_start", side.id),
+        )
+        for action, channel_id in refused:
+            request_id = new_request_id()
+            fields = {"id": request_id, "action": action, "channel_id": channel_id}
+            if action == "test_session_start":
+                fields["minutes"] = 15
+                fields["interval"] = 2
+            write_command(cog.ctl_root, fields)
+            await cog.tick(when)
+            result = _result(cog, request_id)
+            assert result["ok"] is False
+            assert result["error"] == "refused"
+            assert "Menaces" in result["text"] or "live drop" in result["text"]
+        assert general.sent == []
+        assert support.sent == []
+        assert side.sent == []
+        assert announce.sent == []
+        assert cog.book.state["test_drops"] == {}
+        assert cog.book.state["test_session"] is None
+        assert cog.book.state["scores"] == {}
+        assert GENERAL_ID not in fetched
+        assert announce_id not in fetched
+        assert cog.book.state["schedule"][0]["status"] == "pending"
+
+        missing = new_request_id()
+        write_command(cog.ctl_root, {"id": missing, "action": "testdrop", "channel_id": 888888888888888888})
+        await cog.tick(when)
+        missed = _result(cog, missing)
+        assert missed["ok"] is False
+        assert missed["error"] == "unresolved"
+        assert general.sent == []
+        assert support.sent == []
+
+        omitted = new_request_id()
+        write_command(cog.ctl_root, {"id": omitted, "action": "testdrop"})
+        await cog.tick(when)
+        posted = _result(cog, omitted)
+        assert posted["ok"] is True
+        assert posted["channel_id"] == SUPPORT_TEST_CHANNEL_ID
+        assert "does not count on the live board" in posted["text"]
+        assert len(support.sent) == 1
+        assert "TEST TURKEY" in support.sent[0]["content"]
+        assert "10 points" in support.sent[0]["content"]
+        assert general.sent == []
+        assert cog.book.state["scores"] == {}
+        drop_id = next(iter(cog.book.state["test_drops"]))
+        claim = _interaction(cog, 5, guild_id=SUPPORT_GUILD_ID)
+        await cog.handle_claim(claim, drop_id)
+        assert cog.book.state["scores"] == {}
+        assert cog.book.state["test_scores"] == {"5": 10}
+        assert "10 points" in claim.user.send.await_args.args[0]
+        assert "test tally" in claim.user.send.await_args.args[0]
+        assert cog.book.state["schedule"][0]["status"] == "pending"
+
+        before = len(support.sent)
+        write_command(cog.ctl_root, {"id": omitted, "action": "testdrop"})
+        await cog.tick(when)
+        assert len(support.sent) == before
+        assert _result(cog, omitted)["ok"] is True
+
+        support.fail_send = True
+        failed = new_request_id()
+        write_command(cog.ctl_root, {"id": failed, "action": "testdrop", "channel_id": SUPPORT_CHANNEL_ID})
+        await cog.tick(when)
+        failure = _result(cog, failed)
+        assert failure["ok"] is False
+        assert failure["error"] == "send_failed"
+        assert len(support.sent) == before
+        assert all(row.get("status") != "open" for row in cog.book.state["test_drops"].values())
+        assert cog.book.state["scores"] == {}
+        support.fail_send = False
+
+    asyncio.run(run())
+
+
+def test_ctl_session_status_schedule_and_bad_files_do_not_crash_or_save(tmp_path):
+    when = datetime(2026, 11, 21, 12, tzinfo=PT)
+    cog, bot = _cog(tmp_path, enabled=False, rng=ScriptedRng([0.0] * 8), clock=lambda: when)
+    support = HuntChannel(SUPPORT_CHANNEL_ID, "bot-test", SUPPORT_GUILD_ID)
+    support.speaker = bot.user
+    bot.channels[support.id] = support
+    general = _wire(cog, bot)
+    cog.book.start_test_session(
+        guild_id=SUPPORT_GUILD_ID,
+        channel_id=SUPPORT_CHANNEL_ID,
+        minutes=15,
+        interval=2,
+        now=when,
+    )
+    bad_id = "m" * 16
+    _raw_inbox(cog, f"{bad_id}.json", "{")
+
+    async def run():
+        await cog.tick(when)
+        assert len(support.sent) == 1
+        assert "TEST TURKEY" in support.sent[0]["content"]
+        bad = _result(cog, bad_id)
+        assert bad["ok"] is False
+        assert bad["error"] == "malformed"
+        assert not (cog.ctl_root / "inbox" / f"{bad_id}.json").exists()
+        assert general.sent == []
+
+        stop_id = new_request_id()
+        write_command(cog.ctl_root, {"id": stop_id, "action": "test_session_stop"})
+        await cog.tick(when)
+        assert _result(cog, stop_id)["ok"] is True
+        assert "stopped" in _result(cog, stop_id)["text"].casefold()
+        assert cog.book.state["test_session"] is None
+
+        start_id = new_request_id()
+        write_command(cog.ctl_root, {"id": start_id, "action": "test_session_start"})
+        await cog.tick(when)
+        started = _result(cog, start_id)
+        assert started["ok"] is True
+        assert started["channel_id"] == SUPPORT_TEST_CHANNEL_ID
+        assert "for 15 minutes" in started["text"]
+        assert "every 2 minutes" in started["text"]
+        assert len(support.sent) == 2
+        assert cog.book.state["scores"] == {}
+        assert cog.book.state["test_session"]["channel_id"] == SUPPORT_CHANNEL_ID
+        ends_at = cog.book.state["test_session"]["ends_at"]
+
+        busy_id = new_request_id()
+        write_command(
+            cog.ctl_root,
+            {"id": busy_id, "action": "test_session_start", "minutes": 5, "interval": 1},
+        )
+        await cog.tick(when)
+        busy = _result(cog, busy_id)
+        assert busy["ok"] is False
+        assert busy["error"] == "busy"
+        assert cog.book.state["test_session"]["ends_at"] == ends_at
+        assert len(support.sent) == 2
+
+        wide_id = new_request_id()
+        write_command(
+            cog.ctl_root,
+            {
+                "id": wide_id,
+                "action": "test_session_start",
+                "channel_id": SUPPORT_CHANNEL_ID,
+                "minutes": 9999,
+                "interval": 2,
+            },
+        )
+        await cog.tick(when)
+        assert _result(cog, wide_id)["error"] == "invalid"
+        assert cog.book.state["test_session"]["ends_at"] == ends_at
+
+        again = new_request_id()
+        write_command(cog.ctl_root, {"id": again, "action": "test_session_stop"})
+        await cog.tick(when)
+        assert cog.book.state["test_session"] is None
+        idle = new_request_id()
+        write_command(cog.ctl_root, {"id": idle, "action": "test_session_stop"})
+        await cog.tick(when)
+        idle_result = _result(cog, idle)
+        assert idle_result["ok"] is True
+        assert "No test session is running." in idle_result["text"]
+
+        cog.book.state["schedule_built"] = True
+        sentinel = [{"id": "keep", "at": when.isoformat(), "day": "2026-11-21", "status": "pending"}]
+        cog.book.state["schedule"] = sentinel
+        cog.book.save()
+        raw = cog.book.path.read_bytes()
+        status_id = new_request_id()
+        schedule_id = new_request_id()
+        write_command(cog.ctl_root, {"id": status_id, "action": "status"})
+        write_command(cog.ctl_root, {"id": schedule_id, "action": "schedule"})
+        sent_before = len(support.sent)
+        await cog.tick(when)
+        status = _result(cog, status_id)
+        preview = _result(cog, schedule_id)
+        assert status["ok"] is True
+        assert "live switch: off" in status["text"]
+        assert preview["ok"] is True
+        assert preview["text"].startswith("Unsaved preview.")
+        assert "turkeys planned" in preview["text"]
+        assert "keep" not in preview["text"]
+        assert cog.book.state["schedule"] == sentinel
+        assert cog.book.state["schedule_built"] is True
+        assert cog.book.path.read_bytes() == raw
+        assert len(support.sent) == sent_before
+        assert general.sent == []
+
+        unknown = "u" * 16
+        _raw_inbox(cog, f"{unknown}.json", json.dumps({"id": unknown, "action": "power"}))
+        outer = "a" * 16
+        inner = "b" * 16
+        _raw_inbox(cog, f"{outer}.json", json.dumps({"id": inner, "action": "status"}))
+        huge = "c" * 16
+        _raw_inbox(cog, f"{huge}.json", "x" * 9000)
+        nested_id = "d" * 16
+        nested = cog.ctl_root / "inbox" / "nested"
+        nested.mkdir(parents=True, exist_ok=True)
+        (nested / f"{nested_id}.json").write_text(
+            json.dumps({"id": nested_id, "action": "status"}),
+            encoding="utf-8",
+        )
+        escaped_id = "e" * 16
+        (cog.ctl_root / "escaped.json").write_text(
+            json.dumps({"id": escaped_id, "action": "status"}),
+            encoding="utf-8",
+        )
+        outside = tmp_path / "outside.json"
+        outside.write_text("{}", encoding="utf-8")
+        inbox = cog.ctl_root / "inbox"
+        assert inbox_file_is_local(inbox, outside) is False
+        assert inbox_file_is_local(inbox, inbox / ".." / outside.name) is False
+        await cog.tick(when)
+        assert _result(cog, unknown)["error"] == "unknown_action"
+        assert _result(cog, outer)["error"] == "id_mismatch"
+        assert not (cog.ctl_root / "results" / f"{inner}.json").exists()
+        assert _result(cog, huge)["error"] == "too_large"
+        assert (nested / f"{nested_id}.json").is_file()
+        assert not (cog.ctl_root / "results" / f"{nested_id}.json").exists()
+        assert not (cog.ctl_root / "results" / f"{escaped_id}.json").exists()
+        assert len(support.sent) == sent_before
+        assert cog.book.path.read_bytes() == raw
+
+        ids = [new_request_id() for _ in range(MAX_COMMANDS_PER_TICK + 2)]
+        for request_id in ids:
+            write_command(cog.ctl_root, {"id": request_id, "action": "status"})
+        await cog.tick(when)
+        done = [request_id for request_id in ids if (cog.ctl_root / "results" / f"{request_id}.json").is_file()]
+        left = [request_id for request_id in ids if (cog.ctl_root / "inbox" / f"{request_id}.json").is_file()]
+        assert len(done) == MAX_COMMANDS_PER_TICK
+        assert len(left) == 2
+        assert len(support.sent) == sent_before
+        await cog.tick(when)
+        assert all((cog.ctl_root / "results" / f"{request_id}.json").is_file() for request_id in ids)
+        assert list((cog.ctl_root / "inbox").glob("*.json")) == []
+
+    asyncio.run(run())
