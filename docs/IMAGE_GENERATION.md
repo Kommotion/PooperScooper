@@ -31,25 +31,30 @@ Browser UI   ─────────►  http://127.0.0.1:8188
 - If Desktop rewrites `shared_model_paths.yaml`, set models dir back to `ComfyUI_New\models` only.
 - Env overrides: `COMFYUI_HOST`, `COMFYUI_PORT`, `COMFYUI_ROOT`, `COMFYUI_AUTO_START`.
 
-**Current models:**
+**Current models** (`/imagegen generate` order). Anime choices are labeled `[Anime][NSFW]`. SFW realism choices are labeled `[Realism][SFW]`. LUSTIFY is labeled `[Realism][NSFW]`. Anime comes first, then Realism. Inside Realism the order is Krea 2 Turbo, FLUX 3 Klein INT8, RedCraft, Qwen-Image 2.1, then LUSTIFY. Identity Edit is edit-only and is not a generate choice or a pref-view option.
 
 | Enum value | Class | Workflow JSON | Notes |
 |------------|-------|---------------|--------|
-| `anime_wai_illustrious` | `ComfyWaiIllustriousModel` | `WAI-ILLUSTRIOUS-SDXL_API.json` | SDXL |
-| `z_image_turbo_fp8` | `ComfyZImageTurboModel` | `Z_IMAGE_TURBO_FP8_API.json` | |
-| `anima_aesthetic` | `ComfyAnimaAestheticModel` | `ANIMA_AESTHETIC_API.json` | Base Anima aesthetic v1.1 |
-| `one_obsession_illustrious` | `ComfyOneObsessionIllustriousModel` | `ONE_OBSESSION_ILLUSTRIOUS_API.json` | Label **(NSFW)** |
-| `one_obsession_anima` | `ComfyOneObsessionAnimaModel` | `ONE_OBSESSION_ANIMA_API.json` | One Obsession Anima v5.0 (v5 turbo). Label **(NSFW)** |
-| `krea2_turbo` | `ComfyKrea2TurboModel` | `KREA2_TURBO_INT8_API.json` / `_ENHANCE` | INT8 Turbo |
-| `redcraft` | `ComfyRedCraftModel` | `REDCRAFT_KREA2_API.json` / `_ENHANCE` | RedCraft 2.3 Krea2 INT8/INT4/FP8 |
-| `flux3_klein_int8` | `ComfyFlux3KleinInt8Model` | `KLEIN_API.json` | Distilled INT8, 16 steps, cfg 1. No prompt upsampler (8 GB VRAM) |
-| `krea2_identity_edit` | `ComfyKrea2IdentityEditModel` | `KREA2_IDENTITY_EDIT_API.json` | Instruction edit + source image |
+| `anime_wai_illustrious` | `ComfyWaiIllustriousModel` | `WAI-ILLUSTRIOUS-SDXL_API.json` | SDXL. Label `[Anime][NSFW] WAI Illustrious` |
+| `anima_aesthetic` | `ComfyAnimaAestheticModel` | `ANIMA_AESTHETIC_API.json` | Base Anima aesthetic v1.1. Label `[Anime][NSFW] Anima Aesthetic` |
+| `one_obsession_illustrious` | `ComfyOneObsessionIllustriousModel` | `ONE_OBSESSION_ILLUSTRIOUS_API.json` | Label `[Anime][NSFW] One Obsession Illustrious` |
+| `one_obsession_anima` | `ComfyOneObsessionAnimaModel` | `ONE_OBSESSION_ANIMA_API.json` | One Obsession Anima v5.0 (v5 turbo). Label `[Anime][NSFW] One Obsession Anima` |
+| `krea2_turbo` | `ComfyKrea2TurboModel` | `KREA2_TURBO_INT8_API.json` / `_ENHANCE` | INT8 Turbo. Label `[Realism][SFW] Krea 2 Turbo` |
+| `flux3_klein_int8` | `ComfyFlux3KleinInt8Model` | `KLEIN_API.json` | Distilled INT8, 16 steps, cfg 1. No prompt upsampler (8 GB VRAM). Label `[Realism][SFW] FLUX 3 Klein INT8`. Before RedCraft. |
+| `redcraft` | `ComfyRedCraftModel` | `REDCRAFT_KREA2_API.json` / `_ENHANCE` | RedCraft 2.3 Krea2 INT8/INT4/FP8. Label `[Realism][SFW] RedCraft` |
+| `qwen_image_21` | `ComfyQwenImage21Model` | `QWEN_IMAGE_21_TURBO_INT8_API.json` | Official Comfy-Org turbo INT8, 8 steps, cfg 1, `TextEncodeQwenImage21`, w4a8 8B encoder, 2.1 VAE, no prompt enhancer, 8 GB VRAM. Label `[Realism][SFW] Qwen-Image 2.1`. Last SFW realism generate model. |
+| `lustify` | `ComfyLustifyKrea2Model` | `LUSTIFY_KREA2_API.json` | LUSTIFY! v10 Krea 2 Turbo INT8, NSFW photoreal, 8 steps, cfg 1, same CLIP/VAE as Krea 2 Turbo (`qwen3vl_4b_fp8_scaled` + `qwen_image_vae`). Label `[Realism][NSFW] LUSTIFY`. Last generate model, after the SFW realism models. Not in the Krea LLM-enhance family. |
+| `krea2_identity_edit` | `ComfyKrea2IdentityEditModel` | `KREA2_IDENTITY_EDIT_API.json` | Instruction edit + source image. Not a generate choice. |
 
-**Removed from Discord:** WAI ANIMA (`anime_wai_anima`) — replaced by base **Anima Aesthetic**.
+**Removed from Discord:** WAI ANIMA (`anime_wai_anima`) — replaced by base **Anima Aesthetic**. Saved values `anime_wai_anima` and `wai_anima` still map to Anima Aesthetic. Z-Image Turbo (`z_image_turbo_fp8`, formerly `ComfyZImageTurboModel`) was removed from Discord `/imagegen`. A saved or remembered value `z_image_turbo_fp8` (and the old member name `Z_IMAGE_TURBO_FP8`) maps to WAI Illustrious (`anime_wai_illustrious`). The leftover gitignored workflow `Z_IMAGE_TURBO_FP8_API.json` may still exist on disk but is unused by the bot.
 
-**Krea LLM enhance:** slash `/imagegen generate` option `llm_prompt_enhance` (default **No**). Pref-view button still available for regenerate flow. When Yes + Krea-family (Krea 2 Turbo, RedCraft), uses `TextGenerate` before sampling. FLUX 3 Klein is not in that set.
+**Krea LLM enhance:** slash `/imagegen generate` option `llm_prompt_enhance` (default **No**). Pref-view button still available for regenerate flow. When Yes + Krea-family (Krea 2 Turbo, RedCraft), uses `TextGenerate` before sampling. FLUX 3 Klein, Qwen-Image 2.1, and LUSTIFY are not in that set. LUSTIFY has no enhance workflow.
 
-**FLUX 3 Klein INT8:** `/imagegen generate` choice after RedCraft. Natural-language captions (empty default positive and negative). Workflow `KLEIN_API.json` is the official distilled INT8 path: 16 steps, cfg 1, euler/simple. The optional official 9B prompt upsampler is omitted so the model fits in 8 GB VRAM.
+**FLUX 3 Klein INT8:** `/imagegen generate` choice after Krea 2 Turbo and before RedCraft. Natural-language captions (empty default positive and negative). Workflow `KLEIN_API.json` is the official distilled INT8 path: 16 steps, cfg 1, euler/simple. The optional official 9B prompt upsampler is omitted so the model fits in 8 GB VRAM.
+
+**Qwen-Image 2.1:** `/imagegen generate` choice among SFW realism models (after RedCraft, before LUSTIFY). Natural-language captions (empty default positive and negative). Workflow `QWEN_IMAGE_21_TURBO_INT8_API.json` is the official Comfy-Org turbo INT8 path: 8 steps, cfg 1, euler/simple, `TextEncodeQwenImage21`, optional `QwenImage21Cache`, CLIP type `qwen_image`, `qwen3vl_8b_w4a8` encoder, `qwen_image_2.1` VAE. No 9B prompt enhancer, so it fits in 8 GB VRAM. Qwen is not in the Krea LLM-enhance family.
+
+**LUSTIFY! v10:** `/imagegen generate` choice `[Realism][NSFW] LUSTIFY`, last in the generate dropdown, after every SFW realism model (immediately after `[Realism][SFW] Qwen-Image 2.1`). Natural-language captions (empty default positive and negative). Workflow `LUSTIFY_KREA2_API.json` is the Krea 2 Turbo INT8 graph with the UNET swapped to `lustify-v10-krea-turbo-int8_convrot.safetensors`: NSFW photoreal, 8 steps, cfg 1, euler/simple. Same CLIP/VAE as Krea 2 Turbo (`qwen3vl_4b_fp8_scaled`, type `krea2`, `qwen_image_vae`). Node 6 is `CLIPTextEncode` (positive). Node 7 is `ConditioningZeroOut`, so the base prompt patcher leaves it alone. No enhance workflow, so LUSTIFY is not in the Krea LLM-enhance family. Fits 8 GB VRAM (smoke-tested). `/imagegen edit` stays Identity Edit only.
 
 **RedCraft weights:** `ComfyUI_New/models/diffusion_models/redcraft23INT8INT4FP8_30Krea2.safetensors` (same CLIP/VAE as Krea 2: `qwen3vl_4b_fp8_scaled` + `qwen_image_vae`).
 
@@ -115,7 +120,10 @@ Existing workflows for reference:
 
 - `WAI-ILLUSTRIOUS-SDXL_API.json` — SDXL checkpoint loader, nodes 3/6/7
 - `WAI-ANIMA_API.json` — separate CLIP + VAE loaders, nodes 3/6/7
-- `Z_IMAGE_TURBO_FP8_API.json` — FP8 turbo model
+- `Z_IMAGE_TURBO_FP8_API.json` — leftover/unused by the bot (removed from Discord `/imagegen`; the gitignored file may still be on disk)
+- `QWEN_IMAGE_21_TURBO_INT8_API.json` — `TextEncodeQwenImage21` for the prompt and negative prompt (not CLIPTextEncode nodes 6/7); KSampler is still node 3
+- `KLEIN_API.json` — CLIPTextEncode nodes 6/7, distilled INT8, no prompt upsampler
+- `LUSTIFY_KREA2_API.json` — CLIPTextEncode node 6 (positive); node 7 is `ConditioningZeroOut` (no negative encode); KSampler node 3; UNET `lustify-v10-krea-turbo-int8_convrot.safetensors`; same CLIP/VAE as Krea 2 Turbo
 
 ### Step 3 — Register in `cogs/utils/image_models.py`
 
@@ -237,7 +245,7 @@ self.active_model = image.model
 
 - Switching between SDXL (Illustrious) and Anima works because of `/free`, but each swap costs **~10–20 s** of reload time.
 - ANIMA runs ~**45 s** per 1024×1024 / 30-step job; Illustrious ~**15 s**.
-- Prefer **FP8** checkpoints when available (see `z_image_turbo_fp8`).
+- Prefer official **INT8 / W4A8** quants when available (FLUX 3 Klein, Krea 2, Qwen-Image 2.1, LUSTIFY v10).
 - Avoid heavy upscale nodes in the default workflow unless needed (`RealESRGAN` custom node requires `basicsr`).
 - Keep resolution at **1024×1024** or lower for new models unless tested.
 

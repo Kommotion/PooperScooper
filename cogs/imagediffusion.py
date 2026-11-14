@@ -30,13 +30,14 @@ from cogs.utils.image_models import (
     NsfwLevel,
     ImageCreation,
     ComfyWaiIllustriousModel,
-    ComfyZImageTurboModel,
     ComfyAnimaAestheticModel,
     ComfyOneObsessionIllustriousModel,
     ComfyOneObsessionAnimaModel,
     ComfyKrea2TurboModel,
-    ComfyRedCraftModel,
     ComfyFlux3KleinInt8Model,
+    ComfyRedCraftModel,
+    ComfyQwenImage21Model,
+    ComfyLustifyKrea2Model,
     ComfyKrea2IdentityEditModel,
 )
 from PIL import Image as PILImage
@@ -371,6 +372,23 @@ class ImageGenPrefView(ui.View):
         super().__init__(timeout=300)
         self.cog = cog
 
+        # Generate dropdown only. A retired or non-generate default (Identity Edit,
+        # or any value Models did not map onto one of these options) must not mark
+        # a missing option or leave the view on a model the dropdown cannot show.
+        generate_models = {
+            Models.ANIME_WAI_ILLUSTRIOUS,
+            Models.ANIMA_AESTHETIC,
+            Models.ONE_OBSESSION_ILLUSTRIOUS,
+            Models.ONE_OBSESSION_ANIMA,
+            Models.KREA2_TURBO,
+            Models.FLUX3_KLEIN_INT8,
+            Models.REDCRAFT,
+            Models.QWEN_IMAGE_21,
+            Models.LUSTIFY,
+        }
+        if default_model not in generate_models:
+            default_model = Models.ANIME_WAI_ILLUSTRIOUS
+
         self.model = default_model
         self.default_pos = default_pos
         self.default_neg = default_neg
@@ -383,52 +401,58 @@ class ImageGenPrefView(ui.View):
             placeholder="Select a model (required)",
             options=[
                 discord.SelectOption(
-                    label="Anime WAI Illustrious",
+                    label="[Anime][NSFW] WAI Illustrious",
                     value=Models.ANIME_WAI_ILLUSTRIOUS,
                     description="WAI Illustrious SDXL anime",
                     default=(default_model == Models.ANIME_WAI_ILLUSTRIOUS),
                 ),
                 discord.SelectOption(
-                    label="Z Image Turbo",
-                    value=Models.Z_IMAGE_TURBO_FP8,
-                    description="Z-Image Turbo FP8",
-                    default=(default_model == Models.Z_IMAGE_TURBO_FP8),
-                ),
-                discord.SelectOption(
-                    label="Anima Aesthetic",
+                    label="[Anime][NSFW] Anima Aesthetic",
                     value=Models.ANIMA_AESTHETIC,
                     description="Base Anima aesthetic v1.1",
                     default=(default_model == Models.ANIMA_AESTHETIC),
                 ),
                 discord.SelectOption(
-                    label="One Obsession Illustrious (NSFW)",
+                    label="[Anime][NSFW] One Obsession Illustrious",
                     value=Models.ONE_OBSESSION_ILLUSTRIOUS,
                     description="One Obsession v24 Illustrious",
                     default=(default_model == Models.ONE_OBSESSION_ILLUSTRIOUS),
                 ),
                 discord.SelectOption(
-                    label="One Obsession Anima (NSFW)",
+                    label="[Anime][NSFW] One Obsession Anima",
                     value=Models.ONE_OBSESSION_ANIMA,
                     description="One Obsession Anima v5.0",
                     default=(default_model == Models.ONE_OBSESSION_ANIMA),
                 ),
                 discord.SelectOption(
-                    label="Krea 2 Turbo",
+                    label="[Realism][SFW] Krea 2 Turbo",
                     value=Models.KREA2_TURBO,
                     description="Krea 2 Turbo INT8 (~8 steps)",
                     default=(default_model == Models.KREA2_TURBO),
                 ),
                 discord.SelectOption(
-                    label="RedCraft",
+                    label="[Realism][SFW] FLUX 3 Klein INT8",
+                    value=Models.FLUX3_KLEIN_INT8,
+                    description="FLUX 3 Klein distilled INT8 (16 steps)",
+                    default=(default_model == Models.FLUX3_KLEIN_INT8),
+                ),
+                discord.SelectOption(
+                    label="[Realism][SFW] RedCraft",
                     value=Models.REDCRAFT,
                     description="RedCraft 2.3 Krea2 INT8/INT4/FP8",
                     default=(default_model == Models.REDCRAFT),
                 ),
                 discord.SelectOption(
-                    label="FLUX 3 Klein INT8",
-                    value=Models.FLUX3_KLEIN_INT8,
-                    description="FLUX 3 Klein distilled INT8 (16 steps)",
-                    default=(default_model == Models.FLUX3_KLEIN_INT8),
+                    label="[Realism][SFW] Qwen-Image 2.1",
+                    value=Models.QWEN_IMAGE_21,
+                    description="Qwen-Image 2.1 turbo INT8 (8 steps)",
+                    default=(default_model == Models.QWEN_IMAGE_21),
+                ),
+                discord.SelectOption(
+                    label="[Realism][NSFW] LUSTIFY",
+                    value=Models.LUSTIFY,
+                    description="LUSTIFY v10 Krea 2 Turbo INT8 (8 steps)",
+                    default=(default_model == Models.LUSTIFY),
                 ),
             ]
         )
@@ -788,26 +812,28 @@ class ImageDiffusion(Cog):
 
         self.models_to_load_on_boot = [
             Models.ANIME_WAI_ILLUSTRIOUS,
-            Models.Z_IMAGE_TURBO_FP8,
             Models.ANIMA_AESTHETIC,
             Models.ONE_OBSESSION_ILLUSTRIOUS,
             Models.ONE_OBSESSION_ANIMA,
             Models.KREA2_TURBO,
-            Models.REDCRAFT,
             Models.FLUX3_KLEIN_INT8,
+            Models.REDCRAFT,
+            Models.QWEN_IMAGE_21,
+            Models.LUSTIFY,
             Models.KREA2_IDENTITY_EDIT,
         ]
 
-        # Map front-end choices to ComfyUI workflows
+        # Map front-end choices to ComfyUI workflows. Generate order, then Identity Edit.
         self.models = {
             Models.ANIME_WAI_ILLUSTRIOUS: ComfyWaiIllustriousModel(),
-            Models.Z_IMAGE_TURBO_FP8: ComfyZImageTurboModel(),
             Models.ANIMA_AESTHETIC: ComfyAnimaAestheticModel(),
             Models.ONE_OBSESSION_ILLUSTRIOUS: ComfyOneObsessionIllustriousModel(),
             Models.ONE_OBSESSION_ANIMA: ComfyOneObsessionAnimaModel(),
             Models.KREA2_TURBO: ComfyKrea2TurboModel(),
-            Models.REDCRAFT: ComfyRedCraftModel(),
             Models.FLUX3_KLEIN_INT8: ComfyFlux3KleinInt8Model(),
+            Models.REDCRAFT: ComfyRedCraftModel(),
+            Models.QWEN_IMAGE_21: ComfyQwenImage21Model(),
+            Models.LUSTIFY: ComfyLustifyKrea2Model(),
             Models.KREA2_IDENTITY_EDIT: ComfyKrea2IdentityEditModel(),
         }
 
@@ -907,14 +933,15 @@ class ImageDiffusion(Cog):
         llm_prompt_enhance='(Optional) Expand prompt with LLM first — Krea family only (default: No).',
     )
     @app_commands.choices(model=[
-        app_commands.Choice(name="Anime WAI Illustrious", value=Models.ANIME_WAI_ILLUSTRIOUS.value),
-        app_commands.Choice(name="Z Image Turbo", value=Models.Z_IMAGE_TURBO_FP8.value),
-        app_commands.Choice(name="Anima Aesthetic", value=Models.ANIMA_AESTHETIC.value),
-        app_commands.Choice(name="One Obsession Illustrious (NSFW)", value=Models.ONE_OBSESSION_ILLUSTRIOUS.value),
-        app_commands.Choice(name="One Obsession Anima (NSFW)", value=Models.ONE_OBSESSION_ANIMA.value),
-        app_commands.Choice(name="Krea 2 Turbo", value=Models.KREA2_TURBO.value),
-        app_commands.Choice(name="RedCraft", value=Models.REDCRAFT.value),
-        app_commands.Choice(name="FLUX 3 Klein INT8", value=Models.FLUX3_KLEIN_INT8.value),
+        app_commands.Choice(name="[Anime][NSFW] WAI Illustrious", value=Models.ANIME_WAI_ILLUSTRIOUS.value),
+        app_commands.Choice(name="[Anime][NSFW] Anima Aesthetic", value=Models.ANIMA_AESTHETIC.value),
+        app_commands.Choice(name="[Anime][NSFW] One Obsession Illustrious", value=Models.ONE_OBSESSION_ILLUSTRIOUS.value),
+        app_commands.Choice(name="[Anime][NSFW] One Obsession Anima", value=Models.ONE_OBSESSION_ANIMA.value),
+        app_commands.Choice(name="[Realism][SFW] Krea 2 Turbo", value=Models.KREA2_TURBO.value),
+        app_commands.Choice(name="[Realism][SFW] FLUX 3 Klein INT8", value=Models.FLUX3_KLEIN_INT8.value),
+        app_commands.Choice(name="[Realism][SFW] RedCraft", value=Models.REDCRAFT.value),
+        app_commands.Choice(name="[Realism][SFW] Qwen-Image 2.1", value=Models.QWEN_IMAGE_21.value),
+        app_commands.Choice(name="[Realism][NSFW] LUSTIFY", value=Models.LUSTIFY.value),
     ])
     @app_commands.guild_only()
     async def generate(self, interaction: discord.Interaction,
@@ -1184,6 +1211,7 @@ class ImageDiffusion(Cog):
                                   use_default_positive=True, nsfw: NsfwLevel = NsfwLevel.NOT_SPECIFIED,
                                   llm_prompt_enhance: bool = False) -> None:
         # LLM enhance is only implemented for Krea-family graphs (Krea 2 Turbo, RedCraft).
+        # FLUX 3 Klein, Qwen-Image 2.1, and LUSTIFY are not in that set.
         krea_family = {Models.KREA2_TURBO, Models.REDCRAFT}
         if llm_prompt_enhance and model not in krea_family:
             log.info(

@@ -21,13 +21,9 @@ from cogs.utils.constants import *
 
 
 WAI_ILLUSTRIOUS_PATH = r".\ComfyUI_New\models\checkpoints\waiIllustriousSDXL_v170.safetensors"
-Z_IMAGE_TURBO_PATH = r".\ComfyUI_New\models\diffusion_models\zImageTurboQuantized_fp8ScaledE4m3fnKJ.safetensors"
-
-Z_IMAGE_VAE = r".\ComfyUI_New\models\vae\zimage_turbo_fp8_vae.sft"
 
 # ComfyUI API workflow JSON paths
 WAI_ILLUSTRIOUS_WORKFLOW_PATH = r".\ComfyUI_New\user\default\workflows\WAI-ILLUSTRIOUS-SDXL_API.json"
-Z_IMAGE_TURBO_WORKFLOW_PATH = r".\ComfyUI_New\user\default\workflows\Z_IMAGE_TURBO_FP8_API.json"
 ANIMA_AESTHETIC_WORKFLOW_PATH = r".\ComfyUI_New\user\default\workflows\ANIMA_AESTHETIC_API.json"
 ONE_OBSESSION_ILLUSTRIOUS_WORKFLOW_PATH = r".\ComfyUI_New\user\default\workflows\ONE_OBSESSION_ILLUSTRIOUS_API.json"
 ONE_OBSESSION_ANIMA_WORKFLOW_PATH = r".\ComfyUI_New\user\default\workflows\ONE_OBSESSION_ANIMA_API.json"
@@ -37,6 +33,8 @@ REDCRAFT_WORKFLOW_PATH = r".\ComfyUI_New\user\default\workflows\REDCRAFT_KREA2_A
 REDCRAFT_ENHANCE_WORKFLOW_PATH = r".\ComfyUI_New\user\default\workflows\REDCRAFT_KREA2_API_ENHANCE.json"
 KREA2_IDENTITY_EDIT_WORKFLOW_PATH = r".\ComfyUI_New\user\default\workflows\KREA2_IDENTITY_EDIT_API.json"
 KLEIN_WORKFLOW_PATH = r".\ComfyUI_New\user\default\workflows\KLEIN_API.json"
+QWEN_IMAGE_21_WORKFLOW_PATH = r".\ComfyUI_New\user\default\workflows\QWEN_IMAGE_21_TURBO_INT8_API.json"
+LUSTIFY_KREA2_WORKFLOW_PATH = r".\ComfyUI_New\user\default\workflows\LUSTIFY_KREA2_API.json"
 
 # System prompt used by the official Krea UI "prompt enhance" path (shortened slightly for Discord UX).
 KREA2_LLM_ENHANCE_SYSTEM_PROMPT = (
@@ -101,24 +99,30 @@ class NsfwLevel(StrEnum):
 
 class Models(StrEnum):
     ANIME_WAI_ILLUSTRIOUS = "anime_wai_illustrious"
-    Z_IMAGE_TURBO_FP8 = "z_image_turbo_fp8"
     ANIMA_AESTHETIC = "anima_aesthetic"
     ONE_OBSESSION_ILLUSTRIOUS = "one_obsession_illustrious"
     ONE_OBSESSION_ANIMA = "one_obsession_anima"
     KREA2_TURBO = "krea2_turbo"
-    REDCRAFT = "redcraft"
     FLUX3_KLEIN_INT8 = "flux3_klein_int8"
+    REDCRAFT = "redcraft"
+    QWEN_IMAGE_21 = "qwen_image_21"
+    LUSTIFY = "lustify"
     KREA2_IDENTITY_EDIT = "krea2_identity_edit"
 
     @classmethod
     def _missing_(cls, value):
-        # Check against name (case-insensitive)
+        # Check against name (case-insensitive). str() so a non-string still compares.
+        lowered = str(value).lower()
         for member in cls:
-            if member.name.lower() == value.lower():
+            if member.name.lower() == lowered:
                 return member
         # Back-compat: old WAI ANIMA enum value
-        if str(value).lower() in {"anime_wai_anima", "wai_anima"}:
+        if lowered in {"anime_wai_anima", "wai_anima"}:
             return cls.ANIMA_AESTHETIC
+        # Back-compat: Z-Image Turbo was removed from /imagegen. Remembered slash
+        # values and the old member name both land on the generate default.
+        if lowered == "z_image_turbo_fp8":
+            return cls.ANIME_WAI_ILLUSTRIOUS
         raise ValueError(f"{value} is not a valid {cls.__name__}")
 
 
@@ -313,18 +317,6 @@ class ComfyWaiIllustriousModel(BaseComfyWorkflowModel):
             workflow_path=WAI_ILLUSTRIOUS_WORKFLOW_PATH,
             default_pos=WAI_ILLUSTRIOUS_POSITIVE_PROMPT,
             default_neg=WAI_ILLUSTRIOUS_NEGATIVE_PROMPT,
-        )
-
-
-class ComfyZImageTurboModel(BaseComfyWorkflowModel):
-    """ComfyUI workflow-backed Z Image Turbo FP8 model."""
-
-    def __init__(self):
-        super().__init__(
-            name=Models.Z_IMAGE_TURBO_FP8,
-            workflow_path=Z_IMAGE_TURBO_WORKFLOW_PATH,
-            default_pos=NO_DEFAULT_POSITIVE,
-            default_neg=NO_DEFAULT_NEGATIVE,
         )
 
 
@@ -526,6 +518,73 @@ class ComfyFlux3KleinInt8Model(BaseComfyWorkflowModel):
         super().__init__(
             name=Models.FLUX3_KLEIN_INT8,
             workflow_path=KLEIN_WORKFLOW_PATH,
+            default_pos=NO_DEFAULT_POSITIVE,
+            default_neg=NO_DEFAULT_NEGATIVE,
+        )
+
+
+class ComfyQwenImage21Model(BaseComfyWorkflowModel):
+    """Official Comfy-Org Qwen-Image-2.1 turbo INT8 text-to-image.
+
+    8 steps, cfg 1, euler/simple. TextEncodeQwenImage21 plus optional
+    QwenImage21Cache. CLIP type qwen_image, qwen3vl_8b_w4a8 encoder,
+    qwen_image_2.1 VAE. No 9B prompt enhancer. Sized to fit 8 GB VRAM.
+    Natural-language captions (empty default positive and negative).
+    """
+
+    def __init__(self):
+        super().__init__(
+            name=Models.QWEN_IMAGE_21,
+            workflow_path=QWEN_IMAGE_21_WORKFLOW_PATH,
+            default_pos=NO_DEFAULT_POSITIVE,
+            default_neg=NO_DEFAULT_NEGATIVE,
+        )
+
+    def _apply_prompts_to_workflow(
+        self,
+        workflow: dict,
+        positive_prompt: str,
+        negative_prompt: str,
+        image: ImageCreation,
+    ) -> dict:
+        # This graph has no CLIPTextEncode nodes 6/7. Patch TextEncodeQwenImage21
+        # and leave the caller's dict unchanged.
+        workflow = copy.deepcopy(workflow)
+        for node in workflow.values():
+            if not isinstance(node, dict):
+                continue
+            if node.get("class_type") != "TextEncodeQwenImage21":
+                continue
+            inputs = node.get("inputs")
+            if not isinstance(inputs, dict):
+                inputs = {}
+                node["inputs"] = inputs
+            inputs["prompt"] = positive_prompt
+            inputs["negative_prompt"] = negative_prompt
+
+        sampler = workflow.get("3")
+        if isinstance(sampler, dict) and sampler.get("class_type") == "KSampler":
+            sampler_inputs = sampler.get("inputs")
+            if not isinstance(sampler_inputs, dict):
+                sampler_inputs = {}
+                sampler["inputs"] = sampler_inputs
+            sampler_inputs["seed"] = random.getrandbits(64)
+
+        return workflow
+
+
+class ComfyLustifyKrea2Model(BaseComfyWorkflowModel):
+    """LUSTIFY! v10 (Krea 2) Turbo INT8 convrot, NSFW photoreal checkpoint on the Krea 2 Turbo stack.
+
+    8 steps, cfg 1, euler/simple. Reuses qwen3vl_4b_fp8_scaled + qwen_image_vae.
+    Fits 8 GB VRAM (smoke-tested). Natural-language captions (empty default positive
+    and negative).
+    """
+
+    def __init__(self):
+        super().__init__(
+            name=Models.LUSTIFY,
+            workflow_path=LUSTIFY_KREA2_WORKFLOW_PATH,
             default_pos=NO_DEFAULT_POSITIVE,
             default_neg=NO_DEFAULT_NEGATIVE,
         )
