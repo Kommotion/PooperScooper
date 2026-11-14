@@ -21,6 +21,7 @@ from cogs.imagediffusion import (
     HALLOWEENIFY_PRESET_ORDER,
     HALLOWEENIFY_SIZE,
     HALLOWEENIFY_STYLE_PRESERVATION,
+    IMAGE_QUEUE_MAXSIZE,
     QUEUE_FULL_MESSAGE,
     ImageDiffusion,
     PromptDetailButton,
@@ -674,8 +675,8 @@ def test_queue_full_message_comes_from_enqueue_image():
     async def run():
         ready = asyncio.Event()
         ready.set()
-        queue = asyncio.Queue(maxsize=5)
-        for _ in range(5):
+        queue = asyncio.Queue(maxsize=IMAGE_QUEUE_MAXSIZE)
+        for _ in range(IMAGE_QUEUE_MAXSIZE):
             queue.put_nowait(object())
         cog = SimpleNamespace(
             comfy_ready=ready,
@@ -690,7 +691,8 @@ def test_queue_full_message_comes_from_enqueue_image():
         cog.enqueue_image = enqueue_image
         interaction = _interaction(_user(b"caller-png"))
         await ImageDiffusion.halloweenify.callback(cog, interaction, costume="vampire")
-        assert queue.qsize() == 5
+        assert IMAGE_QUEUE_MAXSIZE == 30
+        assert queue.qsize() == IMAGE_QUEUE_MAXSIZE
         args = interaction.response.send_message.await_args
         assert args.args[0] == QUEUE_FULL_MESSAGE
         assert args.args[0] == "The image queue is full right now, try again in a minute."

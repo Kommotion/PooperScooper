@@ -78,7 +78,7 @@ Discord /imagegen → imagediffusion.py (queue)
 
 - Workflows are **JSON graphs** exported from ComfyUI in **API format** (not the UI canvas format).
 - The bot does **not** load GPU weights itself; ComfyUI does all inference.
-- Generations run **one at a time** through an `asyncio.Queue` (max 5 pending jobs).
+- Generations run **one at a time** through an `asyncio.Queue` (max 30 pending jobs).
 
 ---
 
@@ -214,7 +214,7 @@ Target GPU in production: **NVIDIA RTX A4000 Laptop (8 GB VRAM)**. ComfyUI runs 
 |-----------|----------|----------|
 | **Unload on model switch** | `imagediffusion.py` → `comfy_client.free_memory()` | Before processing a queued job whose model differs from `active_model`, calls ComfyUI `POST /free` with `unload_models: true` and `free_memory: true` |
 | **Serial queue** | `image_generation` task loop | Only one generation runs at a time |
-| **Queue cap** | `asyncio.Queue(maxsize=5)` | Rejects new jobs with "Queue is full" when 5 are pending |
+| **Queue cap** | `asyncio.Queue(maxsize=IMAGE_QUEUE_MAXSIZE)` (30) | Rejects new jobs with "Queue is full" when 30 are pending |
 | **Generation timeout** | `_image_generation_interaction` | 600 s `asyncio.wait_for` around `model.generate()` |
 | **Health watcher** | `comfy_health_watcher` (30 s) | Restarts ComfyUI if `/system_stats` fails (skipped while `_generation_in_progress`) |
 | **Hybrid ComfyUI launch** | `comfy_client.ensure_comfy_running()` | Uses external instance on `:8188` if already up; otherwise bot starts `ComfyUI_New/main.py` |
@@ -255,7 +255,7 @@ self.active_model = image.model
 
 - ComfyUI running / source (`external` vs `bot_started`)
 - Host, port, PID (if bot-started)
-- Queue depth (`current/5`)
+- Queue depth (`current/30`)
 
 Logs:
 
@@ -318,7 +318,7 @@ unet unexpected: ['llm_adapter.blocks...', ...]
 | `clip input is invalid: None` | CLIP not wired in workflow | Ensure CLIPLoader node is connected to CLIPTextEncode nodes 6/7 |
 | Generation never finishes | ComfyUI down or queue stuck | Check `:8188/system_stats`; read `comfyui_8188.log` |
 | Bot can't restart ComfyUI | Log file locked or Unicode crash | Kill stale python processes; ensure UTF-8 env vars in `start_comfy()` |
-| "Queue is full" | 5 jobs already pending | Wait for queue to drain |
+| "Queue is full" | 30 jobs already pending | Wait for queue to drain |
 | Upscale step fails | Missing `basicsr` for RealESRGAN node | `pip install basicsr` or remove upscale from workflow |
 | Slow ANIMA after Illustrious | Expected model swap | `/free` + full Anima load ~45 s total |
 

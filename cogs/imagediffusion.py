@@ -97,6 +97,8 @@ def halloweenify_enabled_from_config() -> bool:
 # /halloweenify off the app command tree. Nothing else in this cog has to change.
 HALLOWEENIFY_ENABLED = halloweenify_enabled_from_config()
 QUEUE_FULL_MESSAGE = "The image queue is full right now, try again in a minute."
+# Pending jobs waiting on the serial worker. Only one generation runs at a time.
+IMAGE_QUEUE_MAXSIZE = 30
 
 # Costume key -> sentence appended to the base prompt. "random" is not a costume.
 HALLOWEENIFY_COSTUMES = {
@@ -805,7 +807,7 @@ class ImageDiffusion(Cog):
     """Optimized Commands for image diffusion."""
     def __init__(self, bot):
         self.bot = bot
-        self.image_queue = asyncio.Queue(maxsize=5)
+        self.image_queue = asyncio.Queue(maxsize=IMAGE_QUEUE_MAXSIZE)
         self.next_image = asyncio.Event()
 
         self.active_model: Optional[Models] = None

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from cogs.imagediffusion import ImageDiffusion, ImageGenPrefView
+from cogs.imagediffusion import IMAGE_QUEUE_MAXSIZE, ImageDiffusion, ImageGenPrefView
 from cogs.utils.image_models import (
     KLEIN_WORKFLOW_PATH,
     LUSTIFY_KREA2_WORKFLOW_PATH,
@@ -455,3 +455,9 @@ def test_boot_registry_orders_realism_then_identity_edit_outside_krea_enhance():
     assert "FLUX3_KLEIN_INT8" not in family
     assert "QWEN_IMAGE_21" not in family
     assert "LUSTIFY" not in family
+
+
+def test_image_queue_uses_image_queue_maxsize():
+    assert IMAGE_QUEUE_MAXSIZE == 30
+    init_source = inspect.getsource(ImageDiffusion.__init__)
+    assert "asyncio.Queue(maxsize=IMAGE_QUEUE_MAXSIZE)" in init_source
