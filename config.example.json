@@ -28,5 +28,11 @@
     },
     "grok_webhook_url": "https://example.com/grok-webhook",
     "grok_webhook_key": "YOUR_GROK_WEBHOOK_KEY",
-    "grok_webhook_key_header": "Authorization"
+    "grok_webhook_key_header": "Authorization",
+    "mts_image_jobs": {
+        "enabled": false,
+        "channel_id": 1045149015756521493,
+        "inbox_dir": "data/mts_image_jobs/inbox",
+        "default_model": "anime_wai_illustrious"
+    }
 }

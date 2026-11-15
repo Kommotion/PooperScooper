@@ -1,6 +1,12 @@
 # Changelog
 
-This is the first versioned changelog for PooperScooper, covering about Oct 14–Nov 14, 2026.
+This is the first versioned changelog for PooperScooper, covering about Oct 14–Nov 15, 2026.
+
+## v2.7.0 — 2026-11-15
+
+### New stuff
+
+- The bot can pick up image jobs dropped in an inbox folder and post them to a configured channel. This stays off unless `mts_image_jobs.enabled` is turned on. The default channel is the support test channel, not MTS #image-diffusion.
 
 ## v2.6.1 — 2026-11-15
 

@@ -147,6 +147,9 @@ class ImageCreation:
         prompt_details: str = "",
         halloween_frame: str = "",
         edit_strength: Optional[float] = None,
+        result_future: Optional[asyncio.Future] = None,
+        output_width: Optional[int] = None,
+        output_height: Optional[int] = None,
     ):
         self.interaction: discord.Interaction = interaction
         self.negative_prompt = negative_prompt
@@ -178,6 +181,13 @@ class ImageCreation:
         # Higher keeps more of the original. Not KSampler denoise: that sampler
         # starts from an empty latent, so a lower denoise would not keep the source.
         self.edit_strength: Optional[float] = None if edit_strength is None else float(edit_strength)
+        # Background inbox jobs set this and leave interaction empty. The worker
+        # delivers a BackgroundImage here and does not post a slash-command reply.
+        self.result_future: Optional[asyncio.Future] = result_future
+        # Optional pixel size for standard empty-latent nodes. None keeps the
+        # workflow default. /imagegen leaves these unset.
+        self.output_width: Optional[int] = None if output_width is None else int(output_width)
+        self.output_height: Optional[int] = None if output_height is None else int(output_height)
 
 
 class ComfyOutput:
@@ -185,6 +195,73 @@ class ComfyOutput:
 
     def __init__(self, images: list[Image.Image]):
         self.images = images
+
+
+class BackgroundImage:
+    """PNG bytes and PIL image for a background job. Nothing here posts to Discord."""
+
+    def __init__(self, png_bytes: bytes, image: Image.Image):
+        self.png_bytes = png_bytes
+        self.image = image
+
+
+# Empty-latent nodes whose width/height inputs are the output size in pixels.
+# Qwen-Image 2.1 has none (its size is a single "resolution" field). That graph
+# keeps the workflow default.
+_STANDARD_LATENT_CLASS_TYPES = frozenset({
+    "EmptyLatentImage",
+    "EmptySD3LatentImage",
+    "EmptyFlux2LatentImage",
+})
+
+
+def apply_standard_latent_size(workflow: dict, image: ImageCreation) -> int:
+    """Set width and height on standard empty-latent nodes.
+
+    Returns how many nodes changed. Both dimensions must already be a sane
+    multiple of 64. When the graph has no such node, this logs and changes
+    nothing so the workflow default stands. Linked inputs are left alone.
+    """
+    width = getattr(image, "output_width", None)
+    height = getattr(image, "output_height", None)
+    if width is None and height is None:
+        return 0
+    if isinstance(width, bool) or isinstance(height, bool) or not isinstance(width, int) or not isinstance(height, int):
+        log.info("output size ignored because width and height must both be integers; using the workflow default")
+        return 0
+    if width < 64 or height < 64 or width > 2048 or height > 2048 or width % 64 or height % 64:
+        log.info(
+            "output size %sx%s is outside the conservative latent range; using the workflow default",
+            width,
+            height,
+        )
+        return 0
+
+    patched = 0
+    for node in workflow.values():
+        if not isinstance(node, dict):
+            continue
+        if node.get("class_type") not in _STANDARD_LATENT_CLASS_TYPES:
+            continue
+        inputs = node.get("inputs")
+        if not isinstance(inputs, dict):
+            continue
+        if "width" not in inputs or "height" not in inputs:
+            continue
+        if isinstance(inputs.get("width"), list) or isinstance(inputs.get("height"), list):
+            continue
+        inputs["width"] = width
+        inputs["height"] = height
+        patched += 1
+
+    if patched == 0:
+        model = getattr(image, "model", None)
+        model_name = getattr(model, "value", None) or "?"
+        log.info(
+            "workflow for %s has no standard latent size node; using the workflow default",
+            model_name,
+        )
+    return patched
 
 
 class BaseComfyWorkflowModel:
@@ -261,6 +338,7 @@ class BaseComfyWorkflowModel:
             if "3" in workflow and workflow["3"].get("class_type") == "KSampler":
                 workflow["3"]["inputs"]["seed"] = random.getrandbits(64)
 
+            apply_standard_latent_size(workflow, image)
             return workflow
 
     @to_thread
@@ -431,6 +509,7 @@ class ComfyKrea2TurboModel(BaseComfyWorkflowModel):
         if "3" in workflow and workflow["3"].get("class_type") == "KSampler":
             workflow["3"]["inputs"]["seed"] = seed
 
+        apply_standard_latent_size(workflow, image)
         return workflow
 
     @to_thread
@@ -585,6 +664,7 @@ class ComfyQwenImage21Model(BaseComfyWorkflowModel):
                 sampler["inputs"] = sampler_inputs
             sampler_inputs["seed"] = random.getrandbits(64)
 
+        apply_standard_latent_size(workflow, image)
         return workflow
 
 
@@ -666,6 +746,7 @@ class ComfyKrea2IdentityEditModel(BaseComfyWorkflowModel):
             workflow["82"]["inputs"]["width"] = w
             workflow["82"]["inputs"]["height"] = h
 
+        apply_standard_latent_size(workflow, image)
         return workflow
 
     @to_thread

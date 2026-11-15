@@ -23,6 +23,7 @@ initial_extensions = [
     'cogs.menacesroles',
     'cogs.eastereggs',
     'cogs.imagediffusion',
+    'cogs.mts_image_jobs',
     'cogs.birthdaytracker',
     'cogs.reminders',
     'cogs.palworld',

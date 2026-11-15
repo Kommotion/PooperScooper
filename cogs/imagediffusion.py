@@ -28,6 +28,7 @@ from cogs.utils.image_models import (
     Models,
     NsfwLevel,
     ImageCreation,
+    BackgroundImage,
     ComfyWaiIllustriousModel,
     ComfyAnimaAestheticModel,
     ComfyOneObsessionIllustriousModel,
@@ -1170,6 +1171,25 @@ class ImageDiffusion(Cog):
         await interaction.response.send_message(queued_message, ephemeral=ephemeral)
         return True
 
+    async def enqueue_background(self, image_entry: ImageCreation) -> bool:
+        """Put a background job on the shared image queue.
+
+        The caller sets ``image_entry.result_future``. The worker delivers a
+        ``BackgroundImage`` on that future and does not post to Discord.
+        Returns False when Comfy is not ready or the queue is full. This does
+        not send a slash-command reply and does not need an Interaction.
+        """
+        if getattr(image_entry, "result_future", None) is None:
+            raise ValueError("background generation requires result_future")
+        if not self.comfy_ready.is_set():
+            return False
+        if self.comfy_startup_error:
+            return False
+        if self.image_queue.full():
+            return False
+        await self.image_queue.put(image_entry)
+        return True
+
     async def schedule_generation(self, prompt: str, model: Models,
                                   interaction: discord.Interaction = None, negative_prompt='', use_default_negative=True,
                                   use_default_positive=True, nsfw: NsfwLevel = NsfwLevel.NOT_SPECIFIED,
@@ -1250,8 +1270,77 @@ class ImageDiffusion(Cog):
         await self.bot.wait_until_ready()
         await self.comfy_ready.wait()
 
+    async def _complete_background_generation(self, image: ImageCreation) -> None:
+        """Run the shared Comfy pipeline and deliver bytes on ``result_future``.
+
+        No Interaction and no channel send. Failures land on the future so the
+        inbox cog can fail the job without a slash-command reply.
+        """
+        future = getattr(image, "result_future", None)
+        result = None
+        error: BaseException | None = None
+        try:
+            result = await self._render_background_image(image)
+        except Exception as exc:
+            error = exc
+            log.error("Background image generation failed: %s", exc)
+        if future is None or future.done():
+            return
+        if error is not None:
+            future.set_exception(error)
+            return
+        future.set_result(result)
+
+    async def _render_background_image(self, image: ImageCreation) -> BackgroundImage:
+        budget = (
+            GENERATION_TIMEOUT_LLM_ENHANCE_SEC
+            if image.llm_prompt_enhance
+            else GENERATION_TIMEOUT_SEC
+        )
+        outer_timeout = budget + GENERATION_CANCEL_GRACE_SEC
+        try:
+            model = self.models[image.model]
+        except KeyError as exc:
+            raise RuntimeError(f"Unknown model: {image.model}") from exc
+
+        if not comfy_client.is_comfy_running():
+            try:
+                await asyncio.to_thread(comfy_client.ensure_comfy_running)
+                self.comfy_startup_error = None
+            except Exception as exc:
+                raise RuntimeError(f"ComfyUI is not available: {exc}") from exc
+
+        try:
+            output, _positive, _negative, _gen_time = await asyncio.wait_for(
+                model.generate(image), timeout=outer_timeout
+            )
+        except asyncio.TimeoutError as exc:
+            minutes = budget // 60
+            raise TimeoutError(f"Image generation timed out after {minutes} minutes.") from exc
+
+        images = getattr(output, "images", None)
+        if not images:
+            raise RuntimeError("ComfyUI returned no image")
+        img = images[0]
+        save_image = img if getattr(img, "mode", "RGB") == "RGB" else img.convert("RGB")
+        buffer = BytesIO()
+        try:
+            save_image.save(buffer, format="PNG")
+            png = buffer.getvalue()
+        finally:
+            buffer.close()
+        release_source_bytes(image)
+        return BackgroundImage(png_bytes=png, image=save_image)
+
     async def _image_generation_interaction(self, image: ImageCreation) -> None:
-        """Handles image generation but with an interaction."""
+        """Handles image generation but with an interaction.
+
+        A background job sets ``result_future`` and rides this same worker.
+        That path returns the image on the future and does not post.
+        """
+        if getattr(image, "result_future", None) is not None:
+            await self._complete_background_generation(image)
+            return
         # LLM enhance needs a longer budget (TextGenerate + sampling).
         # The outer wait is longer than that budget so wait_for_result can
         # interrupt Comfy and delete the upload before this wait fires.

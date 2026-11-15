@@ -1,0 +1,5 @@
+# Job payloads (JSON, images, .ready markers, error text) stay on this machine.
+*
+!*/
+!.gitignore
+!.gitkeep

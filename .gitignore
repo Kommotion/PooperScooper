@@ -92,6 +92,8 @@ data/*.json
 !data/.gitkeep
 # Local turkey-hunt control inbox and results. data/*.json does not cover this directory.
 data/turkey_hunt_ctl/
+# MTS image-job payloads are ignored by data/mts_image_jobs/.gitignore.
+# Keep the inbox/processing/done/failed .gitkeep files. Do not commit JSON, images, or .ready files.
 gametime.json
 birthday.json
 bingo.json

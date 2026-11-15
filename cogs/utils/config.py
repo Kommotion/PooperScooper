@@ -59,6 +59,38 @@ class ComfyUIConfig(BaseModel):
         return path.resolve()
 
 
+class MtsImageJobsConfig(BaseModel):
+    """Inbox image jobs. A missing block stays off and targets the support test channel.
+
+    Production MTS #image-diffusion (1373140173067653120) is refused by the cog
+    even if this channel_id is pointed there. Do not enable that channel here.
+    """
+
+    enabled: bool = False
+    # Support test channel (candyhunt SUPPORT_TEST_CHANNEL_ID). Not production.
+    channel_id: int = 1045149015756521493
+    inbox_dir: str = "data/mts_image_jobs/inbox"
+    default_model: str = "anime_wai_illustrious"
+
+    @field_validator("inbox_dir", mode="before")
+    @classmethod
+    def _strip_inbox(cls, value: Any) -> str:
+        text = str(value).strip() if value is not None else ""
+        return text or "data/mts_image_jobs/inbox"
+
+    @field_validator("default_model", mode="before")
+    @classmethod
+    def _strip_model(cls, value: Any) -> str:
+        text = str(value).strip() if value is not None else ""
+        return text or "anime_wai_illustrious"
+
+    def resolved_inbox_dir(self) -> Path:
+        path = Path(self.inbox_dir)
+        if not path.is_absolute():
+            path = PROJECT_ROOT / path
+        return path.resolve()
+
+
 class BotConfig(BaseModel):
     token: SecretStr
     client_id: str
@@ -73,6 +105,8 @@ class BotConfig(BaseModel):
     halloween_enabled: bool = False
     # Missing key stays off: the turkey cog still loads, but the live hunt does nothing.
     thanksgiving_enabled: bool = False
+    # Missing key stays off. The cog still loads; the watcher does nothing.
+    mts_image_jobs: MtsImageJobsConfig = Field(default_factory=MtsImageJobsConfig)
 
     def to_credentials_dict(self) -> dict[str, Any]:
         """Legacy dict shape used by Lavalink helpers and Wavelink bootstrap."""
