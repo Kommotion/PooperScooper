@@ -17,6 +17,10 @@ _FALLBACK_COMFY_HOST = "127.0.0.1"
 _FALLBACK_COMFY_PORT = 8188
 READINESS_TIMEOUT_SEC = 120.0
 READINESS_POLL_INTERVAL_SEC = 2.0
+# After a generation timeout, poll this long for a cancelled prompt to leave
+# the queue before giving up. Callers that wrap generate in asyncio.wait_for
+# should add their own grace on top of the generation budget.
+PROMPT_CANCEL_GRACE_SEC = 45.0
 
 
 def _settings_from_config() -> Tuple[str, int, str, bool]:
@@ -507,6 +511,243 @@ def get_history(prompt_id: str, host: str = DEFAULT_COMFY_HOST, port: int = DEFA
     return r.json()
 
 
+class ComfyPromptTimeout(TimeoutError):
+    """Raised when a Comfy prompt does not finish within the wait budget.
+
+    ``image_infos`` lists output/temp files still in history after the prompt
+    was interrupted or deleted. Callers delete those files. They are not a
+    successful result and must not be posted.
+    """
+
+    def __init__(self, message: str, image_infos: Optional[List[Dict[str, Any]]] = None):
+        super().__init__(message)
+        self.image_infos = list(image_infos or [])
+
+
+class PromptCancelResult:
+    """Outcome of trying to stop a prompt that hit the wait budget.
+
+    ``completed`` means history already had output images, so the caller
+    should return them and must not treat the wait as a timeout.
+    ``cancelled`` means a pending delete or a running interrupt was sent.
+    ``images`` are successful outputs when ``completed`` is true, otherwise
+    leftover output/temp files to delete.
+    """
+
+    def __init__(self, images: List[Dict[str, Any]], completed: bool, cancelled: bool):
+        self.images = images
+        self.completed = completed
+        self.cancelled = cancelled
+
+
+def _history_entry(hist: dict, prompt_id: str) -> Optional[dict]:
+    if not isinstance(hist, dict):
+        return None
+    entry = hist.get(prompt_id)
+    if isinstance(entry, dict):
+        return entry
+    return None
+
+
+def _execution_error_text(entry: dict, prompt_id: str) -> Optional[str]:
+    """User-facing Comfy execution_error text, or None when the entry has none."""
+    status = entry.get("status") or {}
+    messages = status.get("messages") or []
+    for msg in messages:
+        if not isinstance(msg, list) or len(msg) < 2:
+            continue
+        msg_type, msg_payload = msg[0], msg[1]
+        if msg_type != "execution_error" or not isinstance(msg_payload, dict):
+            continue
+
+        node_id = msg_payload.get("node_id")
+        node_type = msg_payload.get("node_type")
+        exception_message = msg_payload.get("exception_message", "Unknown ComfyUI execution error")
+        exception_type = msg_payload.get("exception_type")
+
+        details = [f"ComfyUI execution_error for prompt_id={prompt_id}"]
+        if node_id is not None:
+            details.append(f"node_id={node_id}")
+        if node_type:
+            details.append(f"node_type={node_type}")
+        if exception_type:
+            details.append(f"exception_type={exception_type}")
+        return f"{', '.join(details)}: {exception_message}"
+    return None
+
+
+def _images_from_entry(entry: dict) -> List[Dict[str, Any]]:
+    """Output and temp images recorded on one history entry."""
+    images: List[Dict[str, Any]] = []
+    outputs = entry.get("outputs") or {}
+    if not isinstance(outputs, dict):
+        return images
+    for node_out in outputs.values():
+        if not isinstance(node_out, dict):
+            continue
+        for out in node_out.get("images") or []:
+            if isinstance(out, dict) and out.get("type") in ("output", "temp"):
+                images.append(out)
+    return images
+
+
+def _load_history_entry(prompt_id: str, host: str, port: int) -> Optional[dict]:
+    try:
+        hist = get_history(prompt_id, host=host, port=port)
+    except Exception as exc:
+        log.warning("Could not read ComfyUI history for %s: %s", prompt_id, exc)
+        return None
+    return _history_entry(hist, prompt_id)
+
+
+def _queue_prompt_ids(queue: dict, key: str) -> set:
+    """prompt_ids in queue_running or queue_pending.
+
+    ComfyUI 0.45 queue items are [number, prompt_id, prompt, extra, outputs].
+    """
+    found = set()
+    items = queue.get(key) or []
+    if not isinstance(items, list):
+        return found
+    for item in items:
+        if isinstance(item, (list, tuple)) and len(item) >= 2 and item[1] is not None:
+            found.add(str(item[1]))
+    return found
+
+
+def _prompt_queue_flags(prompt_id: str, host: str, port: int) -> Optional[Tuple[bool, bool]]:
+    """Return (running, pending) for prompt_id, or None if the queue cannot be read."""
+    try:
+        queue = get_queue(host=host, port=port)
+    except Exception as exc:
+        log.warning("Could not read ComfyUI queue while cancelling %s: %s", prompt_id, exc)
+        return None
+    if not isinstance(queue, dict):
+        return False, False
+    pid = str(prompt_id)
+    running = pid in _queue_prompt_ids(queue, "queue_running")
+    pending = pid in _queue_prompt_ids(queue, "queue_pending")
+    return running, pending
+
+
+def _post_comfy(path: str, payload: Optional[dict], host: str, port: int) -> None:
+    url = f"{comfy_base_url(host, port)}{path}"
+    kwargs: Dict[str, Any] = {"timeout": 10}
+    if payload is not None:
+        kwargs["json"] = payload
+    response = requests.post(url, **kwargs)
+    response.raise_for_status()
+
+
+def interrupt_or_delete_prompt(
+    prompt_id: str,
+    host: str = DEFAULT_COMFY_HOST,
+    port: int = DEFAULT_COMFY_PORT,
+    grace_sec: float = PROMPT_CANCEL_GRACE_SEC,
+    poll_interval: float = 0.5,
+) -> PromptCancelResult:
+    """Stop a prompt that is still queued, or return images if it already finished.
+
+    Pending prompts are removed with POST /queue ``{"delete": [prompt_id]}``.
+    A running prompt is stopped with POST /interrupt. The interrupt body
+    includes ``prompt_id`` so ComfyUI 0.45 only stops that job.
+
+    If history already has output or temp images and no execution error, those
+    images are returned as success and nothing is cancelled. After a cancel,
+    this polls until the prompt leaves the queue or ``grace_sec`` elapses.
+    Images that show up after the cancel are leftovers, not a success.
+    """
+    entry = _load_history_entry(prompt_id, host, port)
+    if entry is not None and _execution_error_text(entry, prompt_id) is None:
+        finished = _images_from_entry(entry)
+        if finished:
+            log.info(
+                "Comfy prompt %s already had %s image(s) at timeout; not interrupting",
+                prompt_id,
+                len(finished),
+            )
+            return PromptCancelResult(finished, completed=True, cancelled=False)
+
+    def _success_or_leftovers() -> Optional[PromptCancelResult]:
+        """Images already on disk. Success only if this call did not cancel."""
+        done = _load_history_entry(prompt_id, host, port)
+        if done is None:
+            return None
+        images = _images_from_entry(done)
+        if images and not cancelled and _execution_error_text(done, prompt_id) is None:
+            log.info(
+                "Comfy prompt %s already had %s image(s) at timeout; not interrupting",
+                prompt_id,
+                len(images),
+            )
+            return PromptCancelResult(images, completed=True, cancelled=False)
+        return PromptCancelResult(images, completed=False, cancelled=cancelled)
+
+    pause = poll_interval if poll_interval and poll_interval > 0 else 0.25
+    deadline = time.time() + max(0.0, float(grace_sec))
+    cancelled = False
+    sent_delete = False
+    sent_interrupt = False
+    leftovers: List[Dict[str, Any]] = []
+    saw_running = False
+    saw_pending = False
+
+    while True:
+        flags = _prompt_queue_flags(prompt_id, host, port)
+        if flags is not None:
+            running, pending = flags
+            saw_running = saw_running or running
+            saw_pending = saw_pending or pending
+            if pending and not sent_delete:
+                log.info("Deleting pending Comfy prompt %s", prompt_id)
+                cancelled = True
+                try:
+                    _post_comfy("/queue", {"delete": [prompt_id]}, host, port)
+                    sent_delete = True
+                except Exception as exc:
+                    log.warning("Failed to delete pending Comfy prompt %s: %s", prompt_id, exc)
+            if running and not sent_interrupt:
+                # Targeted interrupt: a global POST /interrupt would cancel
+                # whatever else started if this prompt finished in the gap.
+                log.info("Interrupting running Comfy prompt %s", prompt_id)
+                cancelled = True
+                try:
+                    _post_comfy("/interrupt", {"prompt_id": prompt_id}, host, port)
+                    sent_interrupt = True
+                except Exception as exc:
+                    log.warning("Failed to interrupt Comfy prompt %s: %s", prompt_id, exc)
+            if not running and not pending:
+                found = _success_or_leftovers()
+                if found is not None and found.completed:
+                    return found
+                if found is not None:
+                    leftovers = found.images
+                break
+        elif not cancelled:
+            break
+
+        if time.time() >= deadline:
+            found = _success_or_leftovers()
+            if found is not None and found.completed:
+                return found
+            if found is not None:
+                leftovers = found.images
+            if cancelled and (saw_running or saw_pending):
+                log.warning(
+                    "Comfy prompt %s still queued after %.0fs cancel grace",
+                    prompt_id,
+                    grace_sec,
+                )
+            break
+        time.sleep(pause)
+
+    if cancelled and not leftovers:
+        done = _load_history_entry(prompt_id, host, port)
+        if done is not None:
+            leftovers = _images_from_entry(done)
+    return PromptCancelResult(leftovers, completed=False, cancelled=cancelled)
+
+
 def free_memory(host: str = "127.0.0.1", port: int = 8188, unload_models: bool = True, free_memory: bool = True):
     url = f"http://{host}:{port}/free"
     payload = {
@@ -527,56 +768,36 @@ def wait_for_result(
     port: int = DEFAULT_COMFY_PORT,
     timeout_sec: float = 600.0,
     poll_interval: float = 1.0,
+    cancel_grace_sec: float = PROMPT_CANCEL_GRACE_SEC,
 ) -> List[Dict[str, Any]]:
     """
     Poll ComfyUI history until the prompt completes or timeout.
 
     Returns a list of image info dicts, each containing filename/subfolder/type.
+
+    When the budget expires and the prompt is still running or pending, it is
+    interrupted or deleted and this waits until it leaves the queue (or
+    ``cancel_grace_sec`` elapses) before raising ``ComfyPromptTimeout``.
+    Output images already in history at the timeout are returned as success
+    and the prompt is not cancelled. Images written after a cancel are
+    attached to the timeout as ``image_infos`` so the caller can delete them.
     """
     start = time.time()
     last_error: Optional[Exception] = None
     while time.time() - start < timeout_sec:
         try:
             hist = get_history(prompt_id, host=host, port=port)
-            # history response structure: {prompt_id: { "outputs": {node_id: [images...] } } }
-            if prompt_id in hist:
-                entry = hist[prompt_id]
-                status = entry.get("status") or {}
-                messages = status.get("messages") or []
+            # history response structure: {prompt_id: { "outputs": {node_id: {"images": [...]}}}}
+            entry = _history_entry(hist, prompt_id)
+            if entry is not None:
+                # Surface execution_error instead of waiting out the timeout.
+                # The loop still stores it and keeps polling, matching the
+                # previous "remember the last error" behavior.
+                error_text = _execution_error_text(entry, prompt_id)
+                if error_text:
+                    raise RuntimeError(error_text)
 
-                # Fail fast when Comfy reports execution_error so callers can surface
-                # the actual node + error text instead of waiting for timeout.
-                for msg in messages:
-                    if not isinstance(msg, list) or len(msg) < 2:
-                        continue
-                    msg_type, msg_payload = msg[0], msg[1]
-                    if msg_type != "execution_error" or not isinstance(msg_payload, dict):
-                        continue
-
-                    node_id = msg_payload.get("node_id")
-                    node_type = msg_payload.get("node_type")
-                    exception_message = msg_payload.get("exception_message", "Unknown ComfyUI execution error")
-                    exception_type = msg_payload.get("exception_type")
-
-                    details = [f"ComfyUI execution_error for prompt_id={prompt_id}"]
-                    if node_id is not None:
-                        details.append(f"node_id={node_id}")
-                    if node_type:
-                        details.append(f"node_type={node_type}")
-                    if exception_type:
-                        details.append(f"exception_type={exception_type}")
-
-                    raise RuntimeError(f"{', '.join(details)}: {exception_message}")
-
-                outputs = entry.get("outputs") or {}
-                images: List[Dict[str, Any]] = []
-                # outputs: { node_id: { "images": [ {filename, subfolder, type}, ...] } }
-                for node_out in outputs.values():
-                    if not isinstance(node_out, dict):
-                        continue
-                    for out in node_out.get("images") or []:
-                        if isinstance(out, dict) and out.get("type") in ("output", "temp"):
-                            images.append(out)
+                images = _images_from_entry(entry)
                 if images:
                     return images
         except Exception as e:
@@ -584,9 +805,38 @@ def wait_for_result(
 
         time.sleep(poll_interval)
 
-    if last_error:
+    if not prompt_id:
+        if last_error:
+            raise last_error
+        raise ComfyPromptTimeout("Timed out waiting for ComfyUI result for prompt_id=None")
+
+    try:
+        result = interrupt_or_delete_prompt(
+            prompt_id,
+            host=host,
+            port=port,
+            grace_sec=cancel_grace_sec,
+            poll_interval=poll_interval,
+        )
+    except Exception as exc:
+        log.warning("Failed to cancel ComfyUI prompt %s after timeout: %s", prompt_id, exc)
+        if last_error:
+            raise last_error
+        raise ComfyPromptTimeout(
+            f"Timed out waiting for ComfyUI result for prompt_id={prompt_id}"
+        ) from exc
+
+    if result.completed and result.images:
+        return result.images
+    # A finished execution_error is not a queued job. Keep that error when
+    # nothing was cancelled. A prompt that was still queued is a timeout,
+    # even if an earlier poll also stored a transient error.
+    if last_error and not result.cancelled:
         raise last_error
-    raise TimeoutError(f"Timed out waiting for ComfyUI result for prompt_id={prompt_id}")
+    raise ComfyPromptTimeout(
+        f"Timed out waiting for ComfyUI result for prompt_id={prompt_id}",
+        image_infos=result.images,
+    )
 
 
 def get_image_bytes(

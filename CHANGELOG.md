@@ -2,6 +2,12 @@
 
 This is the first versioned changelog for PooperScooper, covering about Oct 14–Nov 14, 2026.
 
+## v2.6.1 — 2026-11-15
+
+### New stuff
+
+- Image edits with huge photos no longer time out
+
 ## v2.6.0 — 2026-11-14
 
 ### New stuff

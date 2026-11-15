@@ -20,6 +20,7 @@ from io import BytesIO
 
 from PIL import Image as PILImage
 from PIL import ImageDraw
+from PIL import ImageOps
 
 from cogs.utils.image_models import ImageCreation, Models, NsfwLevel
 
@@ -161,6 +162,62 @@ def gif_first_frame_png(data: bytes) -> bytes:
         return out.getvalue()
 
 
+def _exif_orientation(image: PILImage.Image) -> int | None:
+    """EXIF Orientation value, or None when the image does not specify one."""
+    try:
+        exif = image.getexif()
+    except Exception:
+        return None
+    if not exif:
+        return None
+    value = exif.get(0x0112)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _should_downscale(width: int, height: int, out_w: int, out_h: int) -> bool:
+    """True when the oriented image is larger than the latent target.
+
+    Larger on either side, or in pixel count, is downscaled. A smaller image
+    is left alone so a photo under ~1MP is not stretched.
+    """
+    if width > out_w or height > out_h:
+        return True
+    return (width * height) > (out_w * out_h)
+
+
+def _normalize_edit_mode(image: PILImage.Image) -> tuple[PILImage.Image, bool]:
+    """Return a resize-safe image and whether the mode had to change.
+
+    RGBA and LA keep their alpha. Palette images with transparency become
+    RGBA. Palette images without transparency, CMYK, and other odd modes
+    become RGB. RGB and L are unchanged.
+    """
+    if image.mode in {"RGB", "L", "RGBA", "LA"}:
+        return image, False
+    try:
+        transparent = bool(image.has_transparency_data)
+    except Exception:
+        transparent = "transparency" in getattr(image, "info", {})
+    if image.mode == "P":
+        if transparent:
+            return image.convert("RGBA"), True
+        return image.convert("RGB"), True
+    if transparent or image.mode in {"PA", "RGBa", "La"}:
+        return image.convert("RGBA"), True
+    return image.convert("RGB"), True
+
+
+def _png_bytes(image: PILImage.Image) -> bytes:
+    out = BytesIO()
+    image.save(out, format="PNG")
+    return out.getvalue()
+
+
 def prepare_identity_edit_bytes(
     data: bytes,
     *,
@@ -169,9 +226,23 @@ def prepare_identity_edit_bytes(
 ) -> tuple[bytes, str, int, int] | str:
     """Normalize attachment bytes for an identity-edit job.
 
-    Returns ``(bytes, upload filename, width, height)`` sized near 1MP, or a
-    user-facing error string. GIF input becomes a PNG of the first frame.
-    Other allowed types keep their bytes; only the output size changes.
+    Returns ``(bytes, upload filename, width, height)`` or a user-facing
+    error string. ``width`` and ``height`` are the ~1MP latent size from
+    ``identity_edit_output_size`` (aspect preserved, multiples of 64). That
+    latent size is returned even when the pixels themselves are smaller.
+
+    EXIF orientation is applied before the size is chosen. An image larger
+    than that target on either side, or in pixel count, is downscaled to
+    exactly the target with Lanczos and saved as PNG. Smaller images are
+    not upscaled. GIF input becomes a PNG of the first frame and is not
+    upscaled. RGBA, LA, and palette images with transparency keep an alpha
+    channel. Palette images without transparency, and modes such as CMYK,
+    are converted to RGB.
+
+    When no resize, orientation change, or mode conversion is required, the
+    original bytes are returned so a small JPEG is not re-encoded. A GIF
+    has already been flattened to PNG by then. After a resize, transpose,
+    or mode conversion the bytes are a PNG.
     """
     if not data:
         return ATTACHMENT_EMPTY_ERROR
@@ -186,12 +257,30 @@ def prepare_identity_edit_bytes(
         else:
             filename = _safe_upload_name(filename)
         with PILImage.open(BytesIO(data)) as im:
-            width, height = im.size
+            orientation = _exif_orientation(im)
+            transposed = orientation in {2, 3, 4, 5, 6, 7, 8}
+            oriented = ImageOps.exif_transpose(im) if transposed else im
+            width, height = oriented.size
+            out_w, out_h = identity_edit_output_size(width, height)
+            normalized, converted = _normalize_edit_mode(oriented)
+            downscale = _should_downscale(width, height, out_w, out_h)
+            if not transposed and not converted and not downscale:
+                return data, filename, out_w, out_h
+            if downscale:
+                normalized = normalized.resize((out_w, out_h), PILImage.Resampling.LANCZOS)
+                log.info(
+                    "Downscaled identity-edit source %s from %sx%s to %sx%s",
+                    filename,
+                    width,
+                    height,
+                    out_w,
+                    out_h,
+                )
+            encoded = _png_bytes(normalized)
     except Exception:
         log.warning("Could not decode identity-edit attachment %r", filename)
         return ATTACHMENT_DECODE_ERROR
-    out_w, out_h = identity_edit_output_size(width, height)
-    return data, filename, out_w, out_h
+    return encoded, _as_png_name(filename), out_w, out_h
 
 
 async def _source_from_avatar(interaction, *, filename: str, size: int):

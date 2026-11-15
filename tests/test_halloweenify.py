@@ -36,6 +36,8 @@ from cogs.imagediffusion import (
     static_png_avatar,
 )
 from cogs.utils.identity_edit import (
+    ATTACHMENT_DECODE_ERROR,
+    ATTACHMENT_EMPTY_ERROR,
     ATTACHMENT_TOO_BIG_ERROR,
     ATTACHMENT_TYPE_ERROR,
     HALLOWEEN_FRAMES,
@@ -383,16 +385,16 @@ def test_shared_sizing_is_one_megapixel_and_multiples_of_64():
 
 
 def test_imagegen_edit_uses_the_shared_sizer(monkeypatch):
-    import cogs.imagediffusion as imagediffusion
+    import cogs.utils.identity_edit as identity_edit
 
     seen = []
-    real = imagediffusion.identity_edit_output_size
+    real = identity_edit.identity_edit_output_size
 
     def spy(width, height):
         seen.append((width, height))
         return real(width, height)
 
-    monkeypatch.setattr(imagediffusion, "identity_edit_output_size", spy)
+    monkeypatch.setattr(identity_edit, "identity_edit_output_size", spy)
 
     async def run():
         cog = FakeDiffusion()
@@ -406,14 +408,23 @@ def test_imagegen_edit_uses_the_shared_sizer(monkeypatch):
         assert (cog.entries[0].edit_width, cog.entries[0].edit_height) == (1344, 768)
         assert (cog.entries[1].edit_width, cog.entries[1].edit_height) == (832, 1152)
         assert cog.entries[0].retain_source is False
-        assert cog.entries[0].source_image_bytes == wide._data
         assert cog.entries[0].source_image_filename == "wide.png"
+        with PILImage.open(BytesIO(cog.entries[0].source_image_bytes)) as queued:
+            assert queued.size == (1344, 768)
+        # Already the ~1MP target, so the original pixels can be kept.
+        assert cog.entries[1].source_image_bytes == tall._data
+        with PILImage.open(BytesIO(cog.entries[1].source_image_bytes)) as queued:
+            assert queued.size == (832, 1152)
         gif = FakeAttachment(_gif(), filename="dance.gif", content_type="image/gif")
         interaction = _interaction(_user(b"unused"))
         await ImageDiffusion.edit_image.callback(cog, interaction, gif, "paint the jacket red")
-        assert cog.entries[2].source_image_bytes == gif._data
-        assert cog.entries[2].source_image_filename == "dance.gif.png"
+        assert seen == [(1920, 1080), (832, 1152), (80, 40)]
+        assert cog.entries[2].source_image_filename == "dance.png"
+        assert cog.entries[2].source_image_bytes != gif._data
         assert (cog.entries[2].edit_width, cog.entries[2].edit_height) == identity_edit_output_size(80, 40)
+        with PILImage.open(BytesIO(cog.entries[2].source_image_bytes)) as queued:
+            assert queued.size == (80, 40)
+            assert queued.format == "PNG"
 
     _run(run())
 
@@ -467,6 +478,156 @@ def test_prepare_keeps_jpeg_bytes_and_flattens_gif_to_png():
         assert frame.convert("RGBA").getpixel((0, 0))[:3] == (255, 0, 0)
 
 
+def test_prepare_downscales_large_images_with_lanczos(monkeypatch):
+    calls = []
+    real_resize = PILImage.Image.resize
+
+    def spy(self, size, resample=None, *args, **kwargs):
+        calls.append((size, resample))
+        return real_resize(self, size, resample, *args, **kwargs)
+
+    monkeypatch.setattr(PILImage.Image, "resize", spy)
+
+    raw = _png(1920, 1080, color=(12, 34, 56))
+    prepared = prepare_identity_edit_bytes(raw, filename="big.png", content_type="image/png")
+    assert isinstance(prepared, tuple)
+    data, filename, width, height = prepared
+    assert filename == "big.png"
+    assert (width, height) == identity_edit_output_size(1920, 1080) == (1344, 768)
+    with PILImage.open(BytesIO(data)) as image:
+        assert image.format == "PNG"
+        assert image.size == (1344, 768)
+        assert image.getpixel((8, 8)) == (12, 34, 56)
+    assert calls
+    assert (1344, 768) in [size for size, _resample in calls]
+    assert PILImage.Resampling.LANCZOS in [resample for _size, resample in calls]
+
+
+def test_prepare_does_not_upscale_small_images():
+    raw = _png(100, 80)
+    prepared = prepare_identity_edit_bytes(raw, filename="tiny.png", content_type="image/png")
+    data, _filename, width, height = prepared
+    assert data == raw
+    assert (width, height) == identity_edit_output_size(100, 80)
+    with PILImage.open(BytesIO(data)) as image:
+        assert image.size == (100, 80)
+    assert width * height > 100 * 80
+
+    # The sizer rounds this up to 832x1152. Pixels stay 800x1120.
+    near = _png(800, 1120)
+    prepared_near = prepare_identity_edit_bytes(near, filename="near.png", content_type="image/png")
+    assert prepared_near[0] == near
+    assert prepared_near[2:] == identity_edit_output_size(800, 1120) == (832, 1152)
+    with PILImage.open(BytesIO(prepared_near[0])) as image:
+        assert image.size == (800, 1120)
+
+
+def test_prepare_applies_exif_orientation_before_sizing():
+    from PIL import ImageOps
+
+    def _jpeg_with_orientation(size, orientation: int) -> bytes:
+        image = PILImage.new("RGB", size, (0, 0, 255))
+        image.paste((255, 0, 0), (0, 0, size[0] // 2, size[1]))
+        exif = image.getexif()
+        exif[0x0112] = orientation
+        buffer = BytesIO()
+        image.save(buffer, format="JPEG", exif=exif.tobytes(), quality=100, subsampling=0)
+        return buffer.getvalue()
+
+    small = _jpeg_with_orientation((120, 50), 6)
+    with PILImage.open(BytesIO(small)) as raw:
+        tagged = raw.size
+        visual = ImageOps.exif_transpose(raw)
+        visual_size = visual.size
+        visual_rgb = visual.convert("RGB")
+        marker = visual_rgb.getpixel((0, 0))
+    assert tagged != visual_size
+    prepared = prepare_identity_edit_bytes(small, filename="turned.jpg", content_type="image/jpeg")
+    data, filename, width, height = prepared
+    assert filename == "turned.png"
+    assert (width, height) == identity_edit_output_size(*visual_size)
+    assert (width, height) != identity_edit_output_size(*tagged)
+    with PILImage.open(BytesIO(data)) as image:
+        assert image.format == "PNG"
+        assert image.size == visual_size
+        assert image.convert("RGB").getpixel((0, 0)) == marker
+
+    wide = _jpeg_with_orientation((1920, 1080), 6)
+    with PILImage.open(BytesIO(wide)) as raw:
+        tagged = raw.size
+        visual_size = ImageOps.exif_transpose(raw).size
+    assert tagged == (1920, 1080)
+    assert visual_size != tagged
+    prepared_wide = prepare_identity_edit_bytes(wide, filename="portrait.jpg", content_type="image/jpeg")
+    data, filename, width, height = prepared_wide
+    assert filename == "portrait.png"
+    assert (width, height) == identity_edit_output_size(*visual_size)
+    assert (width, height) != identity_edit_output_size(*tagged)
+    with PILImage.open(BytesIO(data)) as image:
+        assert image.size == (width, height)
+        assert image.format == "PNG"
+
+
+def test_prepare_downscale_keeps_alpha_and_converts_odd_modes():
+    image = PILImage.new("RGBA", (1920, 1080), (20, 30, 40, 0))
+    image.paste((20, 30, 40, 255), (0, 0, 960, 1080))
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    prepared = prepare_identity_edit_bytes(buffer.getvalue(), filename="alpha.png", content_type="image/png")
+    data, filename, width, height = prepared
+    assert filename == "alpha.png"
+    assert (width, height) == (1344, 768)
+    with PILImage.open(BytesIO(data)) as downscaled:
+        assert downscaled.format == "PNG"
+        assert downscaled.mode == "RGBA"
+        assert downscaled.size == (1344, 768)
+        alpha = downscaled.getchannel("A")
+        assert min(alpha.getdata()) == 0
+        assert max(alpha.getdata()) == 255
+
+    cmyk = PILImage.new("CMYK", (40, 30), (10, 20, 30, 40))
+    buffer = BytesIO()
+    cmyk.save(buffer, format="JPEG")
+    prepared_cmyk = prepare_identity_edit_bytes(
+        buffer.getvalue(), filename="print.jpg", content_type="image/jpeg"
+    )
+    data, filename, width, height = prepared_cmyk
+    assert filename == "print.png"
+    assert (width, height) == identity_edit_output_size(40, 30)
+    with PILImage.open(BytesIO(data)) as converted:
+        assert converted.format == "PNG"
+        assert converted.mode == "RGB"
+        assert converted.size == (40, 30)
+
+    palette = PILImage.new("P", (48, 32))
+    palette.putpalette([0, 0, 0, 255, 0, 0] + [0, 0, 0] * 254)
+    palette.paste(0, (0, 0, 24, 32))
+    palette.paste(1, (24, 0, 48, 32))
+    palette.info["transparency"] = 0
+    buffer = BytesIO()
+    palette.save(buffer, format="PNG")
+    prepared_palette = prepare_identity_edit_bytes(
+        buffer.getvalue(), filename="pal.png", content_type="image/png"
+    )
+    data, filename, _width, _height = prepared_palette
+    assert filename == "pal.png"
+    with PILImage.open(BytesIO(data)) as converted:
+        assert converted.format == "PNG"
+        assert converted.mode == "RGBA"
+        assert converted.size == (48, 32)
+        assert converted.getpixel((2, 2))[3] == 0
+        assert converted.getpixel((40, 2))[3] == 255
+
+
+def test_prepare_rejects_empty_and_undecodable_bytes():
+    assert prepare_identity_edit_bytes(b"", filename="a.png", content_type="image/png") == (
+        ATTACHMENT_EMPTY_ERROR
+    )
+    assert prepare_identity_edit_bytes(b"not-an-image", filename="a.png", content_type="image/png") == (
+        ATTACHMENT_DECODE_ERROR
+    )
+
+
 def test_halloweenify_queues_the_caller_avatar_by_default():
     async def run():
         caller = _user(b"caller-png")
@@ -509,8 +670,11 @@ def test_attachment_beats_avatar_and_sizes_like_imagegen_edit():
         assert caller.display_avatar.kwargs is None
         assert entry.source_image_bytes != b"caller-png"
         assert entry.source_image_bytes != b"someone-else"
+        assert entry.source_image_bytes != attachment._data
         assert entry.source_image_filename == "wide.png"
         assert (entry.edit_width, entry.edit_height) == identity_edit_output_size(1920, 1080)
+        with PILImage.open(BytesIO(entry.source_image_bytes)) as queued:
+            assert queued.size == (1344, 768)
         assert entry.prompt_preset == "Witch"
         assert entry.prompt_details == "tiny hat"
         assert "<@" not in entry.prompt
@@ -531,6 +695,8 @@ def test_attachment_beats_avatar_and_sizes_like_imagegen_edit():
             entry.edit_width,
             entry.edit_height,
         )
+        with PILImage.open(BytesIO(edit_cog.entries[0].source_image_bytes)) as queued:
+            assert queued.size == (1344, 768)
 
     _run(run())
 

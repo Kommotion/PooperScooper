@@ -284,9 +284,18 @@ class BaseComfyWorkflowModel:
         )
         prompt_id = result.get("prompt_id")
 
-        image_infos = comfy_client.wait_for_result(prompt_id, host=self.comfy_host, port=self.comfy_port)
+        image_infos: list = []
         images: list[Image.Image] = []
         try:
+            try:
+                image_infos = comfy_client.wait_for_result(
+                    prompt_id, host=self.comfy_host, port=self.comfy_port
+                )
+            except TimeoutError as exc:
+                # wait_for_result cancels the prompt before raising. Keep any
+                # files it wrote so the privacy delete below can remove them.
+                image_infos = list(getattr(exc, "image_infos", None) or [])
+                raise
             for info in image_infos:
                 data = comfy_client.get_image_bytes(
                     filename=info["filename"],
@@ -456,14 +465,20 @@ class ComfyKrea2TurboModel(BaseComfyWorkflowModel):
 
         # LLM TextGenerate can take several minutes; sampling is shorter.
         wait_timeout = 1800.0 if image.llm_prompt_enhance else 600.0
-        image_infos = comfy_client.wait_for_result(
-            prompt_id,
-            host=self.comfy_host,
-            port=self.comfy_port,
-            timeout_sec=wait_timeout,
-        )
+        image_infos: list = []
         images: list[Image.Image] = []
         try:
+            try:
+                image_infos = comfy_client.wait_for_result(
+                    prompt_id,
+                    host=self.comfy_host,
+                    port=self.comfy_port,
+                    timeout_sec=wait_timeout,
+                )
+            except TimeoutError as exc:
+                # Cancelled inside wait_for_result. Delete leftovers below.
+                image_infos = list(getattr(exc, "image_infos", None) or [])
+                raise
             for info in image_infos:
                 data = comfy_client.get_image_bytes(
                     filename=info["filename"],
@@ -702,12 +717,19 @@ class ComfyKrea2IdentityEditModel(BaseComfyWorkflowModel):
                 port=self.comfy_port,
             )
             prompt_id = result.get("prompt_id")
-            image_infos = comfy_client.wait_for_result(
-                prompt_id,
-                host=self.comfy_host,
-                port=self.comfy_port,
-                timeout_sec=600.0,
-            )
+            try:
+                image_infos = comfy_client.wait_for_result(
+                    prompt_id,
+                    host=self.comfy_host,
+                    port=self.comfy_port,
+                    timeout_sec=600.0,
+                )
+            except TimeoutError as exc:
+                # The wait interrupts or deletes the prompt and lets it leave
+                # the queue before raising. The input delete in finally runs
+                # only after that, and removes any output the cancel left behind.
+                image_infos = list(getattr(exc, "image_infos", None) or [])
+                raise
             images: list[Image.Image] = []
             for info in image_infos:
                 data = comfy_client.get_image_bytes(
@@ -729,6 +751,7 @@ class ComfyKrea2IdentityEditModel(BaseComfyWorkflowModel):
             return ComfyOutput(images), instruction, "", gen_time
         finally:
             # Privacy: never leave user upload or Comfy outputs on disk.
+            # On timeout, wait_for_result has already cancelled the prompt.
             if upload_meta:
                 comfy_client.delete_media_file(
                     upload_meta.get("name") or unique_name,

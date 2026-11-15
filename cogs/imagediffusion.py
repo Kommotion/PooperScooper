@@ -20,7 +20,6 @@ from cogs.utils.identity_edit import (
     apply_halloween_frame,
     build_identity_edit_creation,
     enqueue_identity_edit,
-    identity_edit_output_size,
     normalize_halloween_frame,
     resolve_identity_edit_source,
     static_png_avatar,
@@ -50,6 +49,10 @@ log = logging.getLogger(__name__)
 # asyncio / Comfy wait budgets (seconds). LLM TextGenerate on Krea-family can run long.
 GENERATION_TIMEOUT_SEC = 600
 GENERATION_TIMEOUT_LLM_ENHANCE_SEC = 1800  # 30 min — enhance + sample
+# Added only to the outer asyncio.wait_for. The Comfy wait stays on the budget
+# above, then interrupts the prompt and deletes files. This grace lets that
+# cleanup finish before the outer wait cancels the worker.
+GENERATION_CANCEL_GRACE_SEC = 60
 # Max chars of the user prompt shown above the image (full text is in "See prompt details").
 PROMPT_PREVIEW_MAX_CHARS = 160
 # Discord embed field value limit.
@@ -1007,61 +1010,20 @@ class ImageDiffusion(Cog):
             )
             return
 
-        content_type = (image.content_type or "").lower()
-        name_lower = (image.filename or "").lower()
-        is_image = content_type.startswith("image/") or name_lower.endswith(
-            (".png", ".jpg", ".jpeg", ".webp", ".gif")
-        )
-        if not is_image:
-            await interaction.response.send_message(
-                "Please attach an image file (PNG/JPG/WEBP).", ephemeral=True
-            )
+        # Same downscale path as halloweenify attachments. Avatars are not
+        # involved here; edit always has an attachment.
+        source = await resolve_identity_edit_source(interaction, image)
+        if isinstance(source, str):
+            await interaction.response.send_message(source, ephemeral=True)
             return
 
-        # Discord attachment size limit is already enforced by Discord; still guard empty.
-        if image.size is not None and image.size <= 0:
-            await interaction.response.send_message("Empty attachment.", ephemeral=True)
-            return
-
-        try:
-            source_bytes = await image.read()
-        except Exception as e:
-            log.exception("Failed to read Discord attachment")
-            await interaction.response.send_message(
-                f"Could not read the attached image: {e}", ephemeral=True
-            )
-            return
-
-        # Pick output size near 1MP preserving aspect (multiples of 64).
-        edit_w, edit_h = 1024, 1024
-        try:
-            with PILImage.open(BytesIO(source_bytes)) as im:
-                sw, sh = im.size
-            if sw > 0 and sh > 0:
-                edit_w, edit_h = identity_edit_output_size(sw, sh)
-        except Exception:
-            log.warning("Could not parse source image size; using 1024x1024")
-
-        safe_name = image.filename or "discord_edit.png"
-        # Avoid path separators in Comfy LoadImage name
-        safe_name = safe_name.replace("/", "_").replace("\\", "_")
-        if not any(safe_name.lower().endswith(ext) for ext in (".png", ".jpg", ".jpeg", ".webp")):
-            safe_name = f"{safe_name}.png"
-
-        image_entry = ImageCreation(
+        image_entry = build_identity_edit_creation(
+            source,
+            interaction,
             instruction.strip(),
-            Models.KREA2_IDENTITY_EDIT,
-            interaction=interaction,
-            negative_prompt="",
-            use_default_negative=False,
-            use_default_positive=False,
-            nsfw=NsfwLevel.NOT_SPECIFIED,
-            llm_prompt_enhance=False,
-            source_image_bytes=source_bytes,
-            source_image_filename=safe_name,
-            edit_width=edit_w,
-            edit_height=edit_h,
         )
+        edit_w = image_entry.edit_width
+        edit_h = image_entry.edit_height
 
         if await self.enqueue_image(
             image_entry,
@@ -1291,11 +1253,14 @@ class ImageDiffusion(Cog):
     async def _image_generation_interaction(self, image: ImageCreation) -> None:
         """Handles image generation but with an interaction."""
         # LLM enhance needs a longer budget (TextGenerate + sampling).
-        timeout = (
+        # The outer wait is longer than that budget so wait_for_result can
+        # interrupt Comfy and delete the upload before this wait fires.
+        budget = (
             GENERATION_TIMEOUT_LLM_ENHANCE_SEC
             if image.llm_prompt_enhance
             else GENERATION_TIMEOUT_SEC
         )
+        outer_timeout = budget + GENERATION_CANCEL_GRACE_SEC
         model = self.models[image.model]
 
         async def _send_generation_error(message: str):
@@ -1319,14 +1284,27 @@ class ImageDiffusion(Cog):
 
         try:
             output, positive, negative, gen_time = await asyncio.wait_for(
-                model.generate(image), timeout=timeout
+                model.generate(image), timeout=outer_timeout
             )
         except asyncio.TimeoutError:
-            log.error("Image generation timed out after %ss (llm_enhance=%s)", timeout, image.llm_prompt_enhance)
-            await _send_generation_error(
-                f"Image generation timed out after {timeout // 60} minutes. "
-                "Try again without LLM enhance or with a simpler prompt."
+            log.error(
+                "Image generation timed out after %ss (llm_enhance=%s)",
+                budget,
+                image.llm_prompt_enhance,
             )
+            minutes = budget // 60
+            if image.llm_prompt_enhance:
+                timeout_message = (
+                    f"Image generation timed out after {minutes} minutes. "
+                    "Try again without LLM enhance or with a simpler prompt."
+                )
+            else:
+                timeout_message = (
+                    f"Image generation timed out after {minutes} minutes. "
+                    "The image may be too large or too complex. "
+                    "Try a smaller photo or a simpler prompt."
+                )
+            await _send_generation_error(timeout_message)
             return
         except discord.HTTPException:
             await _send_generation_error(
