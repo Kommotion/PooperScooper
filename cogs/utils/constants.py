@@ -4,7 +4,8 @@ Constants file
 import os
 from pathlib import Path
 
-VERSION = '2.5.0'
+VERSION = '2.6.0'
+__version__ = VERSION
 BOT_AUTHOR = 'kommotion'
 POOPERSCOOPER_PICTURE = 'pooperscooper.jpg'
 COOKS_AND_MOCHA = 'cooksandmocha.jpg'
