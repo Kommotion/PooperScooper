@@ -198,11 +198,29 @@ class ComfyOutput:
 
 
 class BackgroundImage:
-    """PNG bytes and PIL image for a background job. Nothing here posts to Discord."""
+    """PNG bytes, PIL image, and prompt metadata for a background job.
 
-    def __init__(self, png_bytes: bytes, image: Image.Image):
+    Nothing here posts to Discord. ``positive``, ``negative``, and ``gen_time``
+    feed the same prompt-details button as ``/imagegen``. Defaults keep older
+    callers that only have bytes working.
+    """
+
+    def __init__(
+        self,
+        png_bytes: bytes,
+        image: Image.Image,
+        positive: str = "",
+        negative: str = "",
+        gen_time: float = 0,
+    ):
         self.png_bytes = png_bytes
         self.image = image
+        self.positive = "" if positive is None else str(positive)
+        self.negative = "" if negative is None else str(negative)
+        try:
+            self.gen_time = float(0 if gen_time is None else gen_time)
+        except (TypeError, ValueError):
+            self.gen_time = 0.0
 
 
 # Empty-latent nodes whose width/height inputs are the output size in pixels.

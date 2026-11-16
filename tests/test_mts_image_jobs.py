@@ -5,13 +5,23 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import discord
 import pytest
+from PIL import Image as PILImage
 
-from cogs.imagediffusion import IMAGE_QUEUE_MAXSIZE, ImageDiffusion
+from cogs.imagediffusion import (
+    IMAGE_QUEUE_MAXSIZE,
+    ImageDiffusion,
+    ImageGenPrefView,
+    PromptDetailButton,
+    generation_caption,
+    post_generation_result,
+)
 from cogs.utils.config import PROJECT_ROOT, BotConfig, MtsImageJobsConfig
 from cogs.utils.image_models import (
     BackgroundImage,
@@ -24,6 +34,7 @@ from cogs.utils.image_models import (
 from cogs import mts_image_jobs as jobs
 from cogs.mts_image_jobs import (
     DEFAULT_TEST_CHANNEL_ID,
+    GENERATE_ATTRIBUTION,
     INTERRUPTED_REASON,
     MAX_UPLOAD_BYTES,
     MTS_PRODUCTION_IMAGE_CHANNEL_ID,
@@ -67,12 +78,23 @@ def _drop(inbox: Path, name: str, payload: dict, *, marker: str | None = "json")
 
 
 class Channel:
-    def __init__(self):
+    def __init__(self, guild_id: int | None = None):
         self.calls = []
+        self.guild = None if guild_id is None else SimpleNamespace(id=guild_id)
 
     async def send(self, **kwargs):
         self.calls.append(kwargs)
-        return SimpleNamespace(id=len(self.calls))
+        return SimpleNamespace(id=len(self.calls), edit=AsyncMock())
+
+
+def _tiny_png() -> bytes:
+    buffer = BytesIO()
+    PILImage.new("RGB", (2, 2), (8, 16, 24)).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _button(view, label: str):
+    return next(child for child in view.children if getattr(child, "label", None) == label)
 
 
 def _bot(channel, image_cog=None):
@@ -103,7 +125,16 @@ class ReadyDiffusion:
         async def finish():
             await asyncio.sleep(0)
             await self.image_queue.get()
-            image.result_future.set_result(b"\x89PNG" + image.prompt.encode())
+            png = _tiny_png()
+            image.result_future.set_result(
+                BackgroundImage(
+                    png_bytes=png,
+                    image=PILImage.new("RGB", (2, 2), (8, 16, 24)),
+                    positive=f"positive:{image.prompt}",
+                    negative="negative-prompt",
+                    gen_time=1.25,
+                )
+            )
 
         asyncio.create_task(finish())
         return True
@@ -447,7 +478,7 @@ def test_generate_uses_the_shared_queue_one_prompt_at_a_time(tmp_path):
         },
     )
     diffusion = ReadyDiffusion()
-    channel = Channel()
+    channel = Channel(guild_id=5150)
 
     async def run():
         await jobs.process_once(
@@ -470,10 +501,21 @@ def test_generate_uses_the_shared_queue_one_prompt_at_a_time(tmp_path):
         assert image.output_width == 768
         assert image.output_height == 1280
         assert image.model is Models.ANIME_WAI_ILLUSTRIOUS
-    assert len(channel.calls) == 1
-    assert len(channel.calls[0]["files"]) == 3
-    assert channel.calls[0]["content"] == "Set\nqueued"
-    assert channel.calls[0]["allowed_mentions"] is NO_MENTIONS
+    prompts = ["first panda", "second panda", "third panda"]
+    assert len(channel.calls) == 3
+    for call, prompt in zip(channel.calls, prompts):
+        assert "files" not in call
+        assert call["file"].filename == "generated.png"
+        assert call["allowed_mentions"] is NO_MENTIONS
+        assert isinstance(call["view"], PromptDetailButton)
+        assert call["view"].author_id == 0
+        assert call["view"].guild_id == 5150
+        assert call["view"].message is not None
+        assert call["view"].llm_prompt_enhance is False
+        assert call["content"] == (
+            "Set\nqueued\n"
+            f"**{prompt} \u2014 `anime_wai_illustrious` \u2014 Requested by MTS Party Prompts**"
+        )
     assert (tmp_path / "done" / "gen.json").is_file()
 
 
@@ -506,7 +548,10 @@ def test_generate_waits_instead_of_filling_a_full_queue():
         assert diffusion.image_queue.qsize() == 1
         await diffusion.image_queue.get()
         pngs = await asyncio.wait_for(task, timeout=1)
-        assert pngs == [("job-1.png", b"png-bytes")]
+        assert [(item.name, item.png_bytes) for item in pngs] == [("job-1.png", b"png-bytes")]
+        assert pngs[0].positive == ""
+        assert pngs[0].negative == ""
+        assert pngs[0].gen_time == 0
         assert calls["enqueue"] == 1
 
     asyncio.run(run())
@@ -542,6 +587,10 @@ def test_generate_stays_in_the_inbox_until_comfy_is_ready(tmp_path):
     assert not (inbox / "gen.json").exists()
     assert len(channel.calls) == 1
     assert channel.calls[0]["allowed_mentions"] is NO_MENTIONS
+    assert "files" not in channel.calls[0]
+    assert channel.calls[0]["file"].filename == "generated.png"
+    assert isinstance(channel.calls[0]["view"], PromptDetailButton)
+    assert "Requested by MTS Party Prompts" in channel.calls[0]["content"]
 
 
 def test_enqueue_background_shares_the_image_queue():
@@ -604,6 +653,9 @@ def test_background_generation_returns_png_bytes_without_posting(monkeypatch):
         result = future.result()
         assert isinstance(result, BackgroundImage)
         assert result.png_bytes.startswith(b"\x89PNG")
+        assert result.positive == "positive"
+        assert result.negative == ""
+        assert result.gen_time == 0.2
         channel.send.assert_not_called()
 
     asyncio.run(run())
@@ -646,3 +698,420 @@ def test_output_size_patches_latent_nodes_and_leaves_qwen_on_the_workflow_defaul
     assert patched_qwen["20"]["inputs"]["resolution"] == 1024
     assert "no standard latent size node" in caplog.text
     assert "workflow default" in caplog.text
+
+
+def test_generation_caption_uses_a_mention_or_plain_attribution():
+    slash = ImageCreation(
+        "a ceramic cup",
+        Models.ANIME_WAI_ILLUSTRIOUS,
+        interaction=SimpleNamespace(user=SimpleNamespace(id=42, mention="<@42>")),
+    )
+    assert generation_caption(slash, "a ceramic cup") == (
+        "**a ceramic cup \u2014 `anime_wai_illustrious` \u2014 <@42>**"
+    )
+
+    class Boom:
+        @property
+        def user(self):
+            raise AssertionError("inbox captions must not read interaction.user")
+
+    inbox = ImageCreation("a ceramic cup", Models.ANIME_WAI_ILLUSTRIOUS, interaction=Boom())
+    caption = generation_caption(inbox, "a ceramic cup", GENERATE_ATTRIBUTION)
+    assert caption == (
+        "**a ceramic cup \u2014 `anime_wai_illustrious` \u2014 Requested by MTS Party Prompts**"
+    )
+    assert "<@" not in caption
+    assert "@" not in caption
+    assert GENERATE_ATTRIBUTION == "Requested by MTS Party Prompts"
+
+    async def run():
+        mentions = discord.AllowedMentions(users=True, replied_user=True)
+        channel = Channel(guild_id=9)
+        image = PILImage.new("RGB", (2, 2), (1, 2, 3))
+        await post_generation_result(
+            channel,
+            slash,
+            result_image=image,
+            positive="pos",
+            negative="neg",
+            gen_time=3.5,
+            author_id=42,
+            guild_id=9,
+            allowed_mentions=mentions,
+        )
+        call = channel.calls[0]
+        assert call["content"] == "**a ceramic cup \u2014 `anime_wai_illustrious` \u2014 <@42>**"
+        assert call["allowed_mentions"] is mentions
+        assert call["allowed_mentions"].users is True
+        assert call["allowed_mentions"].replied_user is True
+        assert call["file"].filename == "generated.png"
+        assert call["view"].author_id == 42
+        assert call["view"].guild_id == 9
+        assert call["view"].message is not None
+
+        long_prompt = "p" * 161
+        long_image = ImageCreation(long_prompt, Models.ANIME_WAI_ILLUSTRIOUS, interaction=None)
+        long_channel = Channel()
+        await post_generation_result(
+            long_channel,
+            long_image,
+            png_bytes=_tiny_png(),
+            positive="pos",
+            negative="",
+            gen_time=1.5,
+            author_id=0,
+            guild_id=0,
+            allowed_mentions=NO_MENTIONS,
+            attribution=GENERATE_ATTRIBUTION,
+            content_prefix="Title\nCaption",
+        )
+        posted = long_channel.calls[0]["content"]
+        assert posted.startswith("Title\nCaption\n")
+        assert posted.endswith("-# Full prompt in **See prompt details**")
+        assert "Requested by MTS Party Prompts" in posted
+        assert "<@" not in posted
+        assert "@" not in posted.split("\n", 2)[-1]
+
+    asyncio.run(run())
+
+
+def test_slash_generation_posts_through_the_shared_helper(monkeypatch):
+    monkeypatch.setattr("cogs.imagediffusion.comfy_client.is_comfy_running", lambda: True)
+
+    class Model:
+        async def generate(self, image):
+            return ComfyOutput([PILImage.new("RGB", (2, 2), (1, 2, 3))]), "positive text", "negative text", 4.5
+
+    async def run():
+        channel = Channel()
+        user = SimpleNamespace(id=42, mention="<@42>")
+        image = ImageCreation(
+            "a mountain",
+            Models.ANIME_WAI_ILLUSTRIOUS,
+            interaction=SimpleNamespace(channel=channel, user=user, guild_id=77),
+        )
+        cog = ImageDiffusion.__new__(ImageDiffusion)
+        cog.models = {Models.ANIME_WAI_ILLUSTRIOUS: Model()}
+        cog.comfy_startup_error = None
+        await ImageDiffusion._image_generation_interaction(cog, image)
+        call = channel.calls[0]
+        assert call["content"] == "**a mountain \u2014 `anime_wai_illustrious` \u2014 <@42>**"
+        assert call["file"].filename == "generated.png"
+        assert call["view"].author_id == 42
+        assert call["view"].guild_id == 77
+        assert call["view"].positive == "positive text"
+        assert call["view"].negative == "negative text"
+        assert call["view"].gen_time == 4.5
+        assert call["view"].message is not None
+        assert call["allowed_mentions"].users is True
+        assert call["allowed_mentions"].replied_user is True
+        labels = [child.label for child in call["view"].children]
+        assert labels == ["See prompt details", "Edit and Regenerate", "Regenerate", "Delete"]
+
+    asyncio.run(run())
+
+
+def _one_generate(tmp_path: Path, payload: dict, *, guild_id: int | None = None):
+    inbox = _inbox(tmp_path)
+    _drop(inbox, "gen.json", payload)
+    diffusion = ReadyDiffusion()
+    channel = Channel(guild_id=guild_id)
+
+    async def run():
+        await jobs.process_once(
+            _settings(inbox),
+            bot=_bot(channel, diffusion),
+            state={},
+            now=0.0,
+            stability_seconds=0,
+        )
+
+    asyncio.run(run())
+    return channel
+
+
+def test_generate_job_posts_the_four_prompt_buttons(tmp_path):
+    channel = _one_generate(
+        tmp_path,
+        {"type": "generate", "prompts": ["a cup of tea"], "title": "Tea", "caption": "hot"},
+        guild_id=12345,
+    )
+    assert len(channel.calls) == 1
+    view = channel.calls[0]["view"]
+    assert isinstance(view, PromptDetailButton)
+    assert [child.label for child in view.children] == [
+        "See prompt details",
+        "Edit and Regenerate",
+        "Regenerate",
+        "Delete",
+    ]
+    assert view.author_id == 0
+    assert view.guild_id == 12345
+    assert view.message is not None
+    assert view.timeout == 900
+    assert channel.calls[0]["content"] == (
+        "Tea\nhot\n"
+        "**a cup of tea \u2014 `anime_wai_illustrious` \u2014 Requested by MTS Party Prompts**"
+    )
+
+
+def test_see_prompt_details_works_without_a_requesting_user(tmp_path):
+    channel = _one_generate(tmp_path, {"type": "generate", "prompts": ["a cup of tea"]})
+    view = channel.calls[0]["view"]
+    assert view.author_id == 0
+
+    async def run():
+        clicker = SimpleNamespace(
+            user=SimpleNamespace(id=88),
+            response=SimpleNamespace(send_message=AsyncMock(), is_done=lambda: False),
+        )
+        await _button(view, "See prompt details").callback(clicker)
+        kwargs = clicker.response.send_message.await_args.kwargs
+        assert kwargs["ephemeral"] is True
+        embed = kwargs["embed"]
+        assert embed.title == "🖼️ Image Generation Details"
+        assert "anime_wai_illustrious" in embed.description
+        fields = {field.name: field.value for field in embed.fields}
+        assert "a cup of tea" in fields["User Prompt"]
+        assert fields["Positive Prompt"] == "positive:a cup of tea"
+        assert fields["Negative Prompt"] == "negative-prompt"
+        assert fields["Generation time"] == "1.25 seconds"
+        assert fields["LLM prompt enhance"] == "False"
+
+    asyncio.run(run())
+
+
+def test_delete_on_a_job_post_needs_the_moderator_role(monkeypatch, tmp_path):
+    seen = []
+
+    def fake_config(guild_id):
+        seen.append(guild_id)
+        return SimpleNamespace(image_diffusion_moderator_role_id=42)
+
+    monkeypatch.setattr("cogs.imagediffusion.get_guild_config", fake_config)
+    channel = _one_generate(
+        tmp_path,
+        {"type": "generate", "prompts": ["a cup of tea"]},
+        guild_id=12345,
+    )
+    view = channel.calls[0]["view"]
+    assert view.author_id == 0
+
+    async def run():
+        denied_delete = AsyncMock()
+        stranger = SimpleNamespace(
+            user=SimpleNamespace(id=555, roles=[SimpleNamespace(id=1)]),
+            response=SimpleNamespace(send_message=AsyncMock()),
+            message=SimpleNamespace(delete=denied_delete),
+        )
+        await _button(view, "Delete").callback(stranger)
+        denied_delete.assert_not_awaited()
+        assert stranger.response.send_message.await_args.kwargs["ephemeral"] is True
+        assert "permission" in stranger.response.send_message.await_args.args[0].lower()
+
+        allowed_delete = AsyncMock()
+        moderator = SimpleNamespace(
+            user=SimpleNamespace(id=555, roles=[SimpleNamespace(id=42)]),
+            response=SimpleNamespace(send_message=AsyncMock()),
+            message=SimpleNamespace(delete=allowed_delete),
+        )
+        await _button(view, "Delete").callback(moderator)
+        allowed_delete.assert_awaited()
+        moderator.response.send_message.assert_not_awaited()
+
+    asyncio.run(run())
+    assert seen == [12345, 12345]
+
+
+def test_job_post_buttons_use_the_clicker_not_an_inbox_user(tmp_path):
+    channel = _one_generate(tmp_path, {"type": "generate", "prompts": ["a cup of tea"]})
+    view = channel.calls[0]["view"]
+    enqueued = []
+
+    async def enqueue_image(entry, interaction, **kwargs):
+        enqueued.append((entry, interaction, kwargs))
+        return True
+
+    clicker_cog = SimpleNamespace(enqueue_image=enqueue_image)
+
+    async def run():
+        clicker = SimpleNamespace(
+            user=SimpleNamespace(id=77, mention="<@77>", roles=[]),
+            response=SimpleNamespace(send_message=AsyncMock(), is_done=lambda: False),
+            client=SimpleNamespace(get_cog=lambda name: clicker_cog if name == "ImageDiffusion" else None),
+            message=SimpleNamespace(delete=AsyncMock()),
+        )
+        await _button(view, "Regenerate").callback(clicker)
+        assert len(enqueued) == 1
+        entry, interaction, kwargs = enqueued[0]
+        assert interaction is clicker
+        assert entry.interaction is clicker
+        assert entry.prompt == "a cup of tea"
+        assert entry.model is Models.ANIME_WAI_ILLUSTRIOUS
+        assert kwargs["ephemeral"] is True
+
+        editor_cog = SimpleNamespace()
+        editor = SimpleNamespace(
+            user=SimpleNamespace(id=88, mention="<@88>"),
+            response=SimpleNamespace(send_message=AsyncMock(), is_done=lambda: False),
+            client=SimpleNamespace(get_cog=lambda name: editor_cog if name == "ImageDiffusion" else None),
+        )
+        await _button(view, "Edit and Regenerate").callback(editor)
+        opened = editor.response.send_message.await_args.kwargs
+        assert opened["ephemeral"] is True
+        assert isinstance(opened["view"], ImageGenPrefView)
+        assert opened["view"].cog is editor_cog
+        assert opened["view"].initial_prompt == "a cup of tea"
+
+        missing = SimpleNamespace(
+            user=SimpleNamespace(id=90),
+            response=SimpleNamespace(send_message=AsyncMock(), is_done=lambda: False),
+            client=SimpleNamespace(get_cog=lambda name: None),
+        )
+        await _button(view, "Edit and Regenerate").callback(missing)
+        assert missing.response.send_message.await_args.kwargs["ephemeral"] is True
+        assert "unavailable" in missing.response.send_message.await_args.args[0].lower()
+
+        regen_missing = SimpleNamespace(
+            user=SimpleNamespace(id=91),
+            response=SimpleNamespace(send_message=AsyncMock(), is_done=lambda: False),
+            client=SimpleNamespace(get_cog=lambda name: None),
+        )
+        await _button(view, "Regenerate").callback(regen_missing)
+        assert regen_missing.response.send_message.await_args.kwargs["ephemeral"] is True
+        assert "unavailable" in regen_missing.response.send_message.await_args.args[0].lower()
+        assert len(enqueued) == 1
+
+    asyncio.run(run())
+
+
+def test_generate_refuses_the_production_channel(tmp_path):
+    inbox = _inbox(tmp_path)
+    _drop(
+        inbox,
+        "gen.json",
+        {
+            "type": "generate",
+            "prompts": ["a panda"],
+            "channel_id": MTS_PRODUCTION_IMAGE_CHANNEL_ID,
+        },
+    )
+    diffusion = ReadyDiffusion()
+    channel = Channel()
+
+    async def run():
+        await jobs.process_once(
+            _settings(inbox),
+            bot=_bot(channel, diffusion),
+            state={},
+            now=0.0,
+            stability_seconds=0,
+        )
+
+    asyncio.run(run())
+    assert channel.calls == []
+    assert diffusion.created == []
+    error = (tmp_path / "failed" / "gen.error.txt").read_text(encoding="utf-8")
+    assert "1373140173067653120" in error
+    assert not (tmp_path / "done" / "gen.json").exists()
+
+
+def test_generate_posts_disable_mentions_when_the_text_pings_everyone(tmp_path):
+    channel = _one_generate(
+        tmp_path,
+        {
+            "type": "generate",
+            "prompts": ["a panda"],
+            "title": "@everyone party",
+            "caption": "<@999> look",
+        },
+    )
+    call = channel.calls[0]
+    assert call["allowed_mentions"] is NO_MENTIONS
+    mentions = call["allowed_mentions"]
+    assert mentions.everyone is False
+    assert mentions.users is False
+    assert mentions.roles is False
+    assert mentions.replied_user is False
+    lines = call["content"].split("\n")
+    assert lines == [
+        "@everyone party",
+        "<@999> look",
+        "**a panda \u2014 `anime_wai_illustrious` \u2014 Requested by MTS Party Prompts**",
+    ]
+    assert "<@" not in lines[2]
+    assert "@" not in lines[2]
+
+
+def test_later_generate_failure_posts_nothing(tmp_path):
+    inbox = _inbox(tmp_path)
+    _drop(inbox, "gen.json", {"type": "generate", "prompts": ["first", "second"]})
+
+    class SecondPromptFails(ReadyDiffusion):
+        async def enqueue_background(self, image):
+            if self.image_queue.full():
+                return False
+            await self.image_queue.put(image)
+            self.peak = max(self.peak, self.image_queue.qsize())
+            self.created.append(image)
+
+            async def finish():
+                await asyncio.sleep(0)
+                await self.image_queue.get()
+                if image.prompt == "second":
+                    image.result_future.set_exception(RuntimeError("comfy down"))
+                    return
+                image.result_future.set_result(
+                    BackgroundImage(
+                        png_bytes=_tiny_png(),
+                        image=PILImage.new("RGB", (2, 2), (1, 2, 3)),
+                        positive="pos",
+                        negative="neg",
+                        gen_time=0.5,
+                    )
+                )
+
+            asyncio.create_task(finish())
+            return True
+
+    diffusion = SecondPromptFails()
+    channel = Channel()
+
+    async def run():
+        await jobs.process_once(
+            _settings(inbox),
+            bot=_bot(channel, diffusion),
+            state={},
+            now=0.0,
+            stability_seconds=0,
+        )
+
+    asyncio.run(run())
+    assert channel.calls == []
+    assert [image.prompt for image in diffusion.created] == ["first", "second"]
+    error = (tmp_path / "failed" / "gen.error.txt").read_text(encoding="utf-8")
+    assert "image generation failed" in error
+    assert not (tmp_path / "done" / "gen.json").exists()
+
+
+def test_oversize_generate_posts_nothing(monkeypatch, tmp_path):
+    monkeypatch.setattr(jobs, "MAX_UPLOAD_BYTES", 8)
+    inbox = _inbox(tmp_path)
+    _drop(inbox, "gen.json", {"type": "generate", "prompts": ["a panda", "another panda"]})
+    diffusion = ReadyDiffusion()
+    channel = Channel()
+
+    async def run():
+        await jobs.process_once(
+            _settings(inbox),
+            bot=_bot(channel, diffusion),
+            state={},
+            now=0.0,
+            stability_seconds=0,
+        )
+
+    asyncio.run(run())
+    assert channel.calls == []
+    error = (tmp_path / "failed" / "gen.error.txt").read_text(encoding="utf-8")
+    assert "upload cap" in error
+    assert not (tmp_path / "done" / "gen.json").exists()

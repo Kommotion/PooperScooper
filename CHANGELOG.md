@@ -2,6 +2,12 @@
 
 This is the first versioned changelog for PooperScooper, covering about Oct 14–Nov 15, 2026.
 
+## v2.7.1 — 2026-11-15
+
+### New stuff
+
+- Inbox generate jobs now post with the same caption, prompt details, and buttons as /imagegen generate, attributed to MTS Party Prompts.
+
 ## v2.7.0 — 2026-11-15
 
 ### New stuff

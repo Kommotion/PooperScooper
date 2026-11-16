@@ -261,16 +261,163 @@ def release_source_bytes(image: ImageCreation) -> None:
         image.source_image_bytes = None
 
 
-def generation_caption(image: ImageCreation, preview: str) -> str:
-    mention = image.interaction.user.mention
+def generation_caption(image: ImageCreation, preview: str, attribution: str | None = None) -> str:
+    """Public caption above the image.
+
+    ``attribution`` replaces the user mention. Slash commands omit it and use
+    ``image.interaction.user.mention``. Inbox jobs pass plain text so the
+    caption does not ping anyone.
+    """
+    who = attribution if attribution else image.interaction.user.mention
     label = getattr(image, "caption_label", "") or ""
     if label:
-        return f"{label} — {mention}"
+        return f"{label} — {who}"
     if image.model == Models.KREA2_IDENTITY_EDIT and image.retain_source:
-        return f"**Halloweenify** — {mention}"
+        return f"**Halloweenify** — {who}"
     if image.model == Models.KREA2_IDENTITY_EDIT:
-        return f"**Edit:** {preview} — `{image.model}` — {mention}"
-    return f"**{preview} — `{image.model}` — {mention}**"
+        return f"**Edit:** {preview} — `{image.model}` — {who}"
+    return f"**{preview} — `{image.model}` — {who}**"
+
+
+def _with_content_prefix(body: str, content_prefix: str) -> str:
+    """Put ``content_prefix`` on its own lines above ``body``, within 2000 chars.
+
+    The body (the /imagegen line) is kept intact. Only the prefix is trimmed
+    when the sum would exceed Discord's content limit.
+    """
+    prefix = content_prefix or ""
+    if not prefix:
+        return body
+    combined = f"{prefix}\n{body}"
+    if len(combined) <= 2000:
+        return combined
+    room = 2000 - len(body) - 1
+    if room <= 0:
+        return body[:2000]
+    if room <= 3:
+        trimmed = prefix[:room]
+    else:
+        trimmed = prefix[: room - 3] + "..."
+    return f"{trimmed}\n{body}"
+
+
+def generation_message(
+    image: ImageCreation,
+    attribution: str | None = None,
+    content_prefix: str = "",
+) -> str:
+    """Caption plus the long-prompt note, with an optional title block above it."""
+    raw_prompt = (image.prompt or "").strip()
+    preview = _preview_prompt(raw_prompt)
+    content = generation_caption(image, preview, attribution)
+    if len(raw_prompt) > PROMPT_PREVIEW_MAX_CHARS and not (
+        image.model == Models.KREA2_IDENTITY_EDIT and image.retain_source
+    ):
+        content += "\n-# Full prompt in **See prompt details**"
+    return _with_content_prefix(content, content_prefix)
+
+
+def _image_diffusion_from(interaction):
+    """The ImageDiffusion cog on this interaction's client, or None."""
+    client = getattr(interaction, "client", None)
+    getter = getattr(client, "get_cog", None)
+    if not callable(getter):
+        return None
+    return getter("ImageDiffusion")
+
+
+async def _reject_missing_image_cog(interaction) -> None:
+    response = getattr(interaction, "response", None)
+    if response is None:
+        return
+    await response.send_message(
+        "Image generation is unavailable right now.",
+        ephemeral=True,
+    )
+
+
+async def post_generation_result(
+    channel,
+    image: ImageCreation,
+    *,
+    positive: str,
+    negative: str,
+    gen_time: float,
+    author_id: int,
+    guild_id: int | None,
+    allowed_mentions: discord.AllowedMentions,
+    result_image: PILImage.Image | None = None,
+    png_bytes: bytes | None = None,
+    attribution: str | None = None,
+    content_prefix: str = "",
+):
+    """Post one /imagegen result: caption, PNG, and PromptDetailButton.
+
+    Slash commands pass the interaction user's mention via ``generation_caption``
+    (leave ``attribution`` empty) and their allowed mentions. Inbox generate
+    jobs pass a plain-text ``attribution``, ``author_id`` 0, and mentions none.
+    ``content_prefix`` is the job title and caption, on their own lines above
+    the /imagegen line. ``view.message`` is set so the button timeout can
+    disable the controls.
+    """
+    # Drop Identity Edit uploads once the result exists. Halloweenify sets
+    # retain_source so Regenerate can still reuse the caller's avatar.
+    release_source_bytes(image)
+
+    result_files: list[discord.File] = []
+    single_buffer: BytesIO | None = None
+    try:
+        if image.retain_source:
+            if result_image is None:
+                raise ValueError("retained-source generation needs a PIL image")
+            result_files = halloweenify_result_files(
+                image.source_image_bytes,
+                result_image,
+                getattr(image, "halloween_frame", "") or None,
+            )
+        elif png_bytes is not None:
+            single_buffer = BytesIO(png_bytes)
+            single_file = discord.File(single_buffer, filename="generated.png")
+        elif result_image is not None:
+            single_buffer = BytesIO()
+            result_image.save(single_buffer, format="PNG")
+            single_buffer.seek(0)
+            single_file = discord.File(single_buffer, filename="generated.png")
+        else:
+            raise ValueError("post_generation_result needs png bytes or a PIL image")
+
+        prompt_details = PromptDetailButton(
+            user_prompt=image.prompt,
+            user_negative=image.negative_prompt,
+            positive=positive,
+            negative=negative,
+            image=image,
+            author_id=author_id,
+            gen_time=gen_time,
+            guild_id=guild_id,
+        )
+        send_kwargs = {
+            "content": generation_message(image, attribution, content_prefix),
+            "view": prompt_details,
+            "allowed_mentions": allowed_mentions,
+        }
+        if result_files:
+            send_kwargs["files"] = result_files
+        else:
+            send_kwargs["file"] = single_file
+        prompt_details.message = await channel.send(**send_kwargs)
+        return prompt_details.message
+    finally:
+        for item in result_files:
+            try:
+                item.close()
+            except Exception:
+                pass
+        if single_buffer is not None:
+            try:
+                single_buffer.close()
+            except Exception:
+                pass
 
 
 async def _send_ephemeral(interaction, message: str) -> None:
@@ -716,8 +863,13 @@ class PromptDetailButton(ui.View):
             )
             return
 
+        cog = _image_diffusion_from(interaction)
+        if cog is None:
+            await _reject_missing_image_cog(interaction)
+            return
+
         view = ImageGenPrefView(
-            cog=interaction.client.get_cog("ImageDiffusion"),
+            cog=cog,
             default_model=self.model,
             default_pos=DefaultChoice.YES if self.use_default_positive else DefaultChoice.NO,
             default_neg=DefaultChoice.YES if self.use_default_negative else DefaultChoice.NO,
@@ -780,7 +932,10 @@ class PromptDetailButton(ui.View):
             edit_strength=self.edit_strength,
         )
 
-        cog = interaction.client.get_cog("ImageDiffusion")
+        cog = _image_diffusion_from(interaction)
+        if cog is None or not hasattr(cog, "enqueue_image"):
+            await _reject_missing_image_cog(interaction)
+            return
         await cog.enqueue_image(
             image_entry,
             interaction,
@@ -1311,7 +1466,7 @@ class ImageDiffusion(Cog):
                 raise RuntimeError(f"ComfyUI is not available: {exc}") from exc
 
         try:
-            output, _positive, _negative, _gen_time = await asyncio.wait_for(
+            output, positive, negative, gen_time = await asyncio.wait_for(
                 model.generate(image), timeout=outer_timeout
             )
         except asyncio.TimeoutError as exc:
@@ -1330,7 +1485,13 @@ class ImageDiffusion(Cog):
         finally:
             buffer.close()
         release_source_bytes(image)
-        return BackgroundImage(png_bytes=png, image=save_image)
+        return BackgroundImage(
+            png_bytes=png,
+            image=save_image,
+            positive="" if positive is None else str(positive),
+            negative="" if negative is None else str(negative),
+            gen_time=0 if gen_time is None else gen_time,
+        )
 
     async def _image_generation_interaction(self, image: ImageCreation) -> None:
         """Handles image generation but with an interaction.
@@ -1406,73 +1567,25 @@ class ImageDiffusion(Cog):
             return
 
         img = output.images[0]
-        author_id = image.interaction.user.id
-
-        # Privacy: drop uploaded Identity Edit bytes once the result is in memory.
-        # Halloweenify sets retain_source so Regenerate can reuse the caller's avatar.
-        release_source_bytes(image)
-
-        result_files: list[discord.File] = []
-        single_file: discord.File | None = None
-        single_buffer: BytesIO | None = None
-        if image.retain_source:
-            result_files = halloweenify_result_files(
-                image.source_image_bytes,
-                img,
-                getattr(image, "halloween_frame", "") or None,
-            )
-        else:
-            single_buffer = BytesIO()
-            img.save(single_buffer, format="PNG")
-            single_buffer.seek(0)
-            single_file = discord.File(single_buffer, filename="generated.png")
-
-        prompt_details = PromptDetailButton(
-            user_prompt=image.prompt,
-            user_negative=image.negative_prompt,
-            positive=positive,
-            negative=negative,
-            image=image,
-            author_id=author_id,
-            gen_time=gen_time,
-            guild_id=image.interaction.guild_id,
-        )
-
-        raw_prompt = (image.prompt or "").strip()
-        preview = _preview_prompt(raw_prompt)
-        content = generation_caption(image, preview)
-        if len(raw_prompt) > PROMPT_PREVIEW_MAX_CHARS and not (
-            image.model == Models.KREA2_IDENTITY_EDIT and image.retain_source
-        ):
-            content += "\n-# Full prompt in **See prompt details**"
-
         try:
-            send_kwargs = {
-                "content": content,
-                "view": prompt_details,
-                "allowed_mentions": discord.AllowedMentions(users=True, replied_user=True),
-            }
-            if result_files:
-                send_kwargs["files"] = result_files
-            else:
-                send_kwargs["file"] = single_file
-            prompt_details.message = await image.interaction.channel.send(**send_kwargs)
+            await post_generation_result(
+                image.interaction.channel,
+                image,
+                result_image=img,
+                positive=positive,
+                negative=negative,
+                gen_time=gen_time,
+                author_id=image.interaction.user.id,
+                guild_id=image.interaction.guild_id,
+                allowed_mentions=discord.AllowedMentions(users=True, replied_user=True),
+            )
         except Exception as e:
             log.error(f"Error: {e}")
-            await image.interaction.channel.send(content=f"Some error occurred while image generation:\n{e}",
-                                                  allowed_mentions=discord.AllowedMentions(users=True))
+            await image.interaction.channel.send(
+                content=f"Some error occurred while image generation:\n{e}",
+                allowed_mentions=discord.AllowedMentions(users=True),
+            )
         finally:
-            # Drop large buffers once Discord has the file (or send failed).
-            for item in result_files:
-                try:
-                    item.close()
-                except Exception:
-                    pass
-            if single_buffer is not None:
-                try:
-                    single_buffer.close()
-                except Exception:
-                    pass
             del img
             del output
 

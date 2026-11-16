@@ -80,7 +80,16 @@ A generate job stays in the inbox until ComfyUI is ready. It is not claimed earl
 
 `width` and `height` are optional and must be set together. Each must be a multiple of 64 from 64 through 2048. The apply path writes those numbers onto standard empty-latent nodes (`EmptyLatentImage`, `EmptySD3LatentImage`, `EmptyFlux2LatentImage`). If the graph has none (Qwen-Image 2.1 stores a single `resolution` instead), the cog logs that and uses the workflow's own size. The job still runs.
 
-A later prompt failure fails the whole job and posts nothing. Images are posted only after every prompt has succeeded, in batches of at most 10.
+A later prompt failure fails the whole job and posts nothing. Images are posted only after every prompt has succeeded. Each image is its own Discord message, in the same shape as `/imagegen generate`:
+
+- One PNG named `generated.png`
+- The public line `**{preview} — `{model}` — Requested by MTS Party Prompts**`
+- When the prompt is longer than 160 characters, a second line: `-# Full prompt in **See prompt details**`
+- The same buttons as `/imagegen`: **See prompt details**, **Edit and Regenerate**, **Regenerate**, and **Delete**
+
+A job `title` and `caption`, when present, go on their own lines above that line (title, then caption), on every image. The attribution is plain text. Nobody is mentioned. Delete is not tied to a Discord user (`author_id` is 0), so a random clicker cannot delete the post. An image-diffusion moderator for the destination guild still can.
+
+See prompt details is an ephemeral embed (model, prompts, flags, NSFW level, LLM prompt enhance, generation time). Edit and Regenerate and Regenerate run as the person who clicked, on the normal `/imagegen` queue. `llm_prompt_enhance` stays off for the inbox job itself. One image over the 10 MiB cap fails the whole job and posts nothing.
 
 ```json
 {
@@ -128,7 +137,11 @@ The per-file cap is 10 MiB (`MAX_UPLOAD_BYTES`, 10485760), the default bot uploa
 
 ## Posts
 
-Every post uses `discord.AllowedMentions.none()`. Role, user, and `@everyone` pings in the title or caption are not mentions.
+Every inbox post uses `discord.AllowedMentions.none()`. Role, user, and `@everyone` text in the title or caption is not a mention.
+
+Upload jobs send batches of at most 10 files. The title and caption go on the first message only, and there are no buttons.
+
+Generate jobs send one `/imagegen`-style message per image, as described above. Mentions stay off on those messages too. The credit line says `Requested by MTS Party Prompts` and does not mention a user.
 
 ## Success, failure, and restarts
 
@@ -139,6 +152,6 @@ Every post uses `discord.AllowedMentions.none()`. Role, user, and `@everyone` pi
 
 A disabled watcher does not claim inbox jobs. Turning the flag on later (and restarting) will pick up jobs that are still in the inbox with a ready marker.
 
-If Discord accepts the first batch of a multi-message post and then errors, the job is failed and not retried, so the first batch is not sent a second time. A later batch may be missing. Check `failed\` and the channel before you drop the job again under a new file name.
+If Discord accepts an earlier message and then errors, the job is failed and not retried, so that message is not sent a second time. A later upload batch, or a later generated image, may be missing. Check `failed\` and the channel before you drop the job again under a new file name.
 
 Invalid JSON or a schema error never posts. Unknown fields are rejected, including `llm_prompt_enhance`.

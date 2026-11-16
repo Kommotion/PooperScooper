@@ -32,6 +32,7 @@ import discord
 from discord.ext import commands, tasks
 from discord.ext.commands import Cog
 
+from cogs.imagediffusion import post_generation_result
 from cogs.utils.config import MtsImageJobsConfig, load_config
 from cogs.utils.image_models import ImageCreation, Models
 
@@ -70,6 +71,10 @@ _GENERATE_MODEL_VALUES = frozenset(
 )
 
 NO_MENTIONS = discord.AllowedMentions.none()
+# Plain text in the mention slot of an /imagegen-style generate post.
+GENERATE_ATTRIBUTION = "Requested by MTS Party Prompts"
+# Not a Discord snowflake. Delete will not treat a clicker as the author.
+INBOX_AUTHOR_ID = 0
 
 INTERRUPTED_REASON = (
     "interrupted: this job was still in processing when the cog started, "
@@ -95,6 +100,18 @@ class GenerateJob:
     title: str
     caption: str
     channel_id: int | None
+
+
+@dataclass
+class GeneratedImage:
+    """One finished prompt. Posted only after every prompt in the job succeeds."""
+
+    name: str
+    png_bytes: bytes
+    creation: ImageCreation
+    positive: str = ""
+    negative: str = ""
+    gen_time: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -628,6 +645,40 @@ def png_from_result(result: object) -> bytes:
     raise JobError("background generation returned no image bytes")
 
 
+def generation_details(result: object) -> tuple[str, str, float]:
+    """Positive prompt, negative prompt, and generation time from a worker result.
+
+    Raw bytes (tests, older callers) have none of these. Empty and zero are fine.
+    """
+    if isinstance(result, (bytes, bytearray)):
+        return "", "", 0.0
+    positive = getattr(result, "positive", "")
+    negative = getattr(result, "negative", "")
+    gen_time = getattr(result, "gen_time", 0.0)
+    if not isinstance(positive, str):
+        positive = "" if positive is None else str(positive)
+    if not isinstance(negative, str):
+        negative = "" if negative is None else str(negative)
+    try:
+        gen_time = float(0.0 if gen_time is None else gen_time)
+    except (TypeError, ValueError):
+        gen_time = 0.0
+    return positive, negative, gen_time
+
+
+def channel_guild_id(channel) -> int:
+    """Guild of the destination channel, or 0 when the channel has none.
+
+    Moderator delete looks the role up from this id. A missing guild must not
+    become a real server's id.
+    """
+    guild = getattr(channel, "guild", None)
+    guild_id = getattr(guild, "id", None)
+    if isinstance(guild_id, bool) or not isinstance(guild_id, int) or guild_id <= 0:
+        return 0
+    return guild_id
+
+
 async def post_image_batches(channel, blobs: list[tuple[str, bytes]], content: str) -> None:
     """Post at most 10 attachments per message. Mentions are disabled."""
     if not blobs:
@@ -655,19 +706,20 @@ async def generate_pngs(
     retry_delay: float = QUEUE_RETRY_SECONDS,
     wait_seconds: float = QUEUE_WAIT_SECONDS,
     sleep: Callable = asyncio.sleep,
-) -> list[tuple[str, bytes]]:
+) -> list[GeneratedImage]:
     """Enqueue one prompt at a time on the shared ImageDiffusion queue.
 
     The next prompt is not queued until this one has finished, so a batch
     cannot fill the cap ahead of /imagegen. A full queue waits and retries.
-    ``llm_prompt_enhance`` stays off.
+    ``llm_prompt_enhance`` stays off. This does not post. The caller posts
+    only after every prompt has succeeded.
     """
     if not hasattr(image_cog, "enqueue_background") or not hasattr(image_cog, "image_queue"):
         raise JobError("ImageDiffusion cog has no shared image queue")
 
     loop = asyncio.get_running_loop()
     started = loop.time()
-    pngs: list[tuple[str, bytes]] = []
+    pngs: list[GeneratedImage] = []
     for index, prompt in enumerate(job.prompts):
         future = loop.create_future()
         creation = ImageCreation(
@@ -710,7 +762,17 @@ async def generate_pngs(
                 f"generated image exceeds the {MAX_UPLOAD_BYTES} byte upload cap "
                 f"({len(png)} bytes)"
             )
-        pngs.append((f"{stem}-{index + 1}.png", png))
+        positive, negative, gen_time = generation_details(result)
+        pngs.append(
+            GeneratedImage(
+                name=f"{stem}-{index + 1}.png",
+                png_bytes=png,
+                creation=creation,
+                positive=positive,
+                negative=negative,
+                gen_time=gen_time,
+            )
+        )
         log.info(
             "mts image job generated %s prompt %s/%s model=%s",
             stem,
@@ -719,6 +781,40 @@ async def generate_pngs(
             job.model.value,
         )
     return pngs
+
+
+async def post_generated_images(channel, job: GenerateJob, generated: list[GeneratedImage]) -> None:
+    """Post one /imagegen-style message per image. Mentions stay off.
+
+    Nothing is sent until every image is known to fit the upload cap. A later
+    failure therefore posts nothing from this function when the check fails
+    first. Title and caption, when present, sit above the /imagegen line on
+    every message.
+    """
+    if not generated:
+        raise JobError("nothing to post")
+    for item in generated:
+        if len(item.png_bytes) > MAX_UPLOAD_BYTES:
+            raise JobError(
+                f"generated image exceeds the {MAX_UPLOAD_BYTES} byte upload cap "
+                f"({len(item.png_bytes)} bytes)"
+            )
+    prefix = message_content(job.title, job.caption)
+    guild_id = channel_guild_id(channel)
+    for item in generated:
+        await post_generation_result(
+            channel,
+            item.creation,
+            png_bytes=item.png_bytes,
+            positive=item.positive,
+            negative=item.negative,
+            gen_time=item.gen_time,
+            author_id=INBOX_AUTHOR_ID,
+            guild_id=guild_id,
+            allowed_mentions=NO_MENTIONS,
+            attribution=GENERATE_ATTRIBUTION,
+            content_prefix=prefix,
+        )
 
 
 def _image_cog(bot):
@@ -775,12 +871,11 @@ async def execute_claimed_job(
         channel = await _open_channel(bot, channel_id, fetch_channel)
         if channel is None:
             raise JobError(f"channel {channel_id} is not available")
-        content = message_content(job.title, job.caption)
         if isinstance(job, GenerateJob):
             image_cog = _image_cog(bot)
             if image_cog is None:
                 raise JobError("ImageDiffusion cog is not loaded")
-            blobs = await generate_pngs(
+            generated = await generate_pngs(
                 job,
                 image_cog,
                 stem=job_path.stem,
@@ -788,11 +883,19 @@ async def execute_claimed_job(
                 wait_seconds=wait_seconds,
                 sleep=sleep,
             )
+            await post_generated_images(channel, job, generated)
+            posted_count = len(generated)
         else:
             blobs = stage_upload(dirs["inbox"], staged, job.images)
-        await post_image_batches(channel, blobs, content)
+            await post_image_batches(channel, blobs, message_content(job.title, job.caption))
+            posted_count = len(blobs)
         finish_success(job_path, dirs["done"], staged if staged.exists() else None)
-        log.info("mts image job posted name=%s type=%s files=%s", job_path.stem, job.kind, len(blobs))
+        log.info(
+            "mts image job posted name=%s type=%s files=%s",
+            job_path.stem,
+            job.kind,
+            posted_count,
+        )
     except JobError as exc:
         log.warning("mts image job failed name=%s reason=%s", job_path.stem, exc)
         fail_job(job_path, dirs["failed"], str(exc), staged if staged.exists() else None)
