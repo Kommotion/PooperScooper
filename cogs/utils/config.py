@@ -62,12 +62,12 @@ class ComfyUIConfig(BaseModel):
 class MtsImageJobsConfig(BaseModel):
     """Inbox image jobs. A missing block stays off and targets the support test channel.
 
-    Production MTS #image-diffusion (1373140173067653120) is refused by the cog
-    even if this channel_id is pointed there. Do not enable that channel here.
+    Jobs post only to ``channel_id``. That may be the support test channel or
+    MTS #image-diffusion (1373140173067653120) when this field is set to that id.
     """
 
     enabled: bool = False
-    # Support test channel (candyhunt SUPPORT_TEST_CHANNEL_ID). Not production.
+    # Support test channel (candyhunt SUPPORT_TEST_CHANNEL_ID). Default until config changes it.
     channel_id: int = 1045149015756521493
     inbox_dir: str = "data/mts_image_jobs/inbox"
     default_model: str = "anime_wai_illustrious"

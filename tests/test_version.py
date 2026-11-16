@@ -1,4 +1,4 @@
-"""Version is 2.7.1 and stays in one place."""
+"""Version is 2.7.2 and stays in one place."""
 
 from __future__ import annotations
 
@@ -11,8 +11,8 @@ ROOT = Path(__file__).resolve().parents[1]
 VERSION_ATTR = "cogs.utils.constants.VERSION"
 
 
-def test_version_constant_is_2_7_1():
-    assert constants.VERSION == "2.7.1"
+def test_version_constant_is_2_7_2():
+    assert constants.VERSION == "2.7.2"
     assert constants.__version__ == constants.VERSION
 
 

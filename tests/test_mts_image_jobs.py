@@ -24,7 +24,10 @@ from cogs.imagediffusion import (
 )
 from cogs.utils.config import PROJECT_ROOT, BotConfig, MtsImageJobsConfig
 from cogs.utils.image_models import (
+    ONE_OBSESSION_ANIMA_WORKFLOW_PATH,
+    WAI_ILLUSTRIOUS_WORKFLOW_PATH,
     BackgroundImage,
+    ComfyOneObsessionAnimaModel,
     ComfyOutput,
     ComfyQwenImage21Model,
     ComfyWaiIllustriousModel,
@@ -140,6 +143,14 @@ class ReadyDiffusion:
         return True
 
 
+def _image_diffusion_models():
+    """ImageDiffusion.models entries for these tests, without starting the cog."""
+    return {
+        Models.ANIME_WAI_ILLUSTRIOUS: ComfyWaiIllustriousModel(),
+        Models.ONE_OBSESSION_ANIMA: ComfyOneObsessionAnimaModel(),
+    }
+
+
 def test_config_defaults_stay_off_and_example_uses_the_test_channel():
     config = BotConfig.model_validate({"token": "test-token", "client_id": "123"})
     section = config.mts_image_jobs
@@ -242,22 +253,28 @@ def test_default_model_must_be_a_real_generate_model():
     assert "identity-edit" in str(caught.value)
 
 
-def test_channel_refusal_covers_production_and_mismatches():
-    with pytest.raises(ChannelRefused) as production_config:
-        resolve_post_channel(MTS_PRODUCTION_IMAGE_CHANNEL_ID, None)
-    assert "1373140173067653120" in str(production_config.value)
-    assert "not allowed" in str(production_config.value)
+def test_configured_channel_is_used_and_mismatches_are_refused():
+    assert resolve_post_channel(MTS_PRODUCTION_IMAGE_CHANNEL_ID, None) == MTS_PRODUCTION_IMAGE_CHANNEL_ID
+    assert (
+        resolve_post_channel(MTS_PRODUCTION_IMAGE_CHANNEL_ID, MTS_PRODUCTION_IMAGE_CHANNEL_ID)
+        == MTS_PRODUCTION_IMAGE_CHANNEL_ID
+    )
+    assert resolve_post_channel(DEFAULT_TEST_CHANNEL_ID, None) == DEFAULT_TEST_CHANNEL_ID
+    assert resolve_post_channel(DEFAULT_TEST_CHANNEL_ID, DEFAULT_TEST_CHANNEL_ID) == DEFAULT_TEST_CHANNEL_ID
 
-    with pytest.raises(ChannelRefused) as production_job:
+    with pytest.raises(ChannelRefused) as test_config_prod_job:
         resolve_post_channel(DEFAULT_TEST_CHANNEL_ID, MTS_PRODUCTION_IMAGE_CHANNEL_ID)
-    assert "1373140173067653120" in str(production_job.value)
+    assert "does not match" in str(test_config_prod_job.value)
+    assert "not allowed" not in str(test_config_prod_job.value)
+
+    with pytest.raises(ChannelRefused) as prod_config_test_job:
+        resolve_post_channel(MTS_PRODUCTION_IMAGE_CHANNEL_ID, DEFAULT_TEST_CHANNEL_ID)
+    assert "does not match" in str(prod_config_test_job.value)
+    assert "not allowed" not in str(prod_config_test_job.value)
 
     with pytest.raises(ChannelRefused) as mismatch:
         resolve_post_channel(DEFAULT_TEST_CHANNEL_ID, 999)
     assert "does not match" in str(mismatch.value)
-
-    assert resolve_post_channel(DEFAULT_TEST_CHANNEL_ID, None) == DEFAULT_TEST_CHANNEL_ID
-    assert resolve_post_channel(DEFAULT_TEST_CHANNEL_ID, DEFAULT_TEST_CHANNEL_ID) == DEFAULT_TEST_CHANNEL_ID
 
 
 def test_ready_marker_and_stability_gate_the_claim(tmp_path):
@@ -384,9 +401,14 @@ def test_bad_json_and_bad_channel_go_to_failed_without_a_post(tmp_path):
     assert channel.calls == []
     failed = tmp_path / "failed"
     assert "invalid JSON" in (failed / "bad.error.txt").read_text(encoding="utf-8")
-    assert "1373140173067653120" in (failed / "prod.error.txt").read_text(encoding="utf-8")
+    prod_error = (failed / "prod.error.txt").read_text(encoding="utf-8")
+    assert "does not match" in prod_error
+    assert "not allowed" not in prod_error
     assert "does not match" in (failed / "other.error.txt").read_text(encoding="utf-8")
-    assert "1373140173067653120" in (failed / "cfg.error.txt").read_text(encoding="utf-8")
+    cfg_error = (failed / "cfg.error.txt").read_text(encoding="utf-8")
+    assert "missing image" in cfg_error
+    assert "not allowed" not in cfg_error
+    assert "forbidden" not in cfg_error.lower()
     assert not (inbox / "bad.json").exists()
     assert not (inbox / "prod.json").exists()
     assert not (inbox / "cfg.json").exists()
@@ -555,6 +577,74 @@ def test_generate_waits_instead_of_filling_a_full_queue():
         assert calls["enqueue"] == 1
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("model_id", "expected_model", "workflow_path", "workflow_name"),
+    [
+        (
+            "one_obsession_anima",
+            Models.ONE_OBSESSION_ANIMA,
+            ONE_OBSESSION_ANIMA_WORKFLOW_PATH,
+            "ONE_OBSESSION_ANIMA_API.json",
+        ),
+        (
+            "anime_wai_illustrious",
+            Models.ANIME_WAI_ILLUSTRIOUS,
+            WAI_ILLUSTRIOUS_WORKFLOW_PATH,
+            "WAI-ILLUSTRIOUS-SDXL_API.json",
+        ),
+    ],
+)
+def test_generate_job_model_reaches_image_creation(
+    model_id, expected_model, workflow_path, workflow_name
+):
+    other_default = (
+        "anime_wai_illustrious" if model_id == "one_obsession_anima" else "one_obsession_anima"
+    )
+    job = parse_job(
+        {"type": "generate", "prompts": ["a red panda"], "model": model_id},
+        default_model=other_default,
+    )
+    diffusion = ReadyDiffusion()
+
+    async def run():
+        return await jobs.generate_pngs(job, diffusion, stem="job")
+
+    pngs = asyncio.run(run())
+    assert len(pngs) == 1
+    assert len(diffusion.created) == 1
+    creation = diffusion.created[0]
+    assert isinstance(creation, ImageCreation)
+    assert creation is pngs[0].creation
+    assert creation.model is expected_model
+    entry = _image_diffusion_models()[creation.model]
+    assert entry.workflow_path == workflow_path
+    assert entry.workflow_path.endswith(workflow_name)
+
+
+def test_generate_job_without_model_uses_config_default(tmp_path):
+    settings = _settings(tmp_path, default_model="one_obsession_anima")
+    assert settings.default_model == "one_obsession_anima"
+    job = parse_job(
+        {"type": "generate", "prompts": ["a ceramic cup"]},
+        default_model=settings.default_model,
+    )
+    diffusion = ReadyDiffusion()
+
+    async def run():
+        return await jobs.generate_pngs(job, diffusion, stem="job")
+
+    pngs = asyncio.run(run())
+    assert len(pngs) == 1
+    assert len(diffusion.created) == 1
+    creation = diffusion.created[0]
+    assert isinstance(creation, ImageCreation)
+    assert creation is pngs[0].creation
+    assert creation.model is Models.ONE_OBSESSION_ANIMA
+    entry = _image_diffusion_models()[creation.model]
+    assert entry.workflow_path == ONE_OBSESSION_ANIMA_WORKFLOW_PATH
+    assert entry.workflow_path.endswith("ONE_OBSESSION_ANIMA_API.json")
 
 
 def test_generate_stays_in_the_inbox_until_comfy_is_ready(tmp_path):
@@ -985,7 +1075,7 @@ def test_job_post_buttons_use_the_clicker_not_an_inbox_user(tmp_path):
     asyncio.run(run())
 
 
-def test_generate_refuses_the_production_channel(tmp_path):
+def test_generate_refuses_a_channel_mismatch(tmp_path):
     inbox = _inbox(tmp_path)
     _drop(
         inbox,
@@ -1012,8 +1102,50 @@ def test_generate_refuses_the_production_channel(tmp_path):
     assert channel.calls == []
     assert diffusion.created == []
     error = (tmp_path / "failed" / "gen.error.txt").read_text(encoding="utf-8")
-    assert "1373140173067653120" in error
+    assert "does not match" in error
+    assert "not allowed" not in error
     assert not (tmp_path / "done" / "gen.json").exists()
+
+
+def test_generate_posts_when_the_configured_channel_is_production(tmp_path):
+    inbox = _inbox(tmp_path)
+    _drop(inbox, "gen.json", {"type": "generate", "prompts": ["a panda in the mts channel"]})
+    diffusion = ReadyDiffusion()
+    channel = Channel()
+    seen: list[int] = []
+
+    def get_channel(channel_id):
+        seen.append(channel_id)
+        return channel
+
+    bot = SimpleNamespace(
+        get_channel=get_channel,
+        get_cog=lambda name: diffusion if name == "ImageDiffusion" else None,
+    )
+
+    async def run():
+        await jobs.process_once(
+            _settings(inbox, channel_id=MTS_PRODUCTION_IMAGE_CHANNEL_ID),
+            bot=bot,
+            state={},
+            now=0.0,
+            stability_seconds=0,
+        )
+
+    asyncio.run(run())
+    assert seen == [MTS_PRODUCTION_IMAGE_CHANNEL_ID]
+    assert len(channel.calls) == 1
+    call = channel.calls[0]
+    assert call["allowed_mentions"] is NO_MENTIONS
+    mentions = call["allowed_mentions"]
+    assert mentions.everyone is False
+    assert mentions.users is False
+    assert mentions.roles is False
+    assert mentions.replied_user is False
+    assert "Requested by MTS Party Prompts" in call["content"]
+    assert (tmp_path / "done" / "gen.json").is_file()
+    assert not (tmp_path / "failed" / "gen.error.txt").exists()
+    assert len(diffusion.created) == 1
 
 
 def test_generate_posts_disable_mentions_when_the_text_pings_everyone(tmp_path):

@@ -2,6 +2,16 @@
 
 This is the first versioned changelog for PooperScooper, covering about Oct 14–Nov 15, 2026.
 
+## v2.7.2 — 2026-11-15
+
+### New stuff
+
+- Inbox / Party Prompt image jobs can now post in the MTS image channel, in the same style as /imagegen, credited to MTS Party Prompts. Mentions stay off.
+
+### Background
+
+- Removed the hard block on the production MTS image channel. Jobs still post only to the configured channel, and a job that names a different channel is refused.
+
 ## v2.7.1 — 2026-11-15
 
 ### New stuff

@@ -8,8 +8,9 @@ Sibling folders, next to that inbox, are ``processing\\``, ``done\\``, and
 ``failed\\``. The cog creates them if they are missing.
 
 The watcher loads with the bot but does nothing until ``mts_image_jobs.enabled``
-is true. Set that in config.json and restart. Leave ``channel_id`` on the
-support test channel until Nick allows the production MTS channel.
+is true. Set that in config.json and restart. Posting goes to the configured
+``channel_id``, which may be the support test channel or MTS #image-diffusion
+when that id is configured.
 
 Producers copy images first, then the JSON, then a ``.ready`` marker last.
 """
@@ -38,8 +39,8 @@ from cogs.utils.image_models import ImageCreation, Models
 
 log = logging.getLogger(__name__)
 
-# MTS #image-diffusion. Production posting stays forbidden until Nick explicitly
-# allows it. resolve_post_channel refuses this id even if config or a job asks.
+# MTS #image-diffusion channel id. Posting there is allowed when
+# config.channel_id is set to it.
 MTS_PRODUCTION_IMAGE_CHANNEL_ID = 1373140173067653120
 
 # Support test channel. Same id as candyhunt.SUPPORT_TEST_CHANNEL_ID.
@@ -162,17 +163,10 @@ def message_content(title: str, caption: str) -> str:
 def resolve_post_channel(config_channel_id: int, job_channel_id: int | None) -> int:
     """Return the only channel a job may use, or raise ChannelRefused.
 
-    Jobs normally omit channel_id. A job that names a different channel is
-    refused. The production MTS channel is refused even when config points there.
+    Jobs normally omit channel_id. A job that names a different channel than
+    config is refused. The configured channel is the one used, including the
+    production MTS channel when that id is configured.
     """
-    if (
-        config_channel_id == MTS_PRODUCTION_IMAGE_CHANNEL_ID
-        or job_channel_id == MTS_PRODUCTION_IMAGE_CHANNEL_ID
-    ):
-        raise ChannelRefused(
-            "refused: posting to MTS #image-diffusion "
-            f"({MTS_PRODUCTION_IMAGE_CHANNEL_ID}) is not allowed yet"
-        )
     if isinstance(config_channel_id, bool) or not isinstance(config_channel_id, int) or config_channel_id <= 0:
         raise ChannelRefused("refused: configured channel_id is invalid")
     if job_channel_id is not None and job_channel_id != config_channel_id:

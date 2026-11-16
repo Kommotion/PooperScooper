@@ -2,7 +2,7 @@
 
 The bot can watch a folder for image jobs and post the results on its own. There is no approval step and no new slash command.
 
-This is **off** unless `mts_image_jobs.enabled` is true. The default channel is the support test channel. It does **not** post in MTS #image-diffusion.
+This is **off** unless `mts_image_jobs.enabled` is true. Jobs post only to the configured `channel_id`. The example and the default are the support test channel. MTS #image-diffusion (`1373140173067653120`) is used when `channel_id` is set to that id. Switching to production is a config change, not a code hard-block.
 
 ## Inbox
 
@@ -53,20 +53,22 @@ Add this to `config.json` (the live file is not in git; `config.example.json` sh
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `enabled` | `false` | Missing key or `false`: the cog loads, and the watcher does not claim jobs. |
-| `channel_id` | `1045149015756521493` | Support test channel. Every job posts here. |
+| `channel_id` | `1045149015756521493` | The only channel jobs post to. The example and the default are the support test channel. Set this to `1373140173067653120` to post in MTS #image-diffusion. |
 | `inbox_dir` | `data/mts_image_jobs/inbox` | Relative to the repo root, or an absolute path. |
 | `default_model` | `anime_wai_illustrious` | Used when a generate job omits `model`. WAI Illustrious. |
 
-To turn it on: set `enabled` to `true` and restart the bot. No slash-command sync. Leave `channel_id` on `1045149015756521493` until Nick explicitly allows the production channel.
+To turn it on: set `enabled` to `true` and restart the bot. No slash-command sync. The example above keeps `channel_id` on the support test channel `1045149015756521493`. To post in MTS #image-diffusion, change `channel_id` to `1373140173067653120`. That switch is a config change of `channel_id`, not a code hard-block.
 
 The watcher reads the flag on each tick. The config loader keeps the file it read at startup, so a restart is how you enable it.
 
 ## Channels
 
-- Test channel: `1045149015756521493`
+- Support test channel (example and default): `1045149015756521493`
 - Production MTS #image-diffusion: `1373140173067653120`
 
-Production is hard-refused. The constant is `MTS_PRODUCTION_IMAGE_CHANNEL_ID` in `cogs/mts_image_jobs.py`, with a comment that production can be enabled later. A config `channel_id` of that value, or a job that names it, fails the job (or is refused before post) and nothing is sent there.
+Jobs post only to the configured `channel_id`. That may be the support test channel or MTS #image-diffusion when config is set to `1373140173067653120`. The constant `MTS_PRODUCTION_IMAGE_CHANNEL_ID` in `cogs/mts_image_jobs.py` is that production id. Switching to production is a config change of `channel_id`, not a code hard-block.
+
+A job that names the production id while config is still the test channel fails as a mismatch, and nothing is posted. A job that names the test id while config is the production channel fails the same way.
 
 Jobs should omit `channel_id`. If a job includes one, it must be exactly the configured channel. Any other id fails the job and does not post.
 
