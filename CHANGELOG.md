@@ -2,6 +2,12 @@
 
 This is the first versioned changelog for PooperScooper, covering about Oct 14–Nov 15, 2026.
 
+## v2.7.3 — 2026-11-16
+
+### Background
+
+- Image buttons no longer error when a deleted message's timer runs out, or when a click arrives after the interaction expired.
+
 ## v2.7.2 — 2026-11-15
 
 ### New stuff

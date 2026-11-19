@@ -326,11 +326,48 @@ def _image_diffusion_from(interaction):
     return getter("ImageDiffusion")
 
 
-async def _reject_missing_image_cog(interaction) -> None:
+async def _ignore_discord_http(
+    awaitable,
+    *,
+    expired: str,
+    failed: str,
+    expired_debug: bool = False,
+) -> None:
+    """Await a Discord call. NotFound and HTTPException are logged, not raised."""
+    try:
+        await awaitable
+    except discord.NotFound as exc:
+        if expired_debug:
+            log.debug("%s: %s", expired, exc)
+        else:
+            log.info("%s: %s", expired, exc)
+    except discord.HTTPException as exc:
+        log.info("%s: %s", failed, exc)
+
+
+async def _respond_quietly(interaction, *args, **kwargs) -> None:
+    """Send a button reply. Follow up only after the interaction was acknowledged."""
     response = getattr(interaction, "response", None)
     if response is None:
         return
-    await response.send_message(
+    is_done = getattr(response, "is_done", None)
+    if callable(is_done) and is_done():
+        followup = getattr(interaction, "followup", None)
+        if followup is None:
+            return
+        send = followup.send(*args, **kwargs)
+    else:
+        send = response.send_message(*args, **kwargs)
+    await _ignore_discord_http(
+        send,
+        expired="Image button interaction expired",
+        failed="Image button response failed",
+    )
+
+
+async def _reject_missing_image_cog(interaction) -> None:
+    await _respond_quietly(
+        interaction,
         "Image generation is unavailable right now.",
         ephemeral=True,
     )
@@ -811,13 +848,27 @@ class PromptDetailButton(ui.View):
     async def on_timeout(self) -> None:
         for item in self.children:
             item.disabled = True
-        await self.message.edit(view=self)
+        message = getattr(self, "message", None)
+        if message is None:
+            return
+        await _ignore_discord_http(
+            message.edit(view=self),
+            expired="Prompt buttons timed out after the image message was deleted",
+            failed="Could not disable prompt buttons after timeout",
+            expired_debug=True,
+        )
 
     @ui.button(label="See prompt details", style=discord.ButtonStyle.blurple)
     async def show_prompts(self, interaction: discord.Interaction, button: ui.Button):
         if interaction.user.id in self.already_clicked_prompt_details:
-            if not interaction.response.is_done():
-                await interaction.response.defer()
+            response = getattr(interaction, "response", None)
+            is_done = getattr(response, "is_done", None) if response is not None else None
+            if response is not None and callable(is_done) and not is_done():
+                await _ignore_discord_http(
+                    response.defer(),
+                    expired="Prompt details interaction expired",
+                    failed="Prompt details interaction could not be acknowledged",
+                )
             return
 
         embed = discord.Embed(
@@ -839,7 +890,7 @@ class PromptDetailButton(ui.View):
         embed.add_field(name="LLM prompt enhance", value=str(self.llm_prompt_enhance), inline=False)
         embed.add_field(name="Generation time", value=f"{self.gen_time:.2f} seconds", inline=False)
         self.already_clicked_prompt_details.add(interaction.user.id)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await _respond_quietly(interaction, embed=embed, ephemeral=True)
 
     @ui.button(label="Edit and Regenerate", style=discord.ButtonStyle.green)
     async def edit_regenerate_button(self, interaction: discord.Interaction, button: ui.Button):
@@ -847,16 +898,18 @@ class PromptDetailButton(ui.View):
         now = time.time()
         last_used = self._cooldown.get(interaction.user.id, 0)
         if now - last_used < self._cooldown_seconds:
-            await interaction.response.send_message(
+            await _respond_quietly(
+                interaction,
                 f"You're using this too quickly! Try again in {int(self._cooldown_seconds - (now - last_used))}s.",
-                ephemeral=True
+                ephemeral=True,
             )
             return
 
         self._cooldown[interaction.user.id] = now
 
         if self.model == Models.KREA2_IDENTITY_EDIT:
-            await interaction.response.send_message(
+            await _respond_quietly(
+                interaction,
                 "Option editing isn’t available for Identity Edit. "
                 "Use **Regenerate** for a new seed, or `/imagegen edit` with a new instruction.",
                 ephemeral=True,
@@ -879,8 +932,11 @@ class PromptDetailButton(ui.View):
             initial_negative_prompt=self.user_negative
         )
 
-        await interaction.response.send_message(
-            "Edit your options before regenerating:", view=view, ephemeral=True
+        await _respond_quietly(
+            interaction,
+            "Edit your options before regenerating:",
+            view=view,
+            ephemeral=True,
         )
 
     @ui.button(label="Regenerate", style=discord.ButtonStyle.gray)
@@ -889,9 +945,10 @@ class PromptDetailButton(ui.View):
         now = time.time()
         last_used = self._cooldown.get(interaction.user.id, 0)
         if now - last_used < self._cooldown_seconds:
-            await interaction.response.send_message(
+            await _respond_quietly(
+                interaction,
                 f"You're using this too quickly! Try again in {int(self._cooldown_seconds - (now - last_used))}s.",
-                ephemeral=True
+                ephemeral=True,
             )
             return
 
@@ -903,7 +960,8 @@ class PromptDetailButton(ui.View):
                 if self.retain_source
                 else "`/imagegen edit` again with the attachment"
             )
-            await interaction.response.send_message(
+            await _respond_quietly(
+                interaction,
                 "Cannot regenerate this edit — source image is no longer available. "
                 f"Run {again}.",
                 ephemeral=True,
@@ -936,11 +994,15 @@ class PromptDetailButton(ui.View):
         if cog is None or not hasattr(cog, "enqueue_image"):
             await _reject_missing_image_cog(interaction)
             return
-        await cog.enqueue_image(
-            image_entry,
-            interaction,
-            queued_message="Queued a new generation with the same settings!",
-            ephemeral=True,
+        await _ignore_discord_http(
+            cog.enqueue_image(
+                image_entry,
+                interaction,
+                queued_message="Queued a new generation with the same settings!",
+                ephemeral=True,
+            ),
+            expired="Regenerate interaction expired",
+            failed="Regenerate response failed",
         )
 
     @ui.button(label="Delete", style=discord.ButtonStyle.red)
@@ -956,10 +1018,34 @@ class PromptDetailButton(ui.View):
         )
 
         if not (is_author or is_moderator):
-            await interaction.response.send_message("You don't have permission to delete this message.", ephemeral=True)
+            await _respond_quietly(
+                interaction,
+                "You don't have permission to delete this message.",
+                ephemeral=True,
+            )
             return
 
-        await interaction.message.delete()
+        # Deleting the message does not acknowledge the click. Ack first so
+        # Discord does not expire the interaction while the delete is in flight.
+        response = getattr(interaction, "response", None)
+        if response is not None:
+            is_done = getattr(response, "is_done", None)
+            if not (callable(is_done) and is_done()):
+                await _ignore_discord_http(
+                    response.defer(),
+                    expired="Delete interaction expired before it could be acknowledged",
+                    failed="Delete interaction could not be acknowledged",
+                )
+
+        message = getattr(interaction, "message", None)
+        if message is None:
+            return
+        await _ignore_discord_http(
+            message.delete(),
+            expired="Image message was already deleted",
+            failed="Could not delete the image message",
+            expired_debug=True,
+        )
 
 
 class ImageDiffusion(Cog):

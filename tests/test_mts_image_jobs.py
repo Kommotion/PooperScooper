@@ -1002,10 +1002,11 @@ def test_delete_on_a_job_post_needs_the_moderator_role(monkeypatch, tmp_path):
         allowed_delete = AsyncMock()
         moderator = SimpleNamespace(
             user=SimpleNamespace(id=555, roles=[SimpleNamespace(id=42)]),
-            response=SimpleNamespace(send_message=AsyncMock()),
+            response=SimpleNamespace(send_message=AsyncMock(), defer=AsyncMock()),
             message=SimpleNamespace(delete=allowed_delete),
         )
         await _button(view, "Delete").callback(moderator)
+        moderator.response.defer.assert_awaited()
         allowed_delete.assert_awaited()
         moderator.response.send_message.assert_not_awaited()
 
