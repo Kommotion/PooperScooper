@@ -2,6 +2,19 @@
 
 This is the first versioned changelog for PooperScooper, covering about Oct 14–Nov 15, 2026.
 
+## v2.8.0 — 2026-11-18
+
+### New stuff
+
+- A weekly stats card posts every Sunday at 9 PM PT. It will move to #illuminaughty later.
+- The card is a dashboard of busiest and quietest channels, dead channels, top reactions, least-used custom emojis, commands, image generation, active members versus last week, busiest hours in PT, and voice.
+- `/stats optout` stops counting you as an active member in this server. `/stats optin` turns that back on.
+
+### Background
+
+- New weekly stats cog stores only aggregate counts in SQLite, plus this week's active-member list (cleared weekly) and the opt-out list. No message text, prompts, or per-person totals.
+- Owner command `!statscard` posts the current card without closing the week.
+
 ## v2.7.3 — 2026-11-16
 
 ### Background

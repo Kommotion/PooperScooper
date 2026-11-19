@@ -39,6 +39,7 @@ from cogs.utils.image_models import (
     ComfyQwenImage21Model,
     ComfyLustifyKrea2Model,
     ComfyKrea2IdentityEditModel,
+    sample_facts_for_image,
 )
 from PIL import Image as PILImage
 from cogs.utils import comfy_client
@@ -370,6 +371,74 @@ async def _reject_missing_image_cog(interaction) -> None:
         interaction,
         "Image generation is unavailable right now.",
         ephemeral=True,
+    )
+
+
+def _record_stats(bot, method_name, *args, **kwargs) -> None:
+    """Forward one aggregate to WeeklyStats. A missing cog or a stats error is ignored."""
+    try:
+        getter = getattr(bot, "get_cog", None)
+        if not callable(getter):
+            return
+        cog = getter("WeeklyStats")
+        if cog is None:
+            return
+        method = getattr(cog, method_name, None)
+        if not callable(method):
+            return
+        method(*args, **kwargs)
+    except Exception:
+        log.debug("weekly stats hook %s failed", method_name, exc_info=True)
+
+
+def _imagegen_stats_kwargs(image, *, seconds, success: bool) -> dict:
+    """Counters for one generation. Prompt text is intentionally left out."""
+    model = getattr(image, "model", None)
+    model_name = getattr(model, "value", None) or (str(model) if model is not None else "")
+    width = getattr(image, "output_width", None)
+    height = getattr(image, "output_height", None)
+    edit_mode = None
+    if model == Models.KREA2_IDENTITY_EDIT:
+        edit_mode = "identity_edit"
+        if width is None:
+            width = getattr(image, "edit_width", None)
+        if height is None:
+            height = getattr(image, "edit_height", None)
+    elif getattr(image, "source_image_bytes", None):
+        edit_mode = "img2img"
+    steps = None
+    sampler = None
+    loras: tuple[str, ...] = ()
+    try:
+        steps, sampler, loras = sample_facts_for_image(image)
+        loras = tuple(loras or ())
+    except Exception:
+        log.debug("imagegen stats could not read the workflow sampler")
+        steps, sampler, loras = None, None, ()
+    measured = seconds if isinstance(seconds, (int, float)) and not isinstance(seconds, bool) else None
+    return {
+        "model": model_name,
+        "loras": loras,
+        "edit_mode": edit_mode,
+        "width": width,
+        "height": height,
+        "steps": steps,
+        "sampler": sampler,
+        "seconds": measured,
+        "success": success,
+    }
+
+
+def _record_image_result(bot, image, *, seconds, success: bool) -> None:
+    interaction = getattr(image, "interaction", None)
+    guild_id = getattr(interaction, "guild_id", None) if interaction is not None else None
+    if guild_id is None:
+        return
+    _record_stats(
+        bot,
+        "record_imagegen",
+        guild_id,
+        **_imagegen_stats_kwargs(image, seconds=seconds, success=success),
     )
 
 
@@ -921,6 +990,13 @@ class PromptDetailButton(ui.View):
             await _reject_missing_image_cog(interaction)
             return
 
+        _record_stats(
+            getattr(interaction, "client", None),
+            "record_imagegen_followup",
+            self.guild_id,
+            "edit",
+        )
+
         view = ImageGenPrefView(
             cog=cog,
             default_model=self.model,
@@ -994,6 +1070,12 @@ class PromptDetailButton(ui.View):
         if cog is None or not hasattr(cog, "enqueue_image"):
             await _reject_missing_image_cog(interaction)
             return
+        _record_stats(
+            getattr(interaction, "client", None),
+            "record_imagegen_followup",
+            self.guild_id,
+            "regenerate",
+        )
         await _ignore_discord_http(
             cog.enqueue_image(
                 image_entry,
@@ -1616,8 +1698,10 @@ class ImageDiffusion(Cog):
                 self.comfy_startup_error = None
             except Exception as e:
                 await _send_generation_error(f"ComfyUI is not available: {e}")
+                _record_image_result(getattr(self, "bot", None), image, seconds=None, success=False)
                 return
 
+        started = time.perf_counter()
         try:
             output, positive, negative, gen_time = await asyncio.wait_for(
                 model.generate(image), timeout=outer_timeout
@@ -1641,18 +1725,22 @@ class ImageDiffusion(Cog):
                     "Try a smaller photo or a simpler prompt."
                 )
             await _send_generation_error(timeout_message)
+            _record_image_result(getattr(self, "bot", None), image, seconds=time.perf_counter() - started, success=False)
             return
         except discord.HTTPException:
             await _send_generation_error(
                 f"Error generating prompt: {_preview_prompt(image.prompt, 200)}."
             )
+            _record_image_result(getattr(self, "bot", None), image, seconds=time.perf_counter() - started, success=False)
             return
         except Exception as e:
             log.error(f"Generation failed: {str(e)}")
             await _send_generation_error(f"Image generation failed: {str(e)}")
+            _record_image_result(getattr(self, "bot", None), image, seconds=time.perf_counter() - started, success=False)
             return
 
         img = output.images[0]
+        _record_image_result(getattr(self, "bot", None), image, seconds=gen_time, success=True)
         try:
             await post_generation_result(
                 image.interaction.channel,

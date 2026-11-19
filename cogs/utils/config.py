@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field, SecretStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 log = logging.getLogger(__name__)
 
@@ -91,6 +91,27 @@ class MtsImageJobsConfig(BaseModel):
         return path.resolve()
 
 
+class WeeklyStatsGuildConfig(BaseModel):
+    """Per-guild weekly card settings. Missing keys keep the in-code defaults.
+
+    The report channel is an id. A leftover ``report_channel_name`` key is ignored.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = True
+    report_channel_id: int | None = None
+    weekday: int = Field(default=6, ge=0, le=6)
+    hour: int = Field(default=21, ge=0, le=23)
+    timezone: str = "America/Los_Angeles"
+
+
+class WeeklyStatsConfig(BaseModel):
+    """Optional config.json section. Absent means the cog uses DEFAULT_GUILDS."""
+
+    guilds: dict[str, WeeklyStatsGuildConfig] = Field(default_factory=dict)
+
+
 class BotConfig(BaseModel):
     token: SecretStr
     client_id: str
@@ -107,12 +128,14 @@ class BotConfig(BaseModel):
     thanksgiving_enabled: bool = False
     # Missing key stays off. The cog still loads; the watcher does nothing.
     mts_image_jobs: MtsImageJobsConfig = Field(default_factory=MtsImageJobsConfig)
+    # Missing key keeps the in-code weekly card defaults. Not a secret.
+    weekly_stats: WeeklyStatsConfig = Field(default_factory=WeeklyStatsConfig)
 
     def to_credentials_dict(self) -> dict[str, Any]:
         """Legacy dict shape used by Lavalink helpers and Wavelink bootstrap."""
         data = self.model_dump(
             mode="json",
-            exclude={"grok_webhook_url", "grok_webhook_key", "grok_webhook_key_header"},
+            exclude={"grok_webhook_url", "grok_webhook_key", "grok_webhook_key_header", "weekly_stats"},
         )
         data["token"] = self.token.get_secret_value()
         data["spotify_secret"] = self.spotify_secret.get_secret_value()

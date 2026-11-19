@@ -89,6 +89,7 @@ celerybeat-schedule
 
 # Runtime bot data (per-guild lists, trackers)
 data/*.json
+data/*.sqlite3*
 !data/.gitkeep
 # Local turkey-hunt control inbox and results. data/*.json does not cover this directory.
 data/turkey_hunt_ctl/

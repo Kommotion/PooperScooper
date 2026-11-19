@@ -8,6 +8,7 @@ import random
 import os
 import uuid
 from io import BytesIO
+from pathlib import Path, PurePosixPath
 
 import discord
 from typing import Literal, Optional
@@ -859,3 +860,162 @@ class ComfyKrea2IdentityEditModel(BaseComfyWorkflowModel):
                 )
             if image_infos:
                 comfy_client.delete_media_files(image_infos)
+
+
+# Sampler and LoRA nodes read for weekly stats. Values that are links, or
+# that disagree across nodes, are left unknown instead of guessed.
+_PRIMARY_SAMPLER_TYPES = frozenset({"KSampler", "KSamplerAdvanced"})
+_SAMPLER_SELECT_TYPES = frozenset({"KSamplerSelect"})
+_STEP_SOURCE_TYPES = frozenset({"BasicScheduler"})
+_LORA_LOADER_TYPES = frozenset({"LoraLoader", "LoraLoaderModelOnly"})
+
+
+def workflow_path_for(model, *, enhance: bool = False) -> str | None:
+    """API workflow file the model actually submits. None when the model is unknown."""
+    if model == Models.KREA2_TURBO:
+        return KREA2_TURBO_ENHANCE_WORKFLOW_PATH if enhance else KREA2_TURBO_WORKFLOW_PATH
+    if model == Models.REDCRAFT:
+        return REDCRAFT_ENHANCE_WORKFLOW_PATH if enhance else REDCRAFT_WORKFLOW_PATH
+    return {
+        Models.ANIME_WAI_ILLUSTRIOUS: WAI_ILLUSTRIOUS_WORKFLOW_PATH,
+        Models.ANIMA_AESTHETIC: ANIMA_AESTHETIC_WORKFLOW_PATH,
+        Models.ONE_OBSESSION_ILLUSTRIOUS: ONE_OBSESSION_ILLUSTRIOUS_WORKFLOW_PATH,
+        Models.ONE_OBSESSION_ANIMA: ONE_OBSESSION_ANIMA_WORKFLOW_PATH,
+        Models.FLUX3_KLEIN_INT8: KLEIN_WORKFLOW_PATH,
+        Models.QWEN_IMAGE_21: QWEN_IMAGE_21_WORKFLOW_PATH,
+        Models.LUSTIFY: LUSTIFY_KREA2_WORKFLOW_PATH,
+        Models.KREA2_IDENTITY_EDIT: KREA2_IDENTITY_EDIT_WORKFLOW_PATH,
+    }.get(model)
+
+
+def _resolve_workflow_path(path: str) -> Path:
+    direct = Path(path)
+    if direct.is_file():
+        return direct
+    root = Path(__file__).resolve().parents[2]
+    parts = Path(path).parts
+    if parts and parts[0] == ".":
+        parts = parts[1:]
+    return root.joinpath(*parts)
+
+
+def _workflow_nodes(workflow: dict):
+    if not isinstance(workflow, dict):
+        return
+    nodes = workflow.get("nodes")
+    ui_shape = isinstance(nodes, list) and any(
+        isinstance(node, dict) and node.get("type") and not node.get("class_type") for node in nodes
+    )
+    if ui_shape:
+        for node in nodes:
+            if isinstance(node, dict):
+                yield node
+        return
+    for node in workflow.values():
+        if isinstance(node, dict) and (node.get("class_type") or node.get("type")):
+            yield node
+
+
+def _node_class(node: dict) -> str:
+    return str(node.get("class_type") or node.get("type") or "")
+
+
+def _node_inputs(node: dict) -> dict:
+    inputs = node.get("inputs")
+    return inputs if isinstance(inputs, dict) else {}
+
+
+def _node_bypassed(node: dict) -> bool:
+    # ComfyUI mode 4 is bypass. Bypassed loaders are not part of the prompt.
+    return node.get("mode") in {4, "4"}
+
+
+def _step_count(value):
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return int(value)
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return None
+
+
+def _sampler_name(value) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text or None
+
+
+def _lora_stem(value) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stem = PurePosixPath(value.strip().replace("\\", "/")).stem.strip()
+    return stem or None
+
+
+def _unanimous(values: list):
+    if not values or any(item is None for item in values):
+        return None
+    first = values[0]
+    if any(item != first for item in values):
+        return None
+    return first
+
+
+def workflow_sample_facts(workflow: dict) -> tuple[int | None, str | None, tuple[str, ...]]:
+    """Steps, sampler name, and LoRA stems from a workflow graph.
+
+    KSampler and KSamplerAdvanced supply both numbers when their inputs are
+    literals. KSamplerSelect plus BasicScheduler are used only when those
+    sampler nodes are absent. LoRA names come from LoraLoader and
+    LoraLoaderModelOnly. Bypassed nodes are ignored. Linked or conflicting
+    values become None rather than a guess. Prompt text is not read.
+    """
+    if not isinstance(workflow, dict):
+        return None, None, ()
+    primary_steps: list = []
+    primary_samplers: list = []
+    extra_steps: list = []
+    extra_samplers: list = []
+    loras: list[str] = []
+    seen: set[str] = set()
+    for node in _workflow_nodes(workflow):
+        if _node_bypassed(node):
+            continue
+        kind = _node_class(node)
+        inputs = _node_inputs(node)
+        if kind in _PRIMARY_SAMPLER_TYPES:
+            primary_steps.append(_step_count(inputs.get("steps")))
+            primary_samplers.append(_sampler_name(inputs.get("sampler_name")))
+        elif kind in _SAMPLER_SELECT_TYPES:
+            extra_samplers.append(_sampler_name(inputs.get("sampler_name")))
+        elif kind in _STEP_SOURCE_TYPES:
+            extra_steps.append(_step_count(inputs.get("steps")))
+        elif kind in _LORA_LOADER_TYPES:
+            stem = _lora_stem(inputs.get("lora_name"))
+            if stem and stem not in seen:
+                seen.add(stem)
+                loras.append(stem)
+    if primary_steps or primary_samplers:
+        steps = _unanimous(primary_steps)
+        sampler = _unanimous(primary_samplers)
+    else:
+        steps = _unanimous(extra_steps) if extra_steps else None
+        sampler = _unanimous(extra_samplers) if extra_samplers else None
+    return steps, sampler, tuple(loras)
+
+
+def sample_facts_for_image(image) -> tuple[int | None, str | None, tuple[str, ...]]:
+    """Read sampler facts from the workflow file this image's model submits."""
+    path = workflow_path_for(
+        getattr(image, "model", None),
+        enhance=bool(getattr(image, "llm_prompt_enhance", False)),
+    )
+    if not path:
+        return None, None, ()
+    with open(_resolve_workflow_path(path), "r", encoding="utf-8") as handle:
+        workflow = json.load(handle)
+    return workflow_sample_facts(workflow)
