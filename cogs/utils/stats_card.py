@@ -497,8 +497,28 @@ def render_stats_card(
     guild_name: str,
     *,
     watermark: str | None = None,
+    scope: str = "weekly",
 ) -> bytes:
-    """Render one weekly card. Empty stats still produce a valid PNG."""
+    """Render the weekly card, or the all-time card when ``scope`` is ``all_time``.
+
+    The default stays the weekly Design A card. Callers that monkeypatch this
+    function still receive ``(stats, names, guild_name)``.
+    """
+    if scope == "all_time":
+        return render_alltime_card(stats, names, guild_name, watermark=watermark)
     from cogs.utils.stats_designs import render_design
 
     return render_design(DEFAULT_CARD_DESIGN, stats, names, guild_name, watermark=watermark)
+
+
+def render_alltime_card(
+    stats: WeeklyStats,
+    names: CardNames | dict | None,
+    guild_name: str,
+    *,
+    watermark: str | None = None,
+) -> bytes:
+    """All-time Design A card. Empty stats still produce a valid PNG."""
+    from cogs.utils.stats_designs.design_a import render_alltime
+
+    return render_alltime(stats, names, guild_name, watermark=watermark)

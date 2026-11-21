@@ -14,13 +14,15 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime
 from io import BytesIO
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from cogs.utils.stats_card import CardNames, render_stats_card
+from cogs.utils.stats_card import CardNames, render_alltime_card, render_stats_card
+from cogs.utils.stats_commands import alias_map_from_bot, alias_map_from_source, canonical_command_name
 from cogs.utils.stats_schedule import LA, LA_NAME, PostSchedule, due_week
 from cogs.utils.stats_store import StatsStore
 
@@ -140,6 +142,7 @@ class WeeklyStats(commands.Cog):
         self._voice_seeded = False
         # (guild_id, week_start iso) already warned about a missing report channel.
         self._missing_channel_warned: set[tuple[int, str]] = set()
+        self._source_command_map: dict[str, str] | None = None
 
     async def cog_load(self) -> None:
         self._start_loops()
@@ -286,7 +289,7 @@ class WeeklyStats(commands.Cog):
         if user is not None and getattr(user, "bot", False):
             return
         name = getattr(command, "qualified_name", None) or getattr(command, "name", None)
-        if not name:
+        if not name or not str(name).strip():
             return
         self.store.record_command(int(guild_id), str(name), "slash")
 
@@ -301,9 +304,25 @@ class WeeklyStats(commands.Cog):
             return
         command = getattr(ctx, "command", None)
         name = getattr(command, "qualified_name", None) if command is not None else None
-        if not name:
+        if not name or not str(name).strip():
             return
-        self.store.record_command(int(guild_id), str(name), "prefix")
+        raw = str(name).strip()
+        mapping = self._prefix_command_map()
+        canonical = mapping.get(raw.casefold())
+        if canonical is None:
+            canonical = canonical_command_name(raw, mapping)
+        if not canonical:
+            return
+        self.store.record_command(int(guild_id), canonical, "prefix")
+
+    def _prefix_command_map(self) -> dict[str, str]:
+        """Bot command tree when it is loaded. Otherwise the source scan."""
+        if getattr(self.bot, "commands", None) is not None:
+            return alias_map_from_bot(self.bot)
+        if self._source_command_map is None:
+            root = Path(__file__).resolve().parents[1]
+            self._source_command_map = alias_map_from_source(root)
+        return self._source_command_map
 
     def _cut_open_voice(self, guild_id: int, now: datetime) -> None:
         """Close open voice sessions so their minutes land in the week being posted."""
@@ -447,11 +466,35 @@ class WeeklyStats(commands.Cog):
         return CardNames(channels, {}, emojis)
 
     async def _send_card(self, destination, stats, names: CardNames, guild_name: str) -> None:
-        png = render_stats_card(stats, names, guild_name)
-        image = discord.File(fp=BytesIO(png), filename="weekly-stats.png")
+        import asyncio
+
+        from cogs.utils.emoji_cache import prefetch
+
+        custom_rows = []
+        for attr in (
+            "top_reactions",
+            "least_custom_emojis",
+            "least_custom_emojis_weekly",
+            "top_reactions_all_time",
+        ):
+            custom_rows.extend(getattr(stats, attr, ()) or ())
+        custom_ids = [row.emoji_key for row in custom_rows if getattr(row, "is_custom", False)]
+        await prefetch(custom_ids)
+
+        def _render_pair():
+            weekly = render_stats_card(stats, names, guild_name)
+            alltime = render_alltime_card(stats, names, guild_name)
+            return weekly, alltime
+
+        weekly_png, alltime_png = await asyncio.to_thread(_render_pair)
+        weekly_image = discord.File(fp=BytesIO(weekly_png), filename="weekly-stats.png")
+        alltime_image = discord.File(fp=BytesIO(alltime_png), filename="alltime-stats.png")
         await destination.send(
-            content=f"Weekly stats for {guild_name} · week of {stats.week_start.isoformat()}",
-            file=image,
+            content=(
+                f"This week and all time for {guild_name}"
+                f" · week of {stats.week_start.isoformat()}"
+            ),
+            files=[weekly_image, alltime_image],
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
@@ -483,12 +526,14 @@ class WeeklyStats(commands.Cog):
         guild = self._guild(guild_id)
         known_emojis = self._known_custom_emojis(guild_id)
         known_channels = self._known_channel_ids(guild)
+        command_map = self._prefix_command_map()
         stats = self.store.build_stats(
             guild_id,
             now,
             week_start=due,
             known_custom_emojis=known_emojis,
             known_channel_ids=known_channels,
+            command_map=command_map,
         )
         channel = self._report_channel(guild, cfg)
         if channel is None:
@@ -507,6 +552,7 @@ class WeeklyStats(commands.Cog):
             now,
             known_custom_emojis=known_emojis,
             known_channel_ids=known_channels,
+            command_map=command_map,
         )
         log.info("posted weekly stats guild=%s week=%s", guild_id, due.isoformat())
         return True
@@ -593,6 +639,7 @@ class WeeklyStats(commands.Cog):
             now,
             known_custom_emojis=known,
             known_channel_ids=known_channels,
+            command_map=self._prefix_command_map(),
         )
         names = self._card_names(guild, stats)
         guild_name = str(getattr(guild, "name", None) or target)

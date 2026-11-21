@@ -91,6 +91,7 @@ celerybeat-schedule
 data/*.json
 data/*.sqlite3*
 !data/.gitkeep
+data/emoji_cache/
 # Local turkey-hunt control inbox and results. data/*.json does not cover this directory.
 data/turkey_hunt_ctl/
 # MTS image-job payloads are ignored by data/mts_image_jobs/.gitignore.

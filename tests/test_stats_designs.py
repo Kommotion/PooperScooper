@@ -19,6 +19,8 @@ from cogs.utils.stats_designs._common import (
     metric_peak,
 )
 from cogs.utils.stats_designs.design_a import WIDTH as DESIGN_A_WIDTH
+from cogs.utils.stats_designs.design_a import render_alltime
+from cogs.utils.stats_card import render_alltime_card
 from scripts.render_stats_designs import GUILD_NAME, build_preview
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
@@ -167,6 +169,22 @@ def test_short_lists_share_the_long_list_scale():
     emoji_peak = metric_peak(rare, "all_time", metric_peak(reactions, "all_time"))
     assert emoji_peak == 440
     assert bar_fill_width(62, emoji_peak, 200) < 40
+
+
+def test_weekly_and_alltime_cards_are_distinct_pngs(tmp_path_factory):
+    stats, names, empty = build_preview(tmp_path_factory.mktemp("split") / "weekly_stats.sqlite3")
+    hidden = _HiddenNames(names.channels, names.emojis)
+    weekly = _open(render_stats_card(stats, hidden, GUILD_NAME))
+    same = _open(render_design("A", stats, hidden, GUILD_NAME))
+    assert list(weekly.getdata()) == list(same.getdata())
+    alltime = _open(render_alltime_card(stats, hidden, GUILD_NAME))
+    blank = _open(render_alltime(empty, hidden, "Empty guild"))
+    assert weekly.size == alltime.size == blank.size
+    assert list(weekly.getdata()) != list(alltime.getdata())
+    # Header rule: indigo border on the weekly card, gold on the all-time card.
+    assert weekly.getpixel((40, 114))[:3] != alltime.getpixel((40, 114))[:3]
+    assert alltime.getpixel((40, 114))[0] > alltime.getpixel((40, 114))[2]
+    render_alltime(empty, _Guard(channels=names.channels, emojis=names.emojis, users={7: "LeakUser7"}), "Empty guild")
 
 
 def test_card_names_mapping_is_not_required_for_users(tmp_path_factory):

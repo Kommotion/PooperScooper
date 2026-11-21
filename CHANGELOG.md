@@ -2,6 +2,22 @@
 
 This is the first versioned changelog for PooperScooper, covering about Oct 14–Nov 15, 2026.
 
+## v2.8.1 — 2026-11-21
+
+### New stuff
+
+- Sunday's stats post is now two cards, This Week and All Time, so week numbers and history are not mixed in one table. The week card has vs-last-week changes; all-time is since May 18.
+- Custom emojis on the cards now show the real image plus the name.
+- All-time history goes back about six months. Image gen and voice say when tracking started, instead of looking like a long stretch of zeros.
+- Command rankings only count real bot commands (no glued leftovers like !playhttps://...).
+
+### Background
+
+- Offline REST backfill script (checkpoints, no double-counting, does not take the live bot down)
+- On-disk emoji image cache
+- Command registry filter and a one-time cleanup of junk prefix-command rows
+- Tests updated for the two cards, backfill, emoji cache, and command filter
+
 ## v2.8.0 — 2026-11-18
 
 ### New stuff

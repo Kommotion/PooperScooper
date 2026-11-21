@@ -322,6 +322,7 @@ class Row:
     weekly: int
     all_time: int
     emoji: str | None = None
+    custom_id: str | None = None
 
 
 @dataclass
@@ -329,9 +330,12 @@ class Kpi:
     label: str
     current: int
     previous: int | None
+    hide_delta: bool = False
 
     @property
     def delta(self) -> str:
+        if self.hide_delta:
+            return ""
         return tone_of(self.current, self.previous)[0]
 
     @property
@@ -370,6 +374,12 @@ class View:
     kept: int
     regenerated: int
     edited: int
+    history_messages: list | None = None
+    history_reactions: list | None = None
+    history_members: list | None = None
+    earliest: str = ""
+    tracking_since: str = ""
+    image_runs_all_time: int = 0
 
 
 def _attr_map(names, attr: str) -> dict:
@@ -430,9 +440,27 @@ def _channel_label(channels: dict[int, str], channel_id: int, hashed: bool) -> s
     return f"#{name}" if hashed else name
 
 
-def _colon(name: str) -> str:
+def _short_name(name: str) -> str:
+    """Emoji name with the wrapping colons removed."""
     cleaned = str(name or "").strip().strip(":")
-    return f":{cleaned}:" if cleaned else ":emoji:"
+    return cleaned or "emoji"
+
+
+def _unicode_row_label(glyph: str) -> str:
+    """Lowercased Unicode name beside a glyph. Empty when no real name exists."""
+    if not glyph:
+        return ""
+    label = emoji_fallback_label(glyph)
+    if not label or label == glyph or label == "emoji":
+        return ""
+    return label
+
+
+def _glyph_size(row_h: float, label_size: int) -> int:
+    """Icon edge. Taller rows grow past the old font cap and keep a few pixels of pad."""
+    room = max(12, int(row_h) - 2)
+    preferred = max(int(row_h) - 4, int(label_size) + 4)
+    return min(room, max(12, preferred))
 
 
 def _command_label(row) -> str:
@@ -449,56 +477,121 @@ def _dim_pairs(rows) -> list[tuple[str, int]]:
     return [(str(row.key), int(row.weekly)) for row in rows if int(row.weekly) > 0]
 
 
-def prepare(stats, names, guild_name: str) -> View:
+def _month_day_year(value) -> str:
+    return f"{value.strftime('%b')} {value.day}, {value.year}"
+
+
+def prepare(stats, names, guild_name: str, *, scope: str = "weekly", least_metric: str = "all_time") -> View:
     channels = _channel_map(names)
     emojis = _emoji_map(names)
-    heat = _grid(stats.heatmap)
-    voice_heat = _grid(stats.voice_heatmap)
+    all_time = scope == "all_time"
+    heat_source = stats.heatmap
+    voice_source = stats.voice_heatmap
+    if all_time and getattr(stats, "heatmap_all_time", None):
+        heat_source = stats.heatmap_all_time
+    if all_time and getattr(stats, "voice_heatmap_all_time", None):
+        voice_source = stats.voice_heatmap_all_time
+    heat = _grid(heat_source)
+    voice_heat = _grid(voice_source)
     reactions: list[Row] = []
     for row in stats.top_reactions:
         if row.is_custom:
-            label = _colon(emojis.get(row.emoji_key) or row.name)
-            reactions.append(Row(label, row.weekly, row.all_time, None))
+            label = _short_name(emojis.get(row.emoji_key) or row.name)
+            reactions.append(Row(label, row.weekly, row.all_time, None, str(row.emoji_key)))
         else:
             glyph = str(row.name or row.emoji_key or "")
-            reactions.append(Row("", row.weekly, row.all_time, glyph or None))
+            reactions.append(Row(_unicode_row_label(glyph), row.weekly, row.all_time, glyph or None))
+    least_source = stats.least_custom_emojis
+    if least_metric == "weekly":
+        weekly_least = getattr(stats, "least_custom_emojis_weekly", None)
+        if weekly_least:
+            least_source = weekly_least
+    if all_time:
+        least_source = stats.least_custom_emojis
     least = [
-        Row(_colon(emojis.get(row.emoji_key) or row.name), row.weekly, row.all_time)
-        for row in stats.least_custom_emojis
+        Row(
+            _short_name(emojis.get(row.emoji_key) or row.name),
+            row.weekly,
+            row.all_time,
+            None,
+            str(row.emoji_key) if row.is_custom else None,
+        )
+        for row in least_source
     ]
     image = stats.imagegen
     models = [(_model_label(row.key), int(row.weekly)) for row in image.models if int(row.weekly) > 0]
     if not models:
         models = [(_model_label(row.key), int(row.all_time)) for row in image.models if int(row.all_time) > 0]
-    return View(
-        guild=str(guild_name or "Server"),
-        week=_week_label(stats),
-        kpis=[
+    channel_rows = stats.top_channels
+    quiet_rows = stats.bottom_channels
+    dead_rows = stats.dead_channels
+    command_rows = stats.top_commands
+    least_command_rows = stats.bottom_commands
+    reaction_rows = None
+    voice_rows = stats.top_voice_channels
+    if all_time:
+        channel_rows = getattr(stats, "top_channels_all_time", None) or ()
+        quiet_rows = getattr(stats, "bottom_channels_all_time", None) or ()
+        dead_rows = ()
+        command_rows = getattr(stats, "top_commands_all_time", None) or ()
+        least_command_rows = getattr(stats, "bottom_commands_all_time", None) or ()
+        reaction_rows = getattr(stats, "top_reactions_all_time", None) or ()
+        voice_rows = getattr(stats, "top_voice_channels_all_time", None) or ()
+        reactions = []
+        for row in reaction_rows:
+            if row.is_custom:
+                label = _short_name(emojis.get(row.emoji_key) or row.name)
+                reactions.append(Row(label, row.weekly, row.all_time, None, str(row.emoji_key)))
+            else:
+                glyph = str(row.name or row.emoji_key or "")
+                reactions.append(Row(_unicode_row_label(glyph), row.weekly, row.all_time, glyph or None))
+    history = list(getattr(stats, "week_history", ()) or ())
+    earliest = getattr(stats, "earliest_week", None) or stats.week_start
+    live_since = getattr(stats, "live_since", None)
+    if live_since is None:
+        from datetime import date as _date
+
+        live_since = _date(2026, 11, 19)
+    messages_total = int(stats.messages_all_time)
+    reactions_total = int(stats.reactions_all_time)
+    commands_total = int(stats.commands_all_time)
+    if all_time:
+        kpis = [
+            Kpi("Messages", messages_total, None, hide_delta=True),
+            Kpi("Reactions", reactions_total, None, hide_delta=True),
+            Kpi("Commands", commands_total, None, hide_delta=True),
+        ]
+    else:
+        kpis = [
             Kpi("Messages", int(stats.messages_weekly), stats.messages_last_week),
             Kpi("Reactions", int(stats.reactions_weekly), stats.reactions_last_week),
             Kpi("Active members", int(stats.active_members), stats.active_members_last_week),
             Kpi("Voice minutes", int(stats.voice_minutes), stats.voice_minutes_last_week),
             Kpi("Image gens", int(image.generation_count), stats.imagegen_last_week),
-        ],
+        ]
+    return View(
+        guild=str(guild_name or "Server"),
+        week=_week_label(stats),
+        kpis=kpis,
         top_channels=[
             Row(_channel_label(channels, row.channel_id, True), row.weekly, row.all_time)
-            for row in stats.top_channels
+            for row in channel_rows
         ],
         bottom_channels=[
             Row(_channel_label(channels, row.channel_id, True), row.weekly, row.all_time)
-            for row in stats.bottom_channels
+            for row in quiet_rows
         ],
         dead_channels=[
             Row(_channel_label(channels, row.channel_id, True), row.weekly, row.all_time)
-            for row in stats.dead_channels
+            for row in dead_rows
         ],
-        top_commands=[Row(_command_label(row), row.weekly, row.all_time) for row in stats.top_commands],
-        bottom_commands=[Row(_command_label(row), row.weekly, row.all_time) for row in stats.bottom_commands],
+        top_commands=[Row(_command_label(row), row.weekly, row.all_time) for row in command_rows],
+        bottom_commands=[Row(_command_label(row), row.weekly, row.all_time) for row in least_command_rows],
         reactions=reactions,
         least_emojis=least,
         voice_channels=[
             Row(_channel_label(channels, row.channel_id, False), row.weekly, row.all_time)
-            for row in stats.top_voice_channels
+            for row in voice_rows
         ],
         voice_minutes=int(stats.voice_minutes),
         voice_all_time=int(stats.voice_minutes_all_time),
@@ -518,6 +611,12 @@ def prepare(stats, names, guild_name: str) -> View:
         kept=int(image.kept_first),
         regenerated=int(image.regenerate_count),
         edited=int(image.edit_count),
+        history_messages=[int(point.messages) for point in history],
+        history_reactions=[int(point.reactions) for point in history],
+        history_members=[int(point.active_members) for point in history],
+        earliest=_month_day_year(earliest),
+        tracking_since=_month_day_year(live_since),
+        image_runs_all_time=int(getattr(image, "generation_count_all_time", 0) or 0),
     )
 
 
@@ -598,6 +697,33 @@ def _rows_fit(height: int, count: int, min_row: int, max_row: int, floor: int) -
     return shown, count - shown, height / slots
 
 
+def _scaled_rgba(image: Image.Image, size: int) -> Image.Image:
+    """Fit ``image`` inside a square of ``size`` without stretching it."""
+    rgba = image.convert("RGBA")
+    width, height = rgba.size
+    longest = max(width, height, 1)
+    scale = max(1, int(size)) / longest
+    resized = (
+        max(1, int(round(width * scale))),
+        max(1, int(round(height * scale))),
+    )
+    if resized != rgba.size:
+        rgba = rgba.resize(resized, Image.Resampling.LANCZOS)
+    return rgba
+
+
+def _custom_emoji_image(emoji_id: str | None, size: int) -> Image.Image | None:
+    """Cached custom emoji for a row, or None so the caller draws the text label."""
+    if not emoji_id:
+        return None
+    from cogs.utils.emoji_cache import load_image
+
+    cached = load_image(emoji_id)
+    if cached is None:
+        return None
+    return _scaled_rgba(cached, size)
+
+
 def row_value(row: Row, metric: str) -> int:
     return int(row.all_time if metric == "all_time" else row.weekly)
 
@@ -661,12 +787,16 @@ def draw_metric_rows(
     if not rows:
         centered(canvas, (x0 + pad, cursor_y, x1 - pad, y1 - pad), empty, label_font, muted)
         return
-    samples = [fmt(row.weekly) for row in rows] + ([fmt(row.all_time) for row in rows] if show_all_time else [])
+    if show_all_time:
+        samples = [fmt(row.weekly) for row in rows] + [fmt(row.all_time) for row in rows]
+    else:
+        samples = [fmt(row_value(row, metric)) for row in rows]
     number_w = max(int(canvas.draw.textlength(sample, font=value_font)) for sample in samples) + 10
     all_right = x1 - pad
     week_right = all_right - (number_w + 14 if show_all_time else 0)
     if show_columns:
-        canvas.text((week_right, cursor_y), "Week", value_font, muted, anchor="rt")
+        header = "Week" if show_all_time or metric != "all_time" else "Total"
+        canvas.text((week_right, cursor_y), header, value_font, muted, anchor="rt")
         if show_all_time:
             canvas.text((all_right, cursor_y), "All", value_font, muted, anchor="rt")
         cursor_y += int(label_font.size) + 6
@@ -681,13 +811,14 @@ def draw_metric_rows(
     number_left = week_right - number_w
     bar_right = number_left - 12
     room = max(0, bar_right - inner_left)
+    glyph_size = _glyph_size(row_h, font_h)
     if emoji_only:
         label_w = font_h + 14
     else:
         labels = [row.label for row in visible if row.label]
         natural = max((int(canvas.draw.textlength(sample, font=label_font)) for sample in labels), default=0)
-        if any(row.emoji and row.label for row in visible):
-            natural += font_h + 10
+        if any(row.custom_id or (row.emoji and row.label) for row in visible):
+            natural += glyph_size + 6
         reserve = 56 if room > 140 else max(28, room // 4)
         label_w = min(max(font_h + 8, natural + 4), max(font_h + 8, room - reserve))
     bar_x = inner_left + label_w + 8
@@ -697,8 +828,14 @@ def draw_metric_rows(
         cy = cursor_y + index * row_h + row_h / 2
         label_x = inner_left
         room = max(8, bar_x - 8 - inner_left)
-        if row.emoji:
-            glyph_size = max(12, min(int(row_h) - 2, int(label_font.size) + 4))
+        custom = _custom_emoji_image(row.custom_id, glyph_size)
+        if custom is not None:
+            canvas.paste(custom, (label_x, cy - custom.size[1] / 2))
+            label_x += custom.size[0] + 6
+            room = max(8, bar_x - 8 - label_x)
+            if row.label:
+                canvas.text((label_x, cy), row.label, label_font, ink, max_width=room, anchor="lm")
+        elif row.emoji:
             glyph = emoji_glyph(row.emoji, glyph_size)
             if glyph is None:
                 fallback = emoji_fallback_label(row.emoji)
@@ -718,7 +855,8 @@ def draw_metric_rows(
             fill_w = bar_fill_width(value, peak, bar_w)
             if fill_w > 1:
                 canvas.rounded((bar_x, by0, bar_x + fill_w, by0 + bar_height), bar_height / 2, bar)
-        canvas.text((week_right, cy), fmt(row.weekly), value_font, ink, anchor="rm")
+        primary = int(row.weekly) if show_all_time else row_value(row, metric)
+        canvas.text((week_right, cy), fmt(primary), value_font, ink, anchor="rm")
         if show_all_time:
             canvas.text((all_right, cy), fmt(row.all_time), value_font, muted, anchor="rm")
     if extra:
@@ -745,14 +883,17 @@ def draw_kpi(
     pad = 14
     canvas.text((x0 + pad, y0 + 12), kpi.label.upper(), label_font, muted, max_width=x1 - x0 - pad * 2)
     canvas.text((x0 + pad, y0 + 12 + label_font.size + 8), fmt(kpi.current), value_font, ink, anchor="lt")
-    color = tone_color(kpi.tone, up, down, muted, accent)
-    delta_y = y1 - pad - 2
     if spark is not None:
         sw, sh = spark.size
         sx = x1 - pad - sw
         sy = y1 - pad - sh
         if sx > x0 + pad:
             canvas.paste(spark, (sx, sy))
+    if kpi.hide_delta or not kpi.delta:
+        return
+    color = tone_color(kpi.tone, up, down, muted, accent)
+    delta_y = y1 - pad - 2
+    if spark is not None:
         delta_y = sy - 4
     canvas.text((x0 + pad, delta_y), kpi.delta, delta_font, color, max_width=x1 - x0 - pad * 2 - (spark.size[0] + 8 if spark is not None else 0), anchor="lb")
 
@@ -813,6 +954,32 @@ def chart_area(values: list[int], size: tuple[int, int], line, fill, bg, grid) -
         ax.scatter(xs, ys, s=16, color=hx(line), zorder=3)
         ax.set_xlim(-0.15, len(series) - 0.85)
         ax.set_ylim(0, top)
+        ax.axis("off")
+
+    return render_figure(size[0], size[1], hx(bg), draw)
+
+
+def chart_trends(series: list[tuple[list[int], tuple]], size: tuple[int, int], bg, grid) -> Image.Image:
+    """One line per series. Each line is scaled to its own peak so member counts stay visible."""
+    cleaned = []
+    for values, color in series:
+        points = [int(value) for value in values] or [0]
+        cleaned.append((points, color))
+    width = max(1, len(cleaned[0][0]) if cleaned else 1)
+
+    def draw(fig: Figure) -> None:
+        ax = fig.add_axes((0.03, 0.08, 0.94, 0.86))
+        ax.set_facecolor(hx(bg))
+        ax.axhline(0.5, color=hx(grid), linewidth=0.8, zorder=0)
+        for values, color in cleaned:
+            peak = max(values) if values else 0
+            ys = [value / peak if peak else 0.0 for value in values]
+            if len(ys) == 1:
+                ys = [ys[0], ys[0]]
+            xs = np.linspace(0, max(1, width - 1), len(ys))
+            ax.plot(xs, ys, color=hx(color), linewidth=2.2, solid_capstyle="round", zorder=2)
+        ax.set_xlim(-0.15, max(1, width - 1) + 0.15)
+        ax.set_ylim(-0.05, 1.08)
         ax.axis("off")
 
     return render_figure(size[0], size[1], hx(bg), draw)

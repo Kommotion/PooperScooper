@@ -109,6 +109,27 @@ CREATE TABLE IF NOT EXISTS opt_outs (
     user_id INTEGER NOT NULL,
     PRIMARY KEY (guild_id, user_id)
 );
+CREATE TABLE IF NOT EXISTS backfill_span (
+    guild_id INTEGER NOT NULL,
+    channel_id INTEGER NOT NULL,
+    low_id INTEGER NOT NULL,
+    high_id INTEGER NOT NULL,
+    PRIMARY KEY (guild_id, channel_id, low_id)
+);
+CREATE TABLE IF NOT EXISTS backfill_week (
+    guild_id INTEGER NOT NULL,
+    week_start TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    item_key TEXT NOT NULL,
+    item_label TEXT NOT NULL DEFAULT '',
+    flag INTEGER NOT NULL DEFAULT 0,
+    amount INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (guild_id, week_start, kind, item_key)
+);
+CREATE TABLE IF NOT EXISTS backfill_meta (
+    guild_id INTEGER PRIMARY KEY,
+    live_at TEXT
+);
 """
 
 _ZERO_TABLES = (
@@ -190,6 +211,9 @@ class ImageGenSummary:
     edit_count: int
     kept_first: int
     generation_count: int
+    generation_count_all_time: int = 0
+    success_count_all_time: int = 0
+    error_count_all_time: int = 0
 
 
 def _empty_imagegen() -> ImageGenSummary:
@@ -243,10 +267,37 @@ class WeeklyStats:
     reactions_last_week: int | None = None
     voice_minutes_last_week: int | None = None
     imagegen_last_week: int | None = None
+    # All-time card. Defaults keep older constructors on the weekly card.
+    heatmap_all_time: tuple[tuple[int, ...], ...] = ()
+    voice_heatmap_all_time: tuple[tuple[int, ...], ...] = ()
+    week_history: tuple = ()
+    earliest_week: date | None = None
+    live_since: date | None = None
+    top_channels_all_time: tuple[ChannelCount, ...] = ()
+    bottom_channels_all_time: tuple[ChannelCount, ...] = ()
+    top_reactions_all_time: tuple[ReactionCount, ...] = ()
+    least_custom_emojis_weekly: tuple[ReactionCount, ...] = ()
+    top_commands_all_time: tuple[CommandCount, ...] = ()
+    bottom_commands_all_time: tuple[CommandCount, ...] = ()
+    top_voice_channels_all_time: tuple[ChannelCount, ...] = ()
 
     @property
     def week_end(self) -> date:
         return self.week_start + timedelta(days=6)
+
+
+# Image gen and voice were not backfilled. Live tracking starts on this day
+# unless backfill_meta.live_at names an earlier or later moment.
+LIVE_TRACKING_SINCE = date(2026, 11, 19)
+
+
+@dataclass(frozen=True)
+class WeekPoint:
+    week_start: date
+    messages: int
+    reactions: int
+    active_members: int
+    commands: int
 
 
 class _Buffer:
@@ -367,14 +418,35 @@ def _summary_payload(stats: WeeklyStats) -> dict:
     }
 
 
+@dataclass(frozen=True)
+class BackfillPart:
+    """One week of counts already filtered to messages inside a new span.
+
+    ``active_ids`` are current-week authors only. ``member_delta`` is the
+    number of newly seen historical authors. Those ids are not stored.
+    """
+
+    into_current_week: bool
+    week_start: date
+    messages: int = 0
+    reactions: tuple = ()
+    commands: tuple = ()
+    heatmap: tuple = ()
+    active_ids: tuple = ()
+    member_delta: int = 0
+
+
 class StatsStore:
-    def __init__(self, path: str | Path | None = None) -> None:
+    def __init__(self, path: str | Path | None = None, *, busy_timeout_ms: int | None = None) -> None:
         if path is None:
             self.path = Path(DEFAULT_DB_PATH)
         else:
             self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self.path, timeout=5.0, isolation_level=None)
+        timeout_s = 5.0 if not busy_timeout_ms else max(5.0, float(busy_timeout_ms) / 1000.0)
+        self._conn = sqlite3.connect(self.path, timeout=timeout_s, isolation_level=None)
+        if busy_timeout_ms:
+            self._conn.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
         # Earlier builds stored per-person totals. Drop that table if it is still here.
@@ -563,6 +635,320 @@ class StatsStore:
             self._write_buffer(self._buffer)
         self._buffer.clear()
 
+    def backfill_spans(self, guild_id: int, channel_id: int) -> list[tuple[int, int]]:
+        rows = self._conn.execute(
+            """
+            SELECT low_id, high_id FROM backfill_span
+            WHERE guild_id = ? AND channel_id = ?
+            ORDER BY low_id
+            """,
+            (int(guild_id), int(channel_id)),
+        ).fetchall()
+        return [(int(row["low_id"]), int(row["high_id"])) for row in rows]
+
+    def recorded_live_at(self, guild_id: int) -> datetime | None:
+        row = self._conn.execute(
+            "SELECT live_at FROM backfill_meta WHERE guild_id = ?",
+            (int(guild_id),),
+        ).fetchone()
+        if row is None or not row["live_at"]:
+            return None
+        parsed = datetime.fromisoformat(str(row["live_at"]))
+        return _as_aware(parsed)
+
+    def apply_backfill(
+        self,
+        guild_id: int,
+        channel_id: int,
+        span: tuple[int, int],
+        parts: list[BackfillPart] | tuple[BackfillPart, ...],
+        closed_at: datetime | None = None,
+        command_map: dict[str, str] | None = None,
+    ) -> bool:
+        """Apply one newly fetched inclusive snowflake span.
+
+        Returns False when that span was already covered. A covered span does
+        not change counters, snapshots, active members, or last_posted.
+
+        Current-week parts add to weekly and all_time and mark authors active.
+        Historical parts add to all_time only (weekly += 0), keep a week bucket,
+        and replace that week's snapshot. They do not mark active members, do
+        not change last_posted, and do not zero weekly columns.
+        """
+        guild_id = int(guild_id)
+        channel_id = int(channel_id)
+        low, high = int(span[0]), int(span[1])
+        if high < low:
+            return False
+        if self._span_covered(guild_id, channel_id, low, high):
+            return False
+        closed = _as_aware(closed_at or datetime.now(timezone.utc))
+        weeks: set[date] = set()
+        with self._transaction():
+            # Re-check inside the write lock. A concurrent flush cannot cover
+            # this span, but a second backfill connection could.
+            if self._span_covered(guild_id, channel_id, low, high):
+                return False
+            for part in parts:
+                week = _as_date(part.week_start)
+                weekly_amount = int(part.messages) if part.into_current_week else 0
+                all_amount = int(part.messages)
+                if all_amount:
+                    self._upsert_split(
+                        "channel_messages",
+                        ("guild_id", "channel_id"),
+                        (guild_id, channel_id),
+                        weekly_amount,
+                        all_amount,
+                    )
+                    if not part.into_current_week:
+                        self._add_week_bucket(guild_id, week, "channel", str(channel_id), "", 0, all_amount)
+                for raw in part.reactions or ():
+                    key, name, is_custom, count = raw[0], raw[1], raw[2], int(raw[3])
+                    if count <= 0:
+                        continue
+                    emoji_key = _clip(str(key), 100) or "?"
+                    label = _clip(str(name or emoji_key), 80) or emoji_key
+                    weekly_amount = count if part.into_current_week else 0
+                    self._upsert_reaction(guild_id, emoji_key, label, bool(is_custom), weekly_amount, count)
+                    if not part.into_current_week:
+                        self._add_week_bucket(
+                            guild_id,
+                            week,
+                            "reaction",
+                            emoji_key,
+                            label,
+                            1 if is_custom else 0,
+                            count,
+                        )
+                merged_commands: dict[str, int] = {}
+                for raw in part.commands or ():
+                    name, count = raw[0], int(raw[1])
+                    label = _clip(str(name), 80)
+                    if not label or count <= 0:
+                        continue
+                    if command_map is not None:
+                        canonical = command_map.get(label.casefold())
+                        if not canonical:
+                            continue
+                        label = _clip(canonical, 80)
+                        if not label:
+                            continue
+                    merged_commands[label] = merged_commands.get(label, 0) + count
+                for label, count in merged_commands.items():
+                    weekly_amount = count if part.into_current_week else 0
+                    self._upsert_split(
+                        "command_counts",
+                        ("guild_id", "command_name", "kind"),
+                        (guild_id, label, "prefix"),
+                        weekly_amount,
+                        count,
+                    )
+                    if not part.into_current_week:
+                        self._add_week_bucket(guild_id, week, "command", label, "prefix", 0, count)
+                for raw in part.heatmap or ():
+                    weekday, hour, count = int(raw[0]), int(raw[1]), int(raw[2])
+                    if count <= 0 or not (0 <= weekday <= 6 and 0 <= hour <= 23):
+                        continue
+                    weekly_amount = count if part.into_current_week else 0
+                    self._upsert_split(
+                        "activity_heatmap",
+                        ("guild_id", "weekday", "hour"),
+                        (guild_id, weekday, hour),
+                        weekly_amount,
+                        count,
+                    )
+                    if not part.into_current_week:
+                        self._add_week_bucket(guild_id, week, "heat", f"{weekday}:{hour}", "", 0, count)
+                if part.into_current_week:
+                    for user_id in part.active_ids or ():
+                        user_id = int(user_id)
+                        if self.is_opted_out(guild_id, user_id):
+                            continue
+                        self._conn.execute(
+                            "INSERT OR IGNORE INTO active_members (guild_id, user_id) VALUES (?, ?)",
+                            (guild_id, user_id),
+                        )
+                elif int(part.member_delta) > 0:
+                    self._add_week_bucket(guild_id, week, "members", "n", "", 0, int(part.member_delta))
+                if not part.into_current_week:
+                    weeks.add(week)
+            self._add_span(guild_id, channel_id, low, high)
+            for week in weeks:
+                self._write_backfill_snapshot(guild_id, week, closed)
+        return True
+
+    def write_historical_snapshot(self, guild_id: int, week_start: date | datetime | str, closed_at: datetime) -> None:
+        """Replace one historical snapshot from the stored week buckets.
+
+        Does not change weekly counters, all_time counters, active members, or
+        last_posted. Used so a completed week still has a row when it was empty.
+        """
+        guild_id = int(guild_id)
+        week = _as_date(week_start)
+        closed = _as_aware(closed_at)
+        with self._transaction():
+            self._write_backfill_snapshot(guild_id, week, closed)
+
+    def _span_covered(self, guild_id: int, channel_id: int, low: int, high: int) -> bool:
+        row = self._conn.execute(
+            """
+            SELECT 1 FROM backfill_span
+            WHERE guild_id = ? AND channel_id = ? AND low_id <= ? AND high_id >= ?
+            LIMIT 1
+            """,
+            (guild_id, channel_id, low, high),
+        ).fetchone()
+        return row is not None
+
+    def _add_span(self, guild_id: int, channel_id: int, low: int, high: int) -> None:
+        rows = self._conn.execute(
+            "SELECT low_id, high_id FROM backfill_span WHERE guild_id = ? AND channel_id = ?",
+            (guild_id, channel_id),
+        ).fetchall()
+        spans = [(int(row["low_id"]), int(row["high_id"])) for row in rows]
+        spans.append((low, high))
+        spans.sort()
+        merged: list[tuple[int, int]] = []
+        for lo, hi in spans:
+            if merged and lo <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], hi))
+            else:
+                merged.append((lo, hi))
+        self._conn.execute(
+            "DELETE FROM backfill_span WHERE guild_id = ? AND channel_id = ?",
+            (guild_id, channel_id),
+        )
+        self._conn.executemany(
+            "INSERT INTO backfill_span (guild_id, channel_id, low_id, high_id) VALUES (?, ?, ?, ?)",
+            [(guild_id, channel_id, lo, hi) for lo, hi in merged],
+        )
+
+    def _add_week_bucket(
+        self,
+        guild_id: int,
+        week: date,
+        kind: str,
+        item_key: str,
+        item_label: str,
+        flag: int,
+        amount: int,
+    ) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO backfill_week
+                (guild_id, week_start, kind, item_key, item_label, flag, amount)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(guild_id, week_start, kind, item_key) DO UPDATE SET
+                amount = amount + excluded.amount,
+                item_label = excluded.item_label,
+                flag = excluded.flag
+            """,
+            (guild_id, week.isoformat(), kind, item_key, item_label, int(flag), int(amount)),
+        )
+
+    def _upsert_reaction(
+        self,
+        guild_id: int,
+        emoji_key: str,
+        name: str,
+        is_custom: bool,
+        weekly: int,
+        all_time: int,
+    ) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO reaction_counts
+                (guild_id, emoji_key, emoji_name, is_custom, weekly, all_time)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(guild_id, emoji_key) DO UPDATE SET
+                weekly = weekly + excluded.weekly,
+                all_time = all_time + excluded.all_time,
+                emoji_name = excluded.emoji_name,
+                is_custom = excluded.is_custom
+            """,
+            (guild_id, emoji_key, name, 1 if is_custom else 0, weekly, all_time),
+        )
+
+    def _write_backfill_snapshot(self, guild_id: int, week: date, closed_at: datetime) -> None:
+        rows = self._conn.execute(
+            """
+            SELECT kind, item_key, item_label, flag, amount
+            FROM backfill_week
+            WHERE guild_id = ? AND week_start = ?
+            """,
+            (guild_id, week.isoformat()),
+        ).fetchall()
+        channels = []
+        reactions = []
+        commands = []
+        messages = 0
+        reaction_total = 0
+        command_total = 0
+        members = 0
+        for row in rows:
+            kind = str(row["kind"])
+            amount = int(row["amount"])
+            if kind == "channel":
+                messages += amount
+                channels.append(ChannelCount(int(row["item_key"]), amount, amount))
+            elif kind == "reaction":
+                reaction_total += amount
+                reactions.append(
+                    ReactionCount(str(row["item_key"]), str(row["item_label"] or row["item_key"]), bool(row["flag"]), amount, amount)
+                )
+            elif kind == "command":
+                command_total += amount
+                commands.append(CommandCount(str(row["item_key"]), "prefix", amount, amount))
+            elif kind == "members":
+                members += amount
+        channels.sort(key=lambda row: (-row.weekly, row.channel_id))
+        reactions.sort(key=lambda row: (-row.weekly, row.emoji_key))
+        commands.sort(key=lambda row: (-row.weekly, row.name))
+        blank = tuple(tuple(0 for _ in range(24)) for _ in range(7))
+        stats = WeeklyStats(
+            guild_id=guild_id,
+            week_start=week,
+            generated_at=closed_at,
+            top_channels=tuple(channels[:5]),
+            bottom_channels=(),
+            dead_channels=(),
+            top_reactions=tuple(reactions[:5]),
+            least_custom_emojis=(),
+            top_commands=tuple(commands[:5]),
+            bottom_commands=(),
+            imagegen=_empty_imagegen(),
+            active_members=members,
+            active_members_last_week=None,
+            heatmap=blank,
+            voice_minutes=0,
+            voice_minutes_all_time=0,
+            top_voice_channels=(),
+            voice_heatmap=blank,
+            messages_weekly=messages,
+            messages_all_time=messages,
+            reactions_weekly=reaction_total,
+            reactions_all_time=reaction_total,
+            commands_weekly=command_total,
+            commands_all_time=command_total,
+        )
+        self._save_snapshot(guild_id, week, closed_at, stats)
+
+    def _upsert_split(self, table: str, columns: tuple[str, ...], values: tuple, weekly: int, all_time: int) -> None:
+        column_sql = ", ".join((*columns, "weekly", "all_time"))
+        placeholders = ", ".join("?" for _ in (*columns, "weekly", "all_time"))
+        conflict = ", ".join(columns)
+        self._conn.execute(
+            f"""
+            INSERT INTO {table} ({column_sql})
+            VALUES ({placeholders})
+            ON CONFLICT({conflict}) DO UPDATE SET
+                weekly = weekly + excluded.weekly,
+                all_time = all_time + excluded.all_time
+            """,
+            (*values, weekly, all_time),
+        )
+
     def _write_buffer(self, buffer: _Buffer) -> None:
         for (guild_id, channel_id), amount in buffer.channels.items():
             self._upsert("channel_messages", ("guild_id", "channel_id"), (guild_id, channel_id), amount)
@@ -673,6 +1059,7 @@ class StatsStore:
         week_start: date | datetime | str | None = None,
         known_custom_emojis=None,
         known_channel_ids=None,
+        command_map: dict[str, str] | None = None,
     ) -> WeeklyStats:
         """Build the current card.
 
@@ -691,6 +1078,146 @@ class StatsStore:
             moment,
             known_custom_emojis,
             known_channel_ids,
+            command_map,
+        )
+
+    def purge_unregistered_commands(self, mapping: dict[str, str]) -> list[dict]:
+        """Drop prefix commands that are not in ``mapping``. Merge aliases.
+
+        ``command_counts`` prefix rows and ``backfill_week`` rows with
+        ``kind="command"`` are the only counter tables changed. Each
+        ``weekly_snapshots`` summary then gets ``commands`` and
+        ``top_commands`` from the cleaned command buckets for that week.
+        Returns the deleted counter rows. Alias rows are merged, not listed.
+        """
+        self.flush()
+        dropped: list[dict] = []
+        with self._transaction():
+            rows = self._conn.execute(
+                """
+                SELECT guild_id, command_name, kind, weekly, all_time
+                FROM command_counts
+                """
+            ).fetchall()
+            prefix_by_guild: dict[int, list] = {}
+            for row in rows:
+                if str(row["kind"]) != "prefix":
+                    continue
+                prefix_by_guild.setdefault(int(row["guild_id"]), []).append(row)
+            for guild_id, guild_rows in prefix_by_guild.items():
+                merged: dict[str, list[int]] = {}
+                for row in guild_rows:
+                    name = str(row["command_name"])
+                    weekly = int(row["weekly"])
+                    all_time = int(row["all_time"])
+                    canonical = mapping.get(name.casefold()) if mapping else None
+                    if not canonical:
+                        dropped.append(
+                            {"name": name, "kind": "prefix", "weekly": weekly, "all_time": all_time}
+                        )
+                        continue
+                    canonical = _clip(canonical, 80) or canonical
+                    slot = merged.get(canonical)
+                    if slot is None:
+                        merged[canonical] = [weekly, all_time]
+                    else:
+                        slot[0] += weekly
+                        slot[1] += all_time
+                self._conn.execute(
+                    "DELETE FROM command_counts WHERE guild_id = ? AND kind = 'prefix'",
+                    (guild_id,),
+                )
+                for name, (weekly, all_time) in merged.items():
+                    self._conn.execute(
+                        """
+                        INSERT INTO command_counts
+                            (guild_id, command_name, kind, weekly, all_time)
+                        VALUES (?, ?, 'prefix', ?, ?)
+                        """,
+                        (guild_id, name, weekly, all_time),
+                    )
+            buckets = self._conn.execute(
+                """
+                SELECT guild_id, week_start, item_key, item_label, flag, amount
+                FROM backfill_week
+                WHERE kind = 'command'
+                """
+            ).fetchall()
+            grouped: dict[tuple[int, str], list] = {}
+            for row in buckets:
+                grouped.setdefault((int(row["guild_id"]), str(row["week_start"])), []).append(row)
+            for (guild_id, week_start), week_rows in grouped.items():
+                merged_buckets: dict[str, list] = {}
+                for row in week_rows:
+                    name = str(row["item_key"])
+                    canonical = mapping.get(name.casefold()) if mapping else None
+                    if not canonical:
+                        continue
+                    canonical = _clip(canonical, 80) or canonical
+                    amount = int(row["amount"])
+                    slot = merged_buckets.get(canonical)
+                    if slot is None:
+                        merged_buckets[canonical] = [str(row["item_label"] or "prefix"), int(row["flag"] or 0), amount]
+                    else:
+                        slot[2] += amount
+                self._conn.execute(
+                    """
+                    DELETE FROM backfill_week
+                    WHERE guild_id = ? AND week_start = ? AND kind = 'command'
+                    """,
+                    (guild_id, week_start),
+                )
+                for name, (label, flag, amount) in merged_buckets.items():
+                    self._conn.execute(
+                        """
+                        INSERT INTO backfill_week
+                            (guild_id, week_start, kind, item_key, item_label, flag, amount)
+                        VALUES (?, ?, 'command', ?, ?, ?, ?)
+                        """,
+                        (guild_id, week_start, name, label, flag, amount),
+                    )
+            snapshots = self._conn.execute(
+                "SELECT guild_id, week_start, summary_json FROM weekly_snapshots"
+            ).fetchall()
+            for snap in snapshots:
+                self._rewrite_snapshot_commands(int(snap["guild_id"]), str(snap["week_start"]), snap["summary_json"])
+        dropped.sort(key=lambda item: (item["name"], item["weekly"], item["all_time"]))
+        return dropped
+
+    def _rewrite_snapshot_commands(self, guild_id: int, week_start: str, summary_json: str) -> None:
+        try:
+            payload = json.loads(summary_json)
+        except (TypeError, json.JSONDecodeError):
+            return
+        if not isinstance(payload, dict):
+            return
+        rows = self._conn.execute(
+            """
+            SELECT item_key, item_label, amount
+            FROM backfill_week
+            WHERE guild_id = ? AND week_start = ? AND kind = 'command'
+            """,
+            (guild_id, week_start),
+        ).fetchall()
+        ranked = sorted(
+            (
+                (str(row["item_key"]), str(row["item_label"] or "prefix"), int(row["amount"]))
+                for row in rows
+            ),
+            key=lambda item: (-item[2], item[0]),
+        )
+        payload["commands"] = sum(item[2] for item in ranked)
+        payload["top_commands"] = [
+            {"name": name, "kind": kind, "weekly": amount}
+            for name, kind, amount in ranked[:5]
+        ]
+        self._conn.execute(
+            """
+            UPDATE weekly_snapshots
+            SET summary_json = ?
+            WHERE guild_id = ? AND week_start = ?
+            """,
+            (json.dumps(payload, separators=(",", ":"), sort_keys=True), guild_id, week_start),
         )
 
     def close_week(
@@ -701,6 +1228,7 @@ class StatsStore:
         *,
         known_custom_emojis=None,
         known_channel_ids=None,
+        command_map: dict[str, str] | None = None,
     ) -> WeeklyStats | None:
         """Snapshot this guild's week and zero its weekly counters.
 
@@ -721,6 +1249,7 @@ class StatsStore:
                 closed,
                 known_custom_emojis,
                 known_channel_ids,
+                command_map,
             )
             self._save_snapshot(guild_id, week, closed, stats)
             self._zero_weekly(guild_id)
@@ -764,6 +1293,7 @@ class StatsStore:
         now: datetime,
         known_custom_emojis,
         known_channel_ids=None,
+        command_map: dict[str, str] | None = None,
     ) -> WeeklyStats:
         channels = self._conn.execute(
             "SELECT channel_id, weekly, all_time FROM channel_messages WHERE guild_id = ?",
@@ -783,16 +1313,18 @@ class StatsStore:
             """,
             (guild_id,),
         ).fetchall()
+        if command_map is not None:
+            commands = _merge_command_rows(commands, command_map)
         voice_rows = self._conn.execute(
             "SELECT channel_id, weekly, all_time FROM voice_channels WHERE guild_id = ?",
             (guild_id,),
         ).fetchall()
         heat_rows = self._conn.execute(
-            "SELECT weekday, hour, weekly FROM activity_heatmap WHERE guild_id = ?",
+            "SELECT weekday, hour, weekly, all_time FROM activity_heatmap WHERE guild_id = ?",
             (guild_id,),
         ).fetchall()
         voice_heat_rows = self._conn.execute(
-            "SELECT weekday, hour, weekly FROM voice_heatmap WHERE guild_id = ?",
+            "SELECT weekday, hour, weekly, all_time FROM voice_heatmap WHERE guild_id = ?",
             (guild_id,),
         ).fetchall()
         image_rows = self._conn.execute(
@@ -812,15 +1344,29 @@ class StatsStore:
         ).fetchone()["n"]
 
         top_channels, bottom_channels, dead_channels = _split_channels(channels, known_channel_ids)
+        top_channels_all, bottom_channels_all, _dead_all = _split_channels(
+            channels, known_channel_ids, metric="all_time"
+        )
         top_reactions = _top_reactions(reactions)
+        top_reactions_all = _top_reactions(reactions, metric="all_time")
         least_custom = _least_custom(reactions, known_custom_emojis)
+        least_weekly = _least_custom(reactions, known_custom_emojis, metric="weekly")
         top_commands, bottom_commands = _split_commands(commands)
+        top_commands_all, bottom_commands_all = _split_commands(commands, metric="all_time")
         imagegen = _imagegen_summary(image_rows, total_rows)
         previous = self._previous_snapshot(guild_id, week)
         voice_sorted = sorted(
             (row for row in voice_rows if int(row["weekly"]) > 0),
             key=lambda row: (-int(row["weekly"]), -int(row["all_time"]), int(row["channel_id"])),
         )
+        voice_sorted_all = sorted(
+            (row for row in voice_rows if int(row["all_time"]) > 0),
+            key=lambda row: (-int(row["all_time"]), -int(row["weekly"]), int(row["channel_id"])),
+        )
+        messages_weekly = sum(int(row["weekly"]) for row in channels)
+        reactions_weekly = sum(int(row["weekly"]) for row in reactions)
+        commands_weekly = sum(int(row["weekly"]) for row in commands)
+        active_count = int(active)
         return WeeklyStats(
             guild_id=guild_id,
             week_start=week,
@@ -833,24 +1379,103 @@ class StatsStore:
             top_commands=tuple(top_commands),
             bottom_commands=tuple(bottom_commands),
             imagegen=imagegen,
-            active_members=int(active),
+            active_members=active_count,
             active_members_last_week=_snapshot_int(previous, "active_members"),
             heatmap=_heatmap(heat_rows),
             voice_minutes=sum(int(row["weekly"]) for row in voice_rows),
             voice_minutes_all_time=sum(int(row["all_time"]) for row in voice_rows),
             top_voice_channels=tuple(_channel(row) for row in voice_sorted[:TOP_N]),
             voice_heatmap=_heatmap(voice_heat_rows),
-            messages_weekly=sum(int(row["weekly"]) for row in channels),
+            messages_weekly=messages_weekly,
             messages_all_time=sum(int(row["all_time"]) for row in channels),
-            reactions_weekly=sum(int(row["weekly"]) for row in reactions),
+            reactions_weekly=reactions_weekly,
             reactions_all_time=sum(int(row["all_time"]) for row in reactions),
-            commands_weekly=sum(int(row["weekly"]) for row in commands),
+            commands_weekly=commands_weekly,
             commands_all_time=sum(int(row["all_time"]) for row in commands),
             messages_last_week=_snapshot_int(previous, "messages"),
             reactions_last_week=_snapshot_int(previous, "reactions"),
             voice_minutes_last_week=_snapshot_int(previous, "voice_minutes"),
             imagegen_last_week=_snapshot_imagegens(previous),
+            heatmap_all_time=_heatmap(heat_rows, "all_time"),
+            voice_heatmap_all_time=_heatmap(voice_heat_rows, "all_time"),
+            week_history=self._week_history(
+                guild_id,
+                week,
+                messages_weekly,
+                reactions_weekly,
+                active_count,
+                commands_weekly,
+            ),
+            earliest_week=self._earliest_week(guild_id, week),
+            live_since=self._live_since(guild_id),
+            top_channels_all_time=tuple(_channel(row) for row in top_channels_all),
+            bottom_channels_all_time=tuple(_channel(row) for row in bottom_channels_all),
+            top_reactions_all_time=tuple(top_reactions_all),
+            least_custom_emojis_weekly=tuple(least_weekly),
+            top_commands_all_time=tuple(top_commands_all),
+            bottom_commands_all_time=tuple(bottom_commands_all),
+            top_voice_channels_all_time=tuple(_channel(row) for row in voice_sorted_all[:TOP_N]),
         )
+
+    def _earliest_week(self, guild_id: int, week: date) -> date:
+        row = self._conn.execute(
+            "SELECT MIN(week_start) AS week_start FROM weekly_snapshots WHERE guild_id = ?",
+            (guild_id,),
+        ).fetchone()
+        if row is None or not row["week_start"]:
+            return week
+        return date.fromisoformat(str(row["week_start"]))
+
+    def _live_since(self, guild_id: int) -> date:
+        moment = self.recorded_live_at(guild_id)
+        if moment is None:
+            return LIVE_TRACKING_SINCE
+        return moment.astimezone(LA).date()
+
+    def _week_history(
+        self,
+        guild_id: int,
+        week: date,
+        messages: int,
+        reactions: int,
+        active_members: int,
+        commands: int,
+    ) -> tuple:
+        """Closed snapshots, oldest first, then the in-progress week."""
+        rows = self._conn.execute(
+            """
+            SELECT week_start, summary_json FROM weekly_snapshots
+            WHERE guild_id = ?
+            ORDER BY week_start
+            """,
+            (guild_id,),
+        ).fetchall()
+        points: list[WeekPoint] = []
+        seen: set[date] = set()
+        for row in rows:
+            start = date.fromisoformat(str(row["week_start"]))
+            try:
+                payload = json.loads(row["summary_json"])
+            except (TypeError, ValueError):
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+            points.append(
+                WeekPoint(
+                    start,
+                    int(payload.get("messages") or 0),
+                    int(payload.get("reactions") or 0),
+                    int(payload.get("active_members") or 0),
+                    int(payload.get("commands") or 0),
+                )
+            )
+            seen.add(start)
+        current = WeekPoint(week, int(messages), int(reactions), int(active_members), int(commands))
+        if week in seen:
+            points = [current if point.week_start == week else point for point in points]
+        else:
+            points.append(current)
+        return tuple(points)
 
     def _previous_snapshot(self, guild_id: int, week: date) -> dict | None:
         row = self._conn.execute(
@@ -895,7 +1520,7 @@ def _channel(row) -> ChannelCount:
     return ChannelCount(int(row["channel_id"]), int(row["weekly"]), int(row["all_time"]))
 
 
-def _split_channels(rows, known_channel_ids=None) -> tuple[list, list, list]:
+def _split_channels(rows, known_channel_ids=None, metric: str = "weekly") -> tuple[list, list, list]:
     indexed = {int(row["channel_id"]): row for row in rows}
     if known_channel_ids is not None:
         scoped = []
@@ -913,6 +1538,15 @@ def _split_channels(rows, known_channel_ids=None) -> tuple[list, list, list]:
                 row = {"channel_id": channel_id, "weekly": 0, "all_time": 0}
             scoped.append(row)
         rows = scoped
+    if metric == "all_time":
+        active = [row for row in rows if int(row["all_time"]) > 0]
+        active.sort(key=lambda row: (-int(row["all_time"]), -int(row["weekly"]), int(row["channel_id"])))
+        top = active[:TOP_N]
+        top_ids = {int(row["channel_id"]) for row in top}
+        # Zeros stay in the quiet list so never-used known channels still show.
+        quiet = [row for row in rows if int(row["channel_id"]) not in top_ids]
+        quiet.sort(key=lambda row: (int(row["all_time"]), int(row["weekly"]), int(row["channel_id"])))
+        return top, quiet[:TOP_N], []
     active = [row for row in rows if int(row["weekly"]) > 0]
     active.sort(key=lambda row: (-int(row["weekly"]), -int(row["all_time"]), int(row["channel_id"])))
     top = active[:TOP_N]
@@ -924,9 +1558,11 @@ def _split_channels(rows, known_channel_ids=None) -> tuple[list, list, list]:
     return top, bottom_pool[:TOP_N], dead[:DEAD_LIMIT]
 
 
-def _top_reactions(rows) -> list[ReactionCount]:
-    ranked = [row for row in rows if int(row["weekly"]) > 0]
-    ranked.sort(key=lambda row: (-int(row["weekly"]), -int(row["all_time"]), str(row["emoji_name"]).lower()))
+def _top_reactions(rows, metric: str = "weekly") -> list[ReactionCount]:
+    primary = "all_time" if metric == "all_time" else "weekly"
+    secondary = "weekly" if primary == "all_time" else "all_time"
+    ranked = [row for row in rows if int(row[primary]) > 0]
+    ranked.sort(key=lambda row: (-int(row[primary]), -int(row[secondary]), str(row["emoji_name"]).lower()))
     return [_reaction(row) for row in ranked[:TOP_N]]
 
 
@@ -940,7 +1576,7 @@ def _reaction(row) -> ReactionCount:
     )
 
 
-def _least_custom(rows, known) -> list[ReactionCount]:
+def _least_custom(rows, known, metric: str = "all_time") -> list[ReactionCount]:
     """Least-used custom emojis.
 
     ``known`` None keeps every stored custom emoji. A list, including an
@@ -967,20 +1603,55 @@ def _least_custom(rows, known) -> list[ReactionCount]:
                 found[key] = {"name": name, "weekly": 0, "all_time": 0}
             elif name:
                 slot["name"] = name
-    ranked = sorted(found.items(), key=lambda item: (item[1]["all_time"], item[1]["weekly"], item[1]["name"].lower(), item[0]))
+    primary = "weekly" if metric == "weekly" else "all_time"
+    secondary = "all_time" if primary == "weekly" else "weekly"
+    ranked = sorted(
+        found.items(),
+        key=lambda item: (item[1][primary], item[1][secondary], item[1]["name"].lower(), item[0]),
+    )
     return [
         ReactionCount(key, slot["name"], True, slot["weekly"], slot["all_time"])
         for key, slot in ranked[:TOP_N]
     ]
 
 
-def _split_commands(rows) -> tuple[list[CommandCount], list[CommandCount]]:
-    used = [row for row in rows if int(row["weekly"]) > 0]
-    used.sort(key=lambda row: (-int(row["weekly"]), -int(row["all_time"]), str(row["command_name"]), str(row["kind"])))
+def _merge_command_rows(rows, command_map: dict[str, str]) -> list[dict]:
+    """Keep slash rows. Drop unregistered prefix names and merge aliases."""
+    merged: dict[tuple[str, str], list[int]] = {}
+    order: list[tuple[str, str]] = []
+    for row in rows:
+        kind = str(row["kind"])
+        name = str(row["command_name"])
+        weekly = int(row["weekly"])
+        all_time = int(row["all_time"])
+        if kind == "prefix":
+            canonical = command_map.get(name.casefold())
+            if not canonical:
+                continue
+            name = canonical
+        key = (name, kind)
+        slot = merged.get(key)
+        if slot is None:
+            merged[key] = [weekly, all_time]
+            order.append(key)
+        else:
+            slot[0] += weekly
+            slot[1] += all_time
+    return [
+        {"command_name": name, "kind": kind, "weekly": merged[(name, kind)][0], "all_time": merged[(name, kind)][1]}
+        for name, kind in order
+    ]
+
+
+def _split_commands(rows, metric: str = "weekly") -> tuple[list[CommandCount], list[CommandCount]]:
+    primary = "all_time" if metric == "all_time" else "weekly"
+    secondary = "weekly" if primary == "all_time" else "all_time"
+    used = [row for row in rows if int(row[primary]) > 0]
+    used.sort(key=lambda row: (-int(row[primary]), -int(row[secondary]), str(row["command_name"]), str(row["kind"])))
     top = used[:TOP_N]
     top_keys = {(str(row["command_name"]), str(row["kind"])) for row in top}
     rest = [row for row in rows if (str(row["command_name"]), str(row["kind"])) not in top_keys]
-    rest.sort(key=lambda row: (int(row["weekly"]), int(row["all_time"]), str(row["command_name"]), str(row["kind"])))
+    rest.sort(key=lambda row: (int(row[primary]), int(row[secondary]), str(row["command_name"]), str(row["kind"])))
     return [_command(row) for row in top], [_command(row) for row in rest[:TOP_N]]
 
 
@@ -988,13 +1659,13 @@ def _command(row) -> CommandCount:
     return CommandCount(str(row["command_name"]), str(row["kind"]), int(row["weekly"]), int(row["all_time"]))
 
 
-def _heatmap(rows) -> tuple[tuple[int, ...], ...]:
+def _heatmap(rows, column: str = "weekly") -> tuple[tuple[int, ...], ...]:
     grid = [[0 for _ in range(24)] for _ in range(7)]
     for row in rows:
         weekday = int(row["weekday"])
         hour = int(row["hour"])
         if 0 <= weekday <= 6 and 0 <= hour <= 23:
-            grid[weekday][hour] = int(row["weekly"])
+            grid[weekday][hour] = int(row[column])
     return tuple(tuple(line) for line in grid)
 
 
@@ -1023,6 +1694,9 @@ def _imagegen_summary(rows, totals) -> ImageGenSummary:
     seconds = float(by_metric["seconds"]["weekly"]) if "seconds" in by_metric else 0.0
     timed = int(by_metric["timed"]["weekly"]) if "timed" in by_metric else 0
     generations = int(by_metric["generations"]["weekly"]) if "generations" in by_metric else 0
+    generations_all = int(by_metric["generations"]["all_time"]) if "generations" in by_metric else 0
+    success_all = int(outcomes["success"]["all_time"]) if "success" in outcomes else 0
+    error_all = int(outcomes["error"]["all_time"]) if "error" in outcomes else 0
     return ImageGenSummary(
         models=top("model"),
         loras=top("lora"),
@@ -1039,4 +1713,7 @@ def _imagegen_summary(rows, totals) -> ImageGenSummary:
         edit_count=edit,
         kept_first=max(0, success - regenerate - edit),
         generation_count=generations,
+        generation_count_all_time=generations_all,
+        success_count_all_time=success_all,
+        error_count_all_time=error_all,
     )

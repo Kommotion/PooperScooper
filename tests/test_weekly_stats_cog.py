@@ -418,11 +418,12 @@ def test_successful_post_uses_no_mentions_and_does_not_repeat(tmp_path):
         assert len(calls) == 1
         posted = calls[0]
         assert _mentions_are_off(posted["allowed_mentions"])
-        assert posted["file"].filename == "weekly-stats.png"
+        assert [item.filename for item in posted["files"]] == ["weekly-stats.png", "alltime-stats.png"]
         assert "2026-11-09" in posted["content"]
+        assert "all time" in posted["content"].lower()
         assert store.last_posted_week_start(ENABLED) == date(2026, 11, 9)
         assert _mentions_are_off(ctx_sent["allowed_mentions"])
-        assert ctx_sent["file"].filename == "weekly-stats.png"
+        assert [item.filename for item in ctx_sent["files"]] == ["weekly-stats.png", "alltime-stats.png"]
     finally:
         store.close()
 
@@ -962,7 +963,7 @@ def test_thursday_deploy_posts_this_sunday_and_not_before(tmp_path):
         assert first_stats.messages_last_week is None
         assert first_stats.active_members_last_week is None
         first_post = calls[0]
-        assert first_post["content"] == "Weekly stats for Menaces to Sobriety · week of 2026-11-16"
+        assert first_post["content"] == "This week and all time for Menaces to Sobriety · week of 2026-11-16"
         assert "2026-11-09" not in first_post["content"]
         assert "full week" not in first_post["content"].lower()
         assert _mentions_are_off(first_post["allowed_mentions"])
@@ -971,7 +972,7 @@ def test_thursday_deploy_posts_this_sunday_and_not_before(tmp_path):
         assert second_stats.week_start == date(2026, 11, 23)
         assert second_label == "Nov 23 - Nov 29, 2026"
         assert second_stats.messages_weekly == 1
-        assert calls[1]["content"] == "Weekly stats for Menaces to Sobriety · week of 2026-11-23"
+        assert calls[1]["content"] == "This week and all time for Menaces to Sobriety · week of 2026-11-23"
 
         snapshots = _snapshots(store, ENABLED)
         assert [week for week, _payload in snapshots] == ["2026-11-16", "2026-11-23"]
@@ -1075,7 +1076,7 @@ def test_report_channel_id_resolves_outside_the_stats_guild(tmp_path):
         asyncio.run(scenario())
         assert named_calls == []
         assert len(calls) == 1
-        assert calls[0]["content"] == "Weekly stats for Menaces to Sobriety · week of 2026-11-09"
+        assert calls[0]["content"] == "This week and all time for Menaces to Sobriety · week of 2026-11-09"
         assert store.last_posted_week_start(MTS_GUILD_ID) == date(2026, 11, 9)
         posted = store.build_stats(MTS_GUILD_ID, POST_AT)
         assert posted.messages_all_time == 1

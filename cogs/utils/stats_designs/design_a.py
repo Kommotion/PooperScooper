@@ -7,6 +7,7 @@ from cogs.utils.stats_designs._common import (
     Canvas,
     chart_donut,
     chart_stacked,
+    chart_trends,
     Row,
     draw_heat_legend,
     draw_heatmap,
@@ -47,6 +48,7 @@ BORDER = (42, 49, 66)
 INK = (244, 245, 247)
 MUTED = (148, 156, 172)
 ACCENT = (129, 140, 248)
+GOLD = (251, 191, 36)
 CYAN = (34, 211, 238)
 GOOD = (52, 211, 153)
 BAD = (248, 113, 113)
@@ -75,6 +77,7 @@ def _rows(canvas, box, rows, title, color, **extra) -> None:
         bar_height=8,
         min_row=22,
         max_row=34,
+        show_all_time=False,
     )
     options.update(extra)
     draw_metric_rows(canvas, box, rows, **options)
@@ -83,8 +86,9 @@ def _rows(canvas, box, rows, title, color, **extra) -> None:
 def _reaction_width_samples(canvas, box, rows, *, pad, min_row, max_row):
     """Number and label text widths behind a TOP REACTIONS column grid.
 
-    ``draw_metric_rows`` adds 10 to the number width and 4 to the label width.
-    The pair returned here is what another list must measure as to share those columns.
+    ``draw_metric_rows`` adds 10 to the number width, 4 to the label width, and
+    the icon width when a row has a glyph or custom image. The pair returned
+    here is the raw text widths so that addition happens once.
     """
     if not rows:
         return None
@@ -97,7 +101,7 @@ def _reaction_width_samples(canvas, box, rows, *, pad, min_row, max_row):
     available = (y1 - 3) - cursor_y
     shown, _extra, _row_h = _rows_fit(int(available), len(rows), min_row, max_row, font_h + 1)
     visible = list(rows[:shown])
-    samples = [fmt(row.weekly) for row in rows] + [fmt(row.all_time) for row in rows]
+    samples = [fmt(row.weekly) for row in rows]
     number_text_w = max(int(canvas.draw.textlength(sample, font=value_font)) for sample in samples)
     emoji_only = bool(visible) and all(row.emoji and not row.label for row in visible)
     if emoji_only:
@@ -105,15 +109,7 @@ def _reaction_width_samples(canvas, box, rows, *, pad, min_row, max_row):
     else:
         labels = [row.label for row in visible if row.label]
         natural = max((int(canvas.draw.textlength(sample, font=label_font)) for sample in labels), default=0)
-        if any(row.emoji and row.label for row in visible):
-            natural += font_h + 10
-        number_w = number_text_w + 10
-        all_right = x1 - pad
-        week_right = all_right - (number_w + 14)
-        inner_left = x0 + pad
-        room = max(0, (week_right - number_w - 12) - inner_left)
-        reserve = 56 if room > 140 else max(28, room // 4)
-        label_w = min(max(font_h + 8, natural + 4), max(font_h + 8, room - reserve))
+        return number_text_w, natural
     return number_text_w, max(0, label_w - 4)
 
 
@@ -201,7 +197,7 @@ def _voice_panel(canvas: Canvas, box, view) -> None:
     canvas.text((head[0] + 16, head[1] + 40), f"{view.voice_minutes:,} min", font("bold", 24), INK)
     canvas.text(
         (head[2] - 16, head[1] + 48),
-        f"{view.voice_minutes / 60:.1f} h  ·  {view.voice_all_time:,} all",
+        f"{view.voice_minutes / 60:.1f} h this week",
         font("medium", 13),
         MUTED,
         anchor="rt",
@@ -247,11 +243,11 @@ def _donut_panel(canvas: Canvas, box, view) -> None:
 
 
 def render(stats, names, guild_name: str, *, watermark: str | None = None) -> bytes:
-    view = prepare(stats, names, guild_name)
+    view = prepare(stats, names, guild_name, least_metric="weekly")
     canvas = Canvas(SIZE, BG)
     mark = draw_watermark(canvas, watermark, font("semibold", 12), INK, (28, 34, 48), BORDER, margin=M)
     limit = mark[0] - 16
-    canvas.text((M, M + 6), "WEEKLY STATS", font("medium", 13), ACCENT)
+    canvas.text((M, M + 6), "THIS WEEK", font("medium", 13), ACCENT)
     canvas.text((limit, M + 8), view.week, font("medium", 15), MUTED, anchor="rt", max_width=max(80, limit - M - 200))
     canvas.text((M, M + 36), view.guild, font("bold", 34), INK, max_width=WIDTH - 2 * M)
     canvas.draw.line((M, M + HEADER - 10, WIDTH - M, M + HEADER - 10), fill=BORDER, width=1)
@@ -290,7 +286,7 @@ def render(stats, names, guild_name: str, *, watermark: str | None = None) -> by
         "TOP REACTIONS",
         (251, 113, 133),
         pad=reaction_pad,
-        min_row=18,
+        min_row=20,
         max_row=100,
     )
     # Vertical pad stays 6 so the six emoji rows keep that shared row height.
@@ -309,14 +305,14 @@ def render(stats, names, guild_name: str, *, watermark: str | None = None) -> by
             top_react,
             view.reactions,
             pad=reaction_pad,
-            min_row=18,
+            min_row=20,
             max_row=100,
         ),
         pad=emoji_pad,
-        min_row=16,
+        min_row=18,
         max_row=80,
-        metric="all_time",
-        bar_scale=row_bar_max(view.reactions, "all_time"),
+        metric="weekly",
+        bar_scale=row_bar_max(view.reactions, "weekly"),
     )
 
     y += CHART_H + G
@@ -366,6 +362,160 @@ def render(stats, names, guild_name: str, *, watermark: str | None = None) -> by
         (251, 191, 36),
         bar_scale=row_bar_max(view.top_commands),
     )
+
+    canvas.text((M, HEIGHT - M), "Aggregate counts only. Message text and prompts are not stored.", font("regular", 12), MUTED, anchor="lb")
+    return canvas.png()
+
+
+def _tracking_panel(canvas: Canvas, box, title: str, total: int, unit: str, since: str, color) -> None:
+    """Totals for a category that only has live data, plus the day tracking started."""
+    _panel(canvas, box)
+    x0, y0, x1, y1 = box
+    canvas.text((x0 + 16, y0 + 16), title, font("semibold", 15), INK)
+    note = f"tracking since {since}"
+    if total > 0:
+        canvas.text((x0 + 16, y0 + 48), f"{total:,} {unit}", font("bold", 28), color)
+        canvas.text((x0 + 16, y0 + 92), note, font("medium", 14), MUTED, max_width=x1 - x0 - 32)
+    else:
+        canvas.text((x0 + 16, y0 + 52), note, font("medium", 16), GOLD, max_width=x1 - x0 - 32)
+        canvas.text(
+            (x0 + 16, y0 + 80),
+            "Not counted before that date.",
+            font("regular", 13),
+            MUTED,
+            max_width=x1 - x0 - 32,
+        )
+
+
+def render_alltime(stats, names, guild_name: str, *, watermark: str | None = None) -> bytes:
+    """All-time dashboard. Gold header so it is not the weekly card."""
+    view = prepare(stats, names, guild_name, scope="all_time")
+    canvas = Canvas(SIZE, BG)
+    mark = draw_watermark(canvas, watermark, font("semibold", 12), INK, (48, 36, 16), GOLD, margin=M)
+    limit = mark[0] - 16
+    canvas.text((M, M + 6), "ALL TIME", font("medium", 13), GOLD)
+    canvas.text(
+        (limit, M + 8),
+        f"since {view.earliest}",
+        font("medium", 15),
+        GOLD,
+        anchor="rt",
+        max_width=max(80, limit - M - 200),
+    )
+    canvas.text((M, M + 36), view.guild, font("bold", 34), INK, max_width=WIDTH - 2 * M)
+    canvas.draw.line((M, M + HEADER - 10, WIDTH - M, M + HEADER - 10), fill=GOLD, width=3)
+
+    y = M + HEADER + G
+    tiles = hsplit((M, y, WIDTH - M, y + KPI_H), [1, 1, 1], G)
+    for tile, kpi in zip(tiles, view.kpis):
+        _panel(canvas, tile)
+        draw_kpi(
+            canvas,
+            tile,
+            kpi,
+            label_font=font("medium", 12),
+            value_font=font("bold", 30),
+            delta_font=font("semibold", 14),
+            ink=INK,
+            muted=MUTED,
+            up=GOOD,
+            down=BAD,
+            accent=GOLD,
+        )
+
+    y += KPI_H + G
+    trend, channels = hsplit((M, y, WIDTH - M, y + CHART_H), [1.35, 1], G)
+    _panel(canvas, trend)
+    tx0, ty0, tx1, ty1 = trend
+    canvas.text((tx0 + 16, ty0 + 14), "WEEKLY TREND", font("semibold", 15), INK)
+    canvas.text((tx0 + 150, ty0 + 16), "each line scaled to its own peak", font("regular", 12), MUTED)
+    series = [
+        (view.history_messages or [0], ACCENT),
+        (view.history_reactions or [0], (251, 113, 133)),
+        (view.history_members or [0], GOLD),
+    ]
+    chart = chart_trends(series, (max(1, tx1 - tx0 - 32), max(1, ty1 - ty0 - 78)), PANEL, BORDER)
+    canvas.paste(chart, (tx0 + 16, ty0 + 42))
+    legend = (("Messages", ACCENT), ("Reactions", (251, 113, 133)), ("Active members", GOLD))
+    axis_font = font("medium", 12)
+    legend_y = ty1 - 28
+    left_label = view.earliest
+    right_label = view.week
+    left_w = int(canvas.draw.textlength(left_label, font=axis_font)) if left_label else 0
+    right_w = int(canvas.draw.textlength(right_label, font=axis_font)) if right_label else 0
+    if left_label:
+        canvas.text((tx0 + 16, legend_y), left_label, axis_font, MUTED)
+    if right_label:
+        canvas.text((tx1 - 16, legend_y), right_label, axis_font, MUTED, anchor="rt")
+    cursor = tx0 + 16 + (left_w + 18 if left_label else 0)
+    right_limit = tx1 - 16 - (right_w + 18 if right_label else 0)
+    for label, color in legend:
+        label_w = int(canvas.draw.textlength(label, font=axis_font))
+        if cursor + 18 + label_w > right_limit:
+            break
+        canvas.rounded((cursor, legend_y, cursor + 12, legend_y + 12), 2, color)
+        canvas.text((cursor + 18, legend_y), label, axis_font, MUTED)
+        cursor += 18 + label_w + 22
+    _panel(canvas, channels)
+    _rows(canvas, channels, view.top_channels, "TOP CHANNELS", GOLD, meta="all time", metric="all_time")
+
+    y += CHART_H + G
+    heat = (M, y, WIDTH - M, y + HEAT_H)
+    _panel(canvas, heat)
+    peak = max((value for row in view.heatmap for value in row), default=0)
+    legend_left = draw_heat_legend(canvas, (WIDTH - M - 16, y + 24), HEAT, peak, font("medium", 12), MUTED)
+    canvas.text(
+        (M + 16, y + 14),
+        "BUSIEST HOURS  ·  ALL TIME  ·  PT",
+        font("semibold", 15),
+        INK,
+        max_width=max(80, legend_left - (M + 24)),
+    )
+    draw_heatmap(
+        canvas,
+        (M + 16, y + 46, WIDTH - M - 16, y + HEAT_H - 12),
+        view.heatmap,
+        HEAT,
+        font("medium", 12),
+        MUTED,
+        gutter_left=46,
+        gutter_bottom=22,
+        empty_font=font("regular", 14),
+        empty_fill=MUTED,
+    )
+
+    y += HEAT_H + G
+    reactions, emojis, commands = hsplit((M, y, WIDTH - M, y + MID_H), [1, 1, 1], G)
+    for box in (reactions, emojis, commands):
+        _panel(canvas, box)
+    _rows(canvas, reactions, view.reactions, "TOP REACTIONS", (251, 113, 133), metric="all_time", pad=12, min_row=20, max_row=40)
+    _rows(canvas, emojis, view.least_emojis, "LEAST-USED EMOJIS", GOLD, metric="all_time", pad=12, min_row=18, max_row=36)
+    _rows(canvas, commands, view.top_commands, "TOP COMMANDS", CYAN, metric="all_time")
+
+    y += MID_H + G
+    quiet, least_commands, image, voice = hsplit((M, y, WIDTH - M, y + LOW_H), [1, 1, 1, 1], G)
+    _panel(canvas, quiet)
+    _panel(canvas, least_commands)
+    _rows(
+        canvas,
+        quiet,
+        view.bottom_channels,
+        "QUIET CHANNELS",
+        (167, 139, 250),
+        metric="all_time",
+        bar_scale=row_bar_max(view.top_channels, "all_time"),
+    )
+    _rows(
+        canvas,
+        least_commands,
+        view.bottom_commands,
+        "LEAST-USED COMMANDS",
+        GOLD,
+        metric="all_time",
+        bar_scale=row_bar_max(view.top_commands, "all_time"),
+    )
+    _tracking_panel(canvas, image, "IMAGE GENERATION", view.image_runs_all_time, "runs", view.tracking_since, CYAN)
+    _tracking_panel(canvas, voice, "VOICE", view.voice_all_time, "min", view.tracking_since, CYAN)
 
     canvas.text((M, HEIGHT - M), "Aggregate counts only. Message text and prompts are not stored.", font("regular", 12), MUTED, anchor="lb")
     return canvas.png()

@@ -505,3 +505,47 @@ def test_known_custom_emojis_drop_deleted_ones(store):
 
     empty = store.build_stats(1, WHEN, known_custom_emojis=[])
     assert empty.least_custom_emojis == ()
+
+
+def test_all_time_heatmap_rankings_history_and_earliest_week(store):
+    from cogs.utils.stats_store import LIVE_TRACKING_SINCE
+
+    previous = WHEN - timedelta(days=7)
+    store.record_message(1, 11, 6, previous)
+    store.record_message(1, 11, 6, previous)
+    store.record_reaction(1, 6, "old", name="old", is_custom=True, when=previous)
+    store.record_command(1, "oldcmd", "prefix")
+    store.close_week(1, date(2026, 11, 9), datetime(2026, 11, 15, 21, tzinfo=LA))
+    store.record_message(1, 10, 7, WHEN)
+    store.record_reaction(1, 7, "new", name="new", is_custom=True, when=WHEN)
+    store.record_command(1, "newcmd", "slash")
+    stats = store.build_stats(1, WHEN, known_channel_ids=[10, 11, 12], known_custom_emojis=[("old", "old"), ("new", "new"), ("zzz", "zzz")])
+    assert stats.heatmap[2][15] == 2  # one message and one reaction this week
+    assert stats.heatmap_all_time[2][15] == 5  # prior week: 2 messages + 1 reaction, plus this week
+    assert stats.heatmap_all_time != stats.heatmap
+    assert [row.channel_id for row in stats.top_channels_all_time] == [11, 10]
+    assert any(row.channel_id == 12 and row.all_time == 0 for row in stats.bottom_channels_all_time)
+    assert [row.emoji_key for row in stats.top_reactions] == ["new"]
+    assert [row.emoji_key for row in stats.top_reactions_all_time] == ["new", "old"]
+    assert stats.least_custom_emojis[0].emoji_key == "zzz"
+    assert stats.least_custom_emojis_weekly[0].emoji_key == "zzz"
+    assert [row.name for row in stats.top_commands_all_time] == ["newcmd", "oldcmd"]
+    assert stats.earliest_week == date(2026, 11, 9)
+    assert [point.week_start for point in stats.week_history] == [date(2026, 11, 9), date(2026, 11, 16)]
+    assert stats.week_history[0].messages == 2
+    assert stats.week_history[0].reactions == 1
+    assert stats.week_history[1].messages == 1
+    assert stats.week_history[1].active_members == 1
+    assert stats.live_since == LIVE_TRACKING_SINCE
+
+    fresh = store.build_stats(2, WHEN)
+    assert fresh.earliest_week == fresh.week_start
+    assert [point.week_start for point in fresh.week_history] == [fresh.week_start]
+    assert fresh.live_since == LIVE_TRACKING_SINCE
+
+    store._conn.execute(
+        "INSERT INTO backfill_meta (guild_id, live_at) VALUES (1, ?)",
+        ("2026-11-20T18:00:00+00:00",),
+    )
+    marked = store.build_stats(1, WHEN)
+    assert marked.live_since == date(2026, 11, 20)
