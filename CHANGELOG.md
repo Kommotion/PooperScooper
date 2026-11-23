@@ -10,6 +10,9 @@ This is the first versioned changelog for PooperScooper, covering about Oct 14â€
 - The all-time image-gen panel tracks since May 2025.
 - The all-time image-gen panel lists how many gens used each model.
 - !play and /play, and other prefix and slash twins, are one combined row.
+- Weekly busiest hours only show this week's hours.
+- Least-used commands only list commands the bot currently has loaded.
+- The weekly stats card now posts in #illuminaughty.
 
 ### Background
 

@@ -332,14 +332,15 @@ class _Buffer:
     """Pending deltas. Nothing here is written until flush."""
 
     def __init__(self) -> None:
-        self.channels: dict[tuple[int, int], int] = {}
-        self.reactions: dict[tuple[int, str], list] = {}
-        self.commands: dict[tuple[int, str, str], int] = {}
-        self.voice_channels: dict[tuple[int, int], int] = {}
-        self.heatmap: dict[tuple[int, int, int], int] = {}
-        self.voice_heatmap: dict[tuple[int, int, int], int] = {}
-        self.imagegen: dict[tuple[int, str, str], int] = {}
-        self.imagegen_totals: dict[tuple[int, str], float] = {}
+        # The last key field is whether the amount belongs in the open weekly column.
+        self.channels: dict[tuple[int, int, bool], int] = {}
+        self.reactions: dict[tuple[int, str, bool], list] = {}
+        self.commands: dict[tuple[int, str, str, bool], int] = {}
+        self.voice_channels: dict[tuple[int, int, bool], int] = {}
+        self.heatmap: dict[tuple[int, int, int, bool], int] = {}
+        self.voice_heatmap: dict[tuple[int, int, int, bool], int] = {}
+        self.imagegen: dict[tuple[int, str, str, bool], int] = {}
+        self.imagegen_totals: dict[tuple[int, str, bool], float] = {}
         self.active: set[tuple[int, int]] = set()
 
     def empty(self) -> bool:
@@ -358,12 +359,14 @@ class _Buffer:
     def clear(self) -> None:
         self.__init__()
 
-    def add_channel(self, guild_id: int, channel_id: int, amount: int = 1) -> None:
-        key = (guild_id, channel_id)
+    def add_channel(self, guild_id: int, channel_id: int, amount: int = 1, *, weekly: bool = True) -> None:
+        key = (guild_id, channel_id, bool(weekly))
         self.channels[key] = self.channels.get(key, 0) + amount
 
-    def add_reaction(self, guild_id: int, emoji_key: str, name: str, is_custom: bool, amount: int = 1) -> None:
-        key = (guild_id, emoji_key)
+    def add_reaction(
+        self, guild_id: int, emoji_key: str, name: str, is_custom: bool, amount: int = 1, *, weekly: bool = True
+    ) -> None:
+        key = (guild_id, emoji_key, bool(weekly))
         current = self.reactions.get(key)
         if current is None:
             self.reactions[key] = [amount, name, bool(is_custom)]
@@ -372,28 +375,28 @@ class _Buffer:
         current[1] = name
         current[2] = bool(is_custom)
 
-    def add_command(self, guild_id: int, name: str, kind: str, amount: int = 1) -> None:
-        key = (guild_id, name, kind)
+    def add_command(self, guild_id: int, name: str, kind: str, amount: int = 1, *, weekly: bool = True) -> None:
+        key = (guild_id, name, kind, bool(weekly))
         self.commands[key] = self.commands.get(key, 0) + amount
 
-    def add_voice_channel(self, guild_id: int, channel_id: int, minutes: int) -> None:
-        key = (guild_id, channel_id)
+    def add_voice_channel(self, guild_id: int, channel_id: int, minutes: int, *, weekly: bool = True) -> None:
+        key = (guild_id, channel_id, bool(weekly))
         self.voice_channels[key] = self.voice_channels.get(key, 0) + minutes
 
-    def add_heatmap(self, guild_id: int, weekday: int, hour: int, amount: int = 1) -> None:
-        key = (guild_id, weekday, hour)
+    def add_heatmap(self, guild_id: int, weekday: int, hour: int, amount: int = 1, *, weekly: bool = True) -> None:
+        key = (guild_id, weekday, hour, bool(weekly))
         self.heatmap[key] = self.heatmap.get(key, 0) + amount
 
-    def add_voice_heatmap(self, guild_id: int, weekday: int, hour: int, minutes: int) -> None:
-        key = (guild_id, weekday, hour)
+    def add_voice_heatmap(self, guild_id: int, weekday: int, hour: int, minutes: int, *, weekly: bool = True) -> None:
+        key = (guild_id, weekday, hour, bool(weekly))
         self.voice_heatmap[key] = self.voice_heatmap.get(key, 0) + minutes
 
-    def add_imagegen(self, guild_id: int, dimension: str, item_key: str, amount: int = 1) -> None:
-        key = (guild_id, dimension, item_key)
+    def add_imagegen(self, guild_id: int, dimension: str, item_key: str, amount: int = 1, *, weekly: bool = True) -> None:
+        key = (guild_id, dimension, item_key, bool(weekly))
         self.imagegen[key] = self.imagegen.get(key, 0) + amount
 
-    def add_imagegen_total(self, guild_id: int, metric: str, amount: float) -> None:
-        key = (guild_id, metric)
+    def add_imagegen_total(self, guild_id: int, metric: str, amount: float, *, weekly: bool = True) -> None:
+        key = (guild_id, metric, bool(weekly))
         self.imagegen_totals[key] = self.imagegen_totals.get(key, 0.0) + amount
 
     def add_active(self, guild_id: int, user_id: int) -> None:
@@ -547,10 +550,11 @@ class StatsStore:
         channel_id = int(channel_id)
         user_id = int(user_id)
         when = _as_aware(when)
-        self._buffer.add_channel(guild_id, channel_id, 1)
+        weekly = self._weekly_open(guild_id, when)
+        self._buffer.add_channel(guild_id, channel_id, 1, weekly=weekly)
         local = when.astimezone(LA)
-        self._buffer.add_heatmap(guild_id, local.weekday(), local.hour, 1)
-        if not self.is_opted_out(guild_id, user_id):
+        self._buffer.add_heatmap(guild_id, local.weekday(), local.hour, 1, weekly=weekly)
+        if weekly and not self.is_opted_out(guild_id, user_id):
             self._buffer.add_active(guild_id, user_id)
         return True
 
@@ -568,10 +572,11 @@ class StatsStore:
         key = _clip(emoji_key, 100) or "?"
         label = _clip(name or key, 80) or key
         when = _as_aware(when)
-        self._buffer.add_reaction(guild_id, key, label, bool(is_custom), 1)
+        weekly = self._weekly_open(guild_id, when)
+        self._buffer.add_reaction(guild_id, key, label, bool(is_custom), 1, weekly=weekly)
         local = when.astimezone(LA)
-        self._buffer.add_heatmap(guild_id, local.weekday(), local.hour, 1)
-        if user_id is None:
+        self._buffer.add_heatmap(guild_id, local.weekday(), local.hour, 1, weekly=weekly)
+        if not weekly or user_id is None:
             return
         user_id = int(user_id)
         if self.is_opted_out(guild_id, user_id):
@@ -584,7 +589,9 @@ class StatsStore:
         label = _clip(name, 80)
         if not label or is_owner_only_name(label):
             return
-        self._buffer.add_command(int(guild_id), label, kind, 1)
+        guild_id = int(guild_id)
+        weekly = self._weekly_open(guild_id, datetime.now(timezone.utc))
+        self._buffer.add_command(guild_id, label, kind, 1, weekly=weekly)
 
     def record_voice(
         self,
@@ -606,9 +613,20 @@ class StatsStore:
             return 0
         guild_id = int(guild_id)
         channel_id = int(channel_id)
-        self._buffer.add_voice_channel(guild_id, channel_id, total)
+        hour_open = self._voice_hours_open(guild_id, start, end)
+        open_minutes = 0
+        closed_minutes = 0
         for weekday, hour, minutes in parts:
-            self._buffer.add_voice_heatmap(guild_id, weekday, hour, minutes)
+            if hour_open.get((weekday, hour), True):
+                open_minutes += minutes
+                self._buffer.add_voice_heatmap(guild_id, weekday, hour, minutes, weekly=True)
+            else:
+                closed_minutes += minutes
+                self._buffer.add_voice_heatmap(guild_id, weekday, hour, minutes, weekly=False)
+        if open_minutes:
+            self._buffer.add_voice_channel(guild_id, channel_id, open_minutes, weekly=True)
+        if closed_minutes:
+            self._buffer.add_voice_channel(guild_id, channel_id, closed_minutes, weekly=False)
         return total
 
     def record_imagegen(
@@ -626,26 +644,27 @@ class StatsStore:
         success: bool = True,
     ) -> None:
         guild_id = int(guild_id)
+        weekly = self._weekly_open(guild_id, datetime.now(timezone.utc))
         model_name = _clip(model, 80) if model else ""
         if model_name:
-            self._buffer.add_imagegen(guild_id, "model", model_name, 1)
+            self._buffer.add_imagegen(guild_id, "model", model_name, 1, weekly=weekly)
         for lora in loras or ():
             lora_name = _clip(lora, 80) if lora else ""
             if lora_name:
-                self._buffer.add_imagegen(guild_id, "lora", lora_name, 1)
+                self._buffer.add_imagegen(guild_id, "lora", lora_name, 1, weekly=weekly)
         if edit_mode:
-            self._buffer.add_imagegen(guild_id, "edit_mode", _clip(edit_mode, 80), 1)
+            self._buffer.add_imagegen(guild_id, "edit_mode", _clip(edit_mode, 80), 1, weekly=weekly)
         if width is not None and height is not None:
-            self._buffer.add_imagegen(guild_id, "resolution", f"{int(width)}x{int(height)}", 1)
+            self._buffer.add_imagegen(guild_id, "resolution", f"{int(width)}x{int(height)}", 1, weekly=weekly)
         if steps is not None:
-            self._buffer.add_imagegen(guild_id, "steps", str(int(steps)), 1)
+            self._buffer.add_imagegen(guild_id, "steps", str(int(steps)), 1, weekly=weekly)
         if sampler:
-            self._buffer.add_imagegen(guild_id, "sampler", _clip(sampler, 80), 1)
-        self._buffer.add_imagegen(guild_id, "outcome", "success" if success else "error", 1)
-        self._buffer.add_imagegen_total(guild_id, "generations", 1)
+            self._buffer.add_imagegen(guild_id, "sampler", _clip(sampler, 80), 1, weekly=weekly)
+        self._buffer.add_imagegen(guild_id, "outcome", "success" if success else "error", 1, weekly=weekly)
+        self._buffer.add_imagegen_total(guild_id, "generations", 1, weekly=weekly)
         if seconds is not None:
-            self._buffer.add_imagegen_total(guild_id, "seconds", float(seconds))
-            self._buffer.add_imagegen_total(guild_id, "timed", 1)
+            self._buffer.add_imagegen_total(guild_id, "seconds", float(seconds), weekly=weekly)
+            self._buffer.add_imagegen_total(guild_id, "timed", 1, weekly=weekly)
 
     def record_imagegen_followup(self, guild_id: int, kind: str) -> None:
         """Count a regenerate or edit click. ``kept`` is computed when the card is built."""
@@ -653,7 +672,9 @@ class StatsStore:
             return
         if kind not in {"regenerate", "edit"}:
             return
-        self._buffer.add_imagegen(int(guild_id), "followup", kind, 1)
+        guild_id = int(guild_id)
+        weekly = self._weekly_open(guild_id, datetime.now(timezone.utc))
+        self._buffer.add_imagegen(guild_id, "followup", kind, 1, weekly=weekly)
 
     def flush(self) -> None:
         """Write every pending delta in one transaction."""
@@ -979,10 +1000,39 @@ class StatsStore:
             (*values, weekly, all_time),
         )
 
+    def _weekly_open(self, guild_id: int, when: datetime) -> bool:
+        """False when this event's Monday week was already closed for the guild."""
+        posted = self.last_posted_week_start(guild_id)
+        if posted is None:
+            return True
+        return posted != week_start_for(when)
+
+    def _voice_hours_open(self, guild_id: int, start: datetime, end: datetime) -> dict[tuple[int, int], bool]:
+        """Whether each local hour in a voice session still belongs on the open week."""
+        local = _as_aware(start).astimezone(LA)
+        end_local = _as_aware(end).astimezone(LA)
+        flags: dict[tuple[int, int], bool] = {}
+        cursor = local
+        steps = 0
+        while cursor < end_local and steps < 24 * 21:
+            steps += 1
+            flags[(cursor.weekday(), cursor.hour)] = self._weekly_open(guild_id, cursor)
+            nxt = cursor.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+            if nxt <= cursor:
+                nxt = cursor + timedelta(hours=1)
+            cursor = nxt
+        return flags
+
     def _write_buffer(self, buffer: _Buffer) -> None:
-        for (guild_id, channel_id), amount in buffer.channels.items():
-            self._upsert("channel_messages", ("guild_id", "channel_id"), (guild_id, channel_id), amount)
-        for (guild_id, emoji_key), (amount, name, is_custom) in buffer.reactions.items():
+        for (guild_id, channel_id, weekly_on), amount in buffer.channels.items():
+            self._upsert_split(
+                "channel_messages",
+                ("guild_id", "channel_id"),
+                (guild_id, channel_id),
+                amount if weekly_on else 0,
+                amount,
+            )
+        for (guild_id, emoji_key, weekly_on), (amount, name, is_custom) in buffer.reactions.items():
             self._conn.execute(
                 """
                 INSERT INTO reaction_counts
@@ -994,43 +1044,54 @@ class StatsStore:
                     emoji_name = excluded.emoji_name,
                     is_custom = excluded.is_custom
                 """,
-                (guild_id, emoji_key, name, 1 if is_custom else 0, amount, amount),
+                (guild_id, emoji_key, name, 1 if is_custom else 0, amount if weekly_on else 0, amount),
             )
-        for (guild_id, name, kind), amount in buffer.commands.items():
-            self._upsert(
+        for (guild_id, name, kind, weekly_on), amount in buffer.commands.items():
+            self._upsert_split(
                 "command_counts",
                 ("guild_id", "command_name", "kind"),
                 (guild_id, name, kind),
+                amount if weekly_on else 0,
                 amount,
             )
-        for (guild_id, channel_id), amount in buffer.voice_channels.items():
-            self._upsert("voice_channels", ("guild_id", "channel_id"), (guild_id, channel_id), amount)
-        for (guild_id, weekday, hour), amount in buffer.heatmap.items():
-            self._upsert(
+        for (guild_id, channel_id, weekly_on), amount in buffer.voice_channels.items():
+            self._upsert_split(
+                "voice_channels",
+                ("guild_id", "channel_id"),
+                (guild_id, channel_id),
+                amount if weekly_on else 0,
+                amount,
+            )
+        for (guild_id, weekday, hour, weekly_on), amount in buffer.heatmap.items():
+            self._upsert_split(
                 "activity_heatmap",
                 ("guild_id", "weekday", "hour"),
                 (guild_id, weekday, hour),
+                amount if weekly_on else 0,
                 amount,
             )
-        for (guild_id, weekday, hour), amount in buffer.voice_heatmap.items():
-            self._upsert(
+        for (guild_id, weekday, hour, weekly_on), amount in buffer.voice_heatmap.items():
+            self._upsert_split(
                 "voice_heatmap",
                 ("guild_id", "weekday", "hour"),
                 (guild_id, weekday, hour),
+                amount if weekly_on else 0,
                 amount,
             )
-        for (guild_id, dimension, item_key), amount in buffer.imagegen.items():
-            self._upsert(
+        for (guild_id, dimension, item_key, weekly_on), amount in buffer.imagegen.items():
+            self._upsert_split(
                 "imagegen_counts",
                 ("guild_id", "dimension", "item_key"),
                 (guild_id, dimension, item_key),
+                amount if weekly_on else 0,
                 amount,
             )
-        for (guild_id, metric), amount in buffer.imagegen_totals.items():
-            self._upsert_amount(
+        for (guild_id, metric, weekly_on), amount in buffer.imagegen_totals.items():
+            self._upsert_amount_split(
                 "imagegen_totals",
                 ("guild_id", "metric"),
                 (guild_id, metric),
+                amount if weekly_on else 0,
                 amount,
             )
         for guild_id, user_id in buffer.active:
@@ -1055,6 +1116,21 @@ class StatsStore:
                 all_time = all_time + excluded.all_time
             """,
             (*values, amount, amount),
+        )
+
+    def _upsert_amount_split(self, table: str, columns: tuple[str, ...], values: tuple, weekly: float, all_time: float) -> None:
+        column_sql = ", ".join((*columns, "weekly", "all_time"))
+        placeholders = ", ".join("?" for _ in (*columns, "weekly", "all_time"))
+        conflict = ", ".join(columns)
+        self._conn.execute(
+            f"""
+            INSERT INTO {table} ({column_sql})
+            VALUES ({placeholders})
+            ON CONFLICT({conflict}) DO UPDATE SET
+                weekly = weekly + excluded.weekly,
+                all_time = all_time + excluded.all_time
+            """,
+            (*values, weekly, all_time),
         )
 
     def last_posted_week_start(self, guild_id: int) -> date | None:
@@ -1463,11 +1539,11 @@ class StatsStore:
             imagegen=imagegen,
             active_members=active_count,
             active_members_last_week=_snapshot_int(previous, "active_members"),
-            heatmap=_heatmap(heat_rows),
+            heatmap=_hide_future_hours(_heatmap(heat_rows), week, now),
             voice_minutes=sum(int(row["weekly"]) for row in voice_rows),
             voice_minutes_all_time=sum(int(row["all_time"]) for row in voice_rows),
             top_voice_channels=tuple(_channel(row) for row in voice_sorted[:TOP_N]),
-            voice_heatmap=_heatmap(voice_heat_rows),
+            voice_heatmap=_hide_future_hours(_heatmap(voice_heat_rows), week, now),
             messages_weekly=messages_weekly,
             messages_all_time=sum(int(row["all_time"]) for row in channels),
             reactions_weekly=reactions_weekly,
@@ -2586,6 +2662,24 @@ def _split_commands(rows, metric: str = "weekly") -> tuple[list[CommandCount], l
 
 def _command(row) -> CommandCount:
     return CommandCount(str(row["command_name"]), str(row["kind"]), int(row["weekly"]), int(row["all_time"]))
+
+
+def _hide_future_hours(grid, week: date, now: datetime) -> tuple[tuple[int, ...], ...]:
+    """Zero weekly cells whose Los Angeles hour has not started yet.
+
+    A cell is Monday ``week`` plus ``weekday`` days plus ``hour`` hours.
+    Hours after ``now`` stay off the card. All-time grids are left alone.
+    """
+    local_now = _as_aware(now).astimezone(LA)
+    origin = datetime(week.year, week.month, week.day, tzinfo=LA)
+    masked = []
+    for weekday, row in enumerate(grid):
+        line = []
+        for hour, value in enumerate(row):
+            cell = origin + timedelta(days=weekday, hours=hour)
+            line.append(0 if cell > local_now else int(value))
+        masked.append(tuple(line))
+    return tuple(masked)
 
 
 def _heatmap(rows, column: str = "weekly") -> tuple[tuple[int, ...], ...]:

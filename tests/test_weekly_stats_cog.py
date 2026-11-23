@@ -94,9 +94,9 @@ def test_extension_and_default_guild_config():
     assert MTS_GUILD_ID == 932057681307512922
     default = DEFAULT_GUILDS[MTS_GUILD_ID]
     assert default.enabled is True
-    assert default.report_channel_id == MTS_REPORT_CHANNEL_ID == 1045149015756521493
+    assert default.report_channel_id == MTS_REPORT_CHANNEL_ID == 1082770598981283880
     assert MTS_ILLUMINAUGHTY_CHANNEL_ID == 1082770598981283880
-    assert default.report_channel_id != MTS_ILLUMINAUGHTY_CHANNEL_ID
+    assert default.report_channel_id == MTS_ILLUMINAUGHTY_CHANNEL_ID
     assert not hasattr(default, "report_channel_name")
     assert default.weekday == 6
     assert default.hour == 21
@@ -1141,6 +1141,6 @@ def test_report_channel_id_resolves_outside_the_stats_guild(tmp_path):
         posted = store.build_stats(MTS_GUILD_ID, POST_AT)
         assert posted.messages_all_time == 1
         assert posted.guild_id == MTS_GUILD_ID
-        assert MTS_ILLUMINAUGHTY_CHANNEL_ID != MTS_REPORT_CHANNEL_ID
+        assert MTS_REPORT_CHANNEL_ID == MTS_ILLUMINAUGHTY_CHANNEL_ID
     finally:
         store.close()

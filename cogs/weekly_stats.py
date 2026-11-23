@@ -36,12 +36,9 @@ log = logging.getLogger(__name__)
 # Menaces to Sobriety. Same id as cogs.candyhunt.MTS_GUILD_ID.
 MTS_GUILD_ID = 932057681307512922
 
-# Future #illuminaughty destination. Not used yet.
+# MTS #illuminaughty. The card still counts MTS only.
 MTS_ILLUMINAUGHTY_CHANNEL_ID = 1082770598981283880
-
-# PooperScooper test channel in the support guild. Current destination.
-# Same id as cogs.candyhunt.SUPPORT_TEST_CHANNEL_ID. The card still counts MTS.
-MTS_REPORT_CHANNEL_ID = 1045149015756521493
+MTS_REPORT_CHANNEL_ID = MTS_ILLUMINAUGHTY_CHANNEL_ID
 
 
 @dataclass(frozen=True)
@@ -328,7 +325,15 @@ class WeeklyStats(commands.Cog):
             return alias_map_from_bot(self.bot)
         if self._source_command_map is None:
             root = Path(__file__).resolve().parents[1]
-            self._source_command_map = alias_map_from_source(root)
+            from PooperScooper import extensions_to_load
+
+            try:
+                from cogs.utils.config import load_config
+
+                cfg = load_config()
+            except Exception:
+                cfg = None
+            self._source_command_map = alias_map_from_source(root, modules=extensions_to_load(cfg))
         return self._source_command_map
 
     def _cut_open_voice(self, guild_id: int, now: datetime) -> None:

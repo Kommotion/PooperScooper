@@ -11,22 +11,30 @@ import ast
 from pathlib import Path
 
 
-def alias_map_from_source(root: str | Path) -> dict[str, str]:
+def alias_map_from_source(root: str | Path, modules: list[str] | None = None) -> dict[str, str]:
     """Map alias and command name to the canonical prefix command.
 
-    Scans ``root/cogs/**/*.py`` and ``root/PooperScooper.py`` for
+    With ``modules`` None, scans ``root/cogs/**/*.py`` and
+    ``root/PooperScooper.py``. Otherwise scans only those module files
+    (``cogs.general`` is ``root/cogs/general.py``). Looks for
     ``@commands.command`` / ``@commands.group`` and for ``group.command`` /
     ``group.group`` on those groups. ``help`` is always present.
     """
     root = Path(root)
     mapping: dict[str, str] = {}
     paths = []
-    cogs = root / "cogs"
-    if cogs.is_dir():
-        paths.extend(path for path in cogs.rglob("*.py") if path.is_file())
-    entry = root / "PooperScooper.py"
-    if entry.is_file():
-        paths.append(entry)
+    if modules is None:
+        cogs = root / "cogs"
+        if cogs.is_dir():
+            paths.extend(path for path in cogs.rglob("*.py") if path.is_file())
+        entry = root / "PooperScooper.py"
+        if entry.is_file():
+            paths.append(entry)
+    else:
+        for module in modules:
+            path = root.joinpath(*str(module).split(".")).with_suffix(".py")
+            if path.is_file():
+                paths.append(path)
     for path in paths:
         try:
             source = path.read_text(encoding="utf-8")

@@ -243,6 +243,26 @@ def test_rankings_heatmaps_and_least_used_custom_emojis(store):
     assert all(row.is_custom for row in least)
 
 
+def test_late_sunday_after_close_stays_out_of_the_next_week(store):
+    week = date(2026, 11, 16)
+    store.close_week(1, week, datetime(2026, 11, 22, 21, tzinfo=LA))
+    late = datetime(2026, 11, 22, 21, 30, tzinfo=LA)
+    store.record_message(1, 8, 10, late)
+    store.record_voice(1, 9, 10, late, late + timedelta(minutes=5))
+    monday = datetime(2026, 11, 23, 8, tzinfo=LA)
+    store.record_message(1, 8, 11, monday)
+    morning = datetime(2026, 11, 23, 9, 30, tzinfo=LA)
+    stats = store.build_stats(1, morning)
+    assert stats.week_start == date(2026, 11, 23)
+    assert stats.heatmap[6][21] == 0
+    assert stats.heatmap[0][8] > 0
+    assert stats.heatmap_all_time[6][21] >= 1
+    assert stats.voice_heatmap[6][21] == 0
+    assert stats.voice_heatmap_all_time[6][21] >= 1
+    assert stats.messages_weekly == 1
+    assert stats.messages_all_time == 2
+
+
 def test_every_message_counts_without_a_cooldown(tmp_path):
     path = tmp_path / "weekly_stats.sqlite3"
     store = StatsStore(path)
@@ -252,9 +272,9 @@ def test_every_message_counts_without_a_cooldown(tmp_path):
         assert store.record_message(1, 11, 5, start) is True
         assert store.record_message(1, 12, 5, start + timedelta(seconds=1)) is True
         assert store.record_message(1, 13, 5, start + timedelta(seconds=29)) is True
-        assert store._buffer.channels[(1, 10)] == 1
-        assert store._buffer.channels[(1, 11)] == 1
-        assert store._buffer.heatmap[(1, 2, 15)] == 4
+        assert store._buffer.channels[(1, 10, True)] == 1
+        assert store._buffer.channels[(1, 11, True)] == 1
+        assert store._buffer.heatmap[(1, 2, 15, True)] == 4
         assert (1, 5) in store._buffer.active
         assert store.record_message(2, 10, 5, start) is True
         stats = store.build_stats(1, start)

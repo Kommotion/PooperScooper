@@ -5,9 +5,10 @@ Weeks are Monday-start in America/Los_Angeles. The card posts Sunday at
 November changes. Do not pin a fixed UTC offset.
 
 Activity from Sunday 21:00 until Monday 00:00 still has this Monday as its
-calendar week_start. The counters reset when the card is posted, so those
-late events simply land in the fresh weekly columns and show up on the next
-card. Label a posted card with the Monday of the week that was closed.
+calendar week_start. That week is already closed. Those events stay in
+all_time only. They must not land in the fresh weekly columns, and they must
+not show up on the next week's Sunday row or in any other next-week weekly
+bucket. Label a posted card with the Monday of the week that was closed.
 """
 
 from __future__ import annotations

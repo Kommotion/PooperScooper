@@ -8,7 +8,10 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from types import SimpleNamespace
+
 from cogs.utils.stats_commands import alias_map_from_source, canonical_command_name
+from PooperScooper import extensions_to_load
 from cogs.utils.stats_schedule import LA, week_start_for
 from cogs.utils.stats_store import BackfillPart, StatsStore
 
@@ -219,6 +222,45 @@ def test_purge_drops_junk_and_rewrites_the_snapshot(tmp_path):
             assert name not in buckets
     finally:
         store.close()
+
+
+def test_unloaded_costume_is_absent_from_least_used_commands(tmp_path):
+    store = StatsStore(tmp_path / "weekly_stats.sqlite3")
+    try:
+        store._conn.execute(
+            """
+            INSERT INTO command_counts (guild_id, command_name, kind, weekly, all_time)
+            VALUES (1, 'costume', 'prefix', 0, 0)
+            """
+        )
+        store.record_command(1, "play", "prefix")
+        command_map = {"play": "play", "lavalink": "lavalink"}
+        stats = store.build_stats(1, WHEN, command_map=command_map)
+        names = {
+            row.name
+            for row in (
+                stats.top_commands
+                + stats.bottom_commands
+                + stats.top_commands_all_time
+                + stats.bottom_commands_all_time
+            )
+        }
+        assert "costume" not in names
+        assert "lavalink" not in names
+        assert "play" in names
+    finally:
+        store.close()
+
+
+def test_source_map_follows_loaded_extensions():
+    off = alias_map_from_source(ROOT, modules=extensions_to_load(SimpleNamespace(halloween_enabled=False)))
+    folded = {name.casefold() for name in off}
+    assert "costume" not in folded
+    assert "candyadmin" not in folded
+    assert "candy" not in folded
+    assert not any("candyhunt" in name for name in folded)
+    with_costume = alias_map_from_source(ROOT, modules=["cogs.costume"])
+    assert "costume" in {name.casefold() for name in with_costume.values()}
 
 
 def test_build_stats_keeps_fake_names_until_a_map_is_passed(tmp_path):
