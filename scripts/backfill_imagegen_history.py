@@ -43,7 +43,10 @@ IMAGE_CHANNEL_ID = 1373140173067653120
 BOT_ID = 394432249598312459
 DEFAULT_DB = ROOT / "data" / "weekly_stats.sqlite3"
 _TICK = re.compile(r"`([^`]+)`")
+_OLDER_MODEL = re.compile(r" [-–—] ([A-Za-z0-9_]+) model [-–—]")
 _KNOWN_MODELS = {member.value for member in Models}
+_RETIRED_MODELS = {"z_image_turbo_fp8", "anime_wai_anima"}
+_PARSE_MODELS = _KNOWN_MODELS | _RETIRED_MODELS
 _SKIP_FILES = {"halloweenified.png", "original.png"}
 _INBOX_MARKERS = ("MTS Party Prompts", "Party Prompt")
 
@@ -53,10 +56,19 @@ def guild_allowed(guild_id: int) -> bool:
 
 
 def model_from_caption(content: str) -> str:
-    """Model key from a backtick token, or ``unknown``. The text is not kept."""
-    for token in _TICK.findall(content or ""):
+    """Model key from a backtick token or the older hyphen label, else ``unknown``.
+
+    A name that only appears in the preview is ignored. The text is not kept.
+    """
+    text = content or ""
+    for token in _TICK.findall(text):
         key = token.strip()
-        if key in _KNOWN_MODELS:
+        if key in _PARSE_MODELS:
+            return key
+    match = _OLDER_MODEL.search(text)
+    if match:
+        key = match.group(1)
+        if key in _PARSE_MODELS:
             return key
     return "unknown"
 

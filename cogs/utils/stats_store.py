@@ -163,6 +163,14 @@ _ZERO_TABLES = (
 )
 
 
+_DISCORD_EPOCH_MS = 1_420_070_400_000
+
+
+def _snowflake_date(message_id: int) -> date:
+    millis = (int(message_id) >> 22) + _DISCORD_EPOCH_MS
+    return datetime.fromtimestamp(millis / 1000, tz=timezone.utc).astimezone(LA).date()
+
+
 def _as_aware(moment: datetime) -> datetime:
     if moment.tzinfo is None:
         return moment.replace(tzinfo=timezone.utc)
@@ -292,6 +300,7 @@ class WeeklyStats:
     week_history: tuple = ()
     earliest_week: date | None = None
     live_since: date | None = None
+    imagegen_since: date | None = None
     top_channels_all_time: tuple[ChannelCount, ...] = ()
     bottom_channels_all_time: tuple[ChannelCount, ...] = ()
     top_reactions_all_time: tuple[ReactionCount, ...] = ()
@@ -1481,6 +1490,7 @@ class StatsStore:
             ),
             earliest_week=self._earliest_week(guild_id, week),
             live_since=self._live_since(guild_id),
+            imagegen_since=self._imagegen_since(guild_id),
             top_channels_all_time=tuple(_channel(row) for row in top_channels_all),
             bottom_channels_all_time=tuple(_channel(row) for row in bottom_channels_all),
             top_reactions_all_time=tuple(top_reactions_all),
@@ -1509,6 +1519,37 @@ class StatsStore:
         if moment is None:
             return LIVE_TRACKING_SINCE
         return moment.astimezone(LA).date()
+
+    def _imagegen_since(self, guild_id: int) -> date | None:
+        """Earliest image-gen day, or None when this guild has no image history."""
+        earliest: date | None = None
+        row = self._conn.execute(
+            """
+            SELECT MIN(message_id) AS message_id
+            FROM history_applied
+            WHERE guild_id = ? AND source = 'imagegen'
+            """,
+            (guild_id,),
+        ).fetchone()
+        if row is not None and row["message_id"]:
+            earliest = _snowflake_date(int(row["message_id"]))
+        snaps = self._conn.execute(
+            """
+            SELECT week_start, summary_json FROM weekly_snapshots WHERE guild_id = ?
+            """,
+            (guild_id,),
+        ).fetchall()
+        for snap in snaps:
+            try:
+                payload = json.loads(snap["summary_json"])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict) or int(payload.get("imagegen_success") or 0) <= 0:
+                continue
+            start = date.fromisoformat(str(snap["week_start"]))
+            if earliest is None or start < earliest:
+                earliest = start
+        return earliest
 
     def _week_history(
         self,
@@ -1680,6 +1721,67 @@ class StatsStore:
             self._bump_snapshot_imagegen(guild_id, week, 1, 0)
             self._bump_card_imagegen(guild_id, week, "", 1)
             self._bump_card_model(guild_id, week, model_name, 1)
+        return True
+
+    def replace_all_time_imagegen_models(self, guild_id: int, counts: dict[str, int]) -> bool:
+        """Set model all-time counts to ``counts``. Weekly columns and other totals stay.
+
+        Writing the same mapping again changes nothing. Keys are short model ids.
+        """
+        guild_id = int(guild_id)
+        wanted: dict[str, int] = {}
+        for raw_key, raw_count in counts.items():
+            key = _clip(str(raw_key), 80) or "unknown"
+            amount = int(raw_count)
+            if amount < 0:
+                amount = 0
+            wanted[key] = wanted.get(key, 0) + amount
+        wanted = {key: amount for key, amount in wanted.items() if amount > 0}
+        self.flush()
+        rows = self._conn.execute(
+            """
+            SELECT item_key, weekly, all_time
+            FROM imagegen_counts
+            WHERE guild_id = ? AND dimension = 'model'
+            """,
+            (guild_id,),
+        ).fetchall()
+        current = {
+            str(row["item_key"]): (int(row["weekly"]), int(row["all_time"]))
+            for row in rows
+        }
+        if {key: all_time for key, (_weekly, all_time) in current.items() if all_time} == wanted:
+            return False
+        with self._transaction():
+            for key, (weekly, _all_time) in current.items():
+                if key in wanted:
+                    continue
+                if weekly == 0:
+                    self._conn.execute(
+                        """
+                        DELETE FROM imagegen_counts
+                        WHERE guild_id = ? AND dimension = 'model' AND item_key = ?
+                        """,
+                        (guild_id, key),
+                    )
+                else:
+                    self._conn.execute(
+                        """
+                        UPDATE imagegen_counts SET all_time = 0
+                        WHERE guild_id = ? AND dimension = 'model' AND item_key = ?
+                        """,
+                        (guild_id, key),
+                    )
+            for key, amount in wanted.items():
+                self._conn.execute(
+                    """
+                    INSERT INTO imagegen_counts (guild_id, dimension, item_key, weekly, all_time)
+                    VALUES (?, 'model', ?, 0, ?)
+                    ON CONFLICT(guild_id, dimension, item_key) DO UPDATE SET
+                        all_time = excluded.all_time
+                    """,
+                    (guild_id, key, amount),
+                )
         return True
 
     def apply_history_slash(
@@ -2153,10 +2255,33 @@ def _dims_from(raw) -> tuple[DimCount, ...]:
     return tuple(rows)
 
 
+def _merge_model_dims(payload_raw, live: tuple[DimCount, ...]) -> tuple[DimCount, ...]:
+    """Weekly counts from the closed card. All-time counts stay on the live rows."""
+    payload = _dims_from(payload_raw)
+    live_by = {row.key: row for row in live}
+    payload_by = {row.key: row for row in payload}
+    keys: list[str] = []
+    seen: set[str] = set()
+    for row in (*payload, *live):
+        if row.key in seen:
+            continue
+        seen.add(row.key)
+        keys.append(row.key)
+    merged = []
+    for key in keys:
+        weekly = payload_by[key].weekly if key in payload_by else 0
+        if key in live_by:
+            all_time = live_by[key].all_time
+        else:
+            all_time = payload_by[key].all_time
+        merged.append(DimCount(key, weekly, all_time))
+    return tuple(merged)
+
+
 def _imagegen_from_payload(raw, live: ImageGenSummary) -> ImageGenSummary:
     raw = raw if isinstance(raw, dict) else {}
     return ImageGenSummary(
-        models=_dims_from(raw.get("models")),
+        models=_merge_model_dims(raw.get("models"), live.models),
         loras=_dims_from(raw.get("loras")),
         edit_modes=_dims_from(raw.get("edit_modes")),
         resolutions=_dims_from(raw.get("resolutions")),
@@ -2389,10 +2514,47 @@ def _merge_command_rows(rows, command_map: dict[str, str]) -> list[dict]:
         else:
             slot[0] += weekly
             slot[1] += all_time
-    return [
+    aliased = [
         {"command_name": name, "kind": kind, "weekly": merged[(name, kind)][0], "all_time": merged[(name, kind)][1]}
         for name, kind in order
     ]
+    return _collapse_command_kinds(aliased)
+
+
+def _collapse_command_kinds(rows) -> list[dict]:
+    """Sum prefix and slash rows that share a canonical name."""
+    grouped: dict[str, list[dict]] = {}
+    order: list[str] = []
+    for row in rows:
+        name = str(row["command_name"])
+        if name not in grouped:
+            grouped[name] = []
+            order.append(name)
+        grouped[name].append(row)
+    collapsed = []
+    for name in order:
+        items = grouped[name]
+        contributing = [
+            item for item in items if int(item["weekly"]) > 0 or int(item["all_time"]) > 0
+        ]
+        kinds = {str(item["kind"]) for item in (contributing or items)}
+        if "prefix" in kinds and "slash" in kinds:
+            kind = "both"
+        elif "slash" in kinds:
+            kind = "slash"
+        elif "prefix" in kinds:
+            kind = "prefix"
+        else:
+            kind = next(iter(kinds)) if len(kinds) == 1 else "both"
+        collapsed.append(
+            {
+                "command_name": name,
+                "kind": kind,
+                "weekly": sum(int(item["weekly"]) for item in items),
+                "all_time": sum(int(item["all_time"]) for item in items),
+            }
+        )
+    return collapsed
 
 
 def _split_commands(rows, metric: str = "weekly") -> tuple[list[CommandCount], list[CommandCount]]:
@@ -2441,12 +2603,14 @@ def _imagegen_summary(rows, totals) -> ImageGenSummary:
     for row in rows:
         grouped.setdefault(str(row["dimension"]), []).append(row)
 
-    def top(dimension: str) -> tuple[DimCount, ...]:
+    def top(dimension: str, *, limit: int | None = IMAGE_TOP_N) -> tuple[DimCount, ...]:
         items = grouped.get(dimension, [])
         items = sorted(items, key=lambda row: (-int(row["weekly"]), -int(row["all_time"]), str(row["item_key"])))
+        if limit is not None:
+            items = items[:limit]
         return tuple(
             DimCount(str(row["item_key"]), int(row["weekly"]), int(row["all_time"]))
-            for row in items[:IMAGE_TOP_N]
+            for row in items
             if int(row["weekly"]) > 0 or int(row["all_time"]) > 0
         )
 
@@ -2465,7 +2629,7 @@ def _imagegen_summary(rows, totals) -> ImageGenSummary:
     success_all = int(outcomes["success"]["all_time"]) if "success" in outcomes else 0
     error_all = int(outcomes["error"]["all_time"]) if "error" in outcomes else 0
     return ImageGenSummary(
-        models=top("model"),
+        models=top("model", limit=None),
         loras=top("lora"),
         edit_modes=top("edit_mode"),
         resolutions=top("resolution"),

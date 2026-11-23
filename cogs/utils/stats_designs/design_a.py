@@ -367,16 +367,86 @@ def render(stats, names, guild_name: str, *, watermark: str | None = None) -> by
     return canvas.png()
 
 
+def fold_imagegen_models(pairs) -> list[tuple[str, int]]:
+    """Top five all-time models, then one other row. Unknown stays its own line."""
+    named: list[tuple[str, int]] = []
+    unknown = 0
+    for label, count in pairs or ():
+        value = int(count)
+        if value <= 0:
+            continue
+        text = str(label)
+        if text == "unknown":
+            unknown += value
+        else:
+            named.append((text, value))
+    ranked = list(named)
+    if unknown > 0:
+        ranked.append(("unknown", unknown))
+    ranked.sort(key=lambda item: item[1], reverse=True)
+    top = ranked[:5]
+    other = 0
+    unknown_outside = 0
+    folded: list[tuple[str, int]] = []
+    for label, value in top:
+        if label == "unknown":
+            folded.append(("unknown", value))
+        else:
+            folded.append((label, value))
+    for label, value in ranked[5:]:
+        if label == "unknown":
+            unknown_outside += value
+        else:
+            other += value
+    if other > 0:
+        folded.append(("other", other))
+    if unknown_outside > 0:
+        folded.append(("unknown", unknown_outside))
+    return folded
+
+
+def _imagegen_alltime_panel(canvas: Canvas, box, view) -> None:
+    """All-time image runs, the tracking date, and a compact per-model list."""
+    _panel(canvas, box)
+    x0, y0, x1, y1 = box
+    canvas.text((x0 + 16, y0 + 12), "IMAGE GENERATION", font("semibold", 15), INK)
+    since = view.imagegen_since
+    note = f"tracking since {since}" if since else ""
+    total = int(view.image_runs_all_time or 0)
+    rows = fold_imagegen_models(view.models)
+    if total > 0:
+        canvas.text((x0 + 16, y0 + 36), f"{total:,} runs", font("bold", 22), CYAN)
+        cursor = y0 + 64
+        if note:
+            canvas.text((x0 + 16, cursor), note, font("medium", 13), MUTED, max_width=x1 - x0 - 32)
+            cursor += 20
+    elif note:
+        canvas.text((x0 + 16, y0 + 40), note, font("medium", 14), GOLD, max_width=x1 - x0 - 32)
+        canvas.text(
+            (x0 + 16, y0 + 62),
+            "Not counted before that date.",
+            font("regular", 12),
+            MUTED,
+            max_width=x1 - x0 - 32,
+        )
+        cursor = y0 + 84
+    else:
+        cursor = y0 + 42
+    if rows and cursor < y1 - 24:
+        _breakdown(canvas, (x0, cursor, x1, y1), rows, "", CYAN)
+
+
 def _tracking_panel(canvas: Canvas, box, title: str, total: int, unit: str, since: str, color) -> None:
     """Totals for a category that only has live data, plus the day tracking started."""
     _panel(canvas, box)
     x0, y0, x1, y1 = box
     canvas.text((x0 + 16, y0 + 16), title, font("semibold", 15), INK)
-    note = f"tracking since {since}"
+    note = f"tracking since {since}" if since else ""
     if total > 0:
         canvas.text((x0 + 16, y0 + 48), f"{total:,} {unit}", font("bold", 28), color)
-        canvas.text((x0 + 16, y0 + 92), note, font("medium", 14), MUTED, max_width=x1 - x0 - 32)
-    else:
+        if note:
+            canvas.text((x0 + 16, y0 + 92), note, font("medium", 14), MUTED, max_width=x1 - x0 - 32)
+    elif note:
         canvas.text((x0 + 16, y0 + 52), note, font("medium", 16), GOLD, max_width=x1 - x0 - 32)
         canvas.text(
             (x0 + 16, y0 + 80),
@@ -514,7 +584,7 @@ def render_alltime(stats, names, guild_name: str, *, watermark: str | None = Non
         metric="all_time",
         bar_scale=row_bar_max(view.top_commands, "all_time"),
     )
-    _tracking_panel(canvas, image, "IMAGE GENERATION", view.image_runs_all_time, "runs", view.tracking_since, CYAN)
+    _imagegen_alltime_panel(canvas, image, view)
     _tracking_panel(canvas, voice, "VOICE", view.voice_all_time, "min", view.tracking_since, CYAN)
 
     canvas.text((M, HEIGHT - M), "Aggregate counts only. Message text and prompts are not stored.", font("regular", 12), MUTED, anchor="lb")

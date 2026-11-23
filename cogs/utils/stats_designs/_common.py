@@ -379,6 +379,7 @@ class View:
     history_members: list | None = None
     earliest: str = ""
     tracking_since: str = ""
+    imagegen_since: str = ""
     image_runs_all_time: int = 0
 
 
@@ -464,8 +465,13 @@ def _glyph_size(row_h: float, label_size: int) -> int:
 
 
 def _command_label(row) -> str:
-    prefix = "/" if row.kind == "slash" else "!"
-    return f"{prefix}{row.name}"
+    kind = str(getattr(row, "kind", "") or "")
+    name = str(getattr(row, "name", "") or "")
+    if kind == "both":
+        return name
+    if kind == "slash":
+        return f"/{name}"
+    return f"!{name}"
 
 
 def _model_label(key: str) -> str:
@@ -522,7 +528,10 @@ def prepare(stats, names, guild_name: str, *, scope: str = "weekly", least_metri
     if all_time:
         models = [(_model_label(row.key), int(row.all_time)) for row in image.models if int(row.all_time) > 0]
     else:
-        models = [(_model_label(row.key), int(row.weekly)) for row in image.models if int(row.weekly) > 0]
+        # Weekly MODEL MIX stays a top-5 donut (IMAGE_TOP_N). All-time folding needs every row.
+        weekly_models = [(_model_label(row.key), int(row.weekly)) for row in image.models if int(row.weekly) > 0]
+        weekly_models.sort(key=lambda item: (-item[1], item[0]))
+        models = weekly_models[:5]
     channel_rows = stats.top_channels
     quiet_rows = stats.bottom_channels
     dead_rows = stats.dead_channels
@@ -553,6 +562,7 @@ def prepare(stats, names, guild_name: str, *, scope: str = "weekly", least_metri
         from datetime import date as _date
 
         live_since = _date(2026, 11, 19)
+    imagegen_since = getattr(stats, "imagegen_since", None)
     messages_total = int(stats.messages_all_time)
     reactions_total = int(stats.reactions_all_time)
     commands_total = int(stats.commands_all_time)
@@ -617,6 +627,7 @@ def prepare(stats, names, guild_name: str, *, scope: str = "weekly", least_metri
         history_members=[int(point.active_members) for point in history],
         earliest=_month_day_year(earliest),
         tracking_since=_month_day_year(live_since),
+        imagegen_since=_month_day_year(imagegen_since) if imagegen_since else "",
         image_runs_all_time=int(getattr(image, "generation_count_all_time", 0) or 0),
     )
 

@@ -2,6 +2,21 @@
 
 This is the first versioned changelog for PooperScooper, covering about Oct 14–Nov 15, 2026.
 
+## v2.8.4 — 2026-11-23
+
+### New stuff
+
+- Older image gens now show the model they were made with.
+- The all-time image-gen panel tracks since May 2025.
+- The all-time image-gen panel lists how many gens used each model.
+- !play and /play, and other prefix and slash twins, are one combined row.
+
+### Background
+
+- Caption model labels from the older hyphen form are counted. Preview text alone is not.
+- The image-gen date comes from the earliest recorded image gen. Voice still uses the live-tracking date.
+- Prefix and slash counts for the same command are summed on the weekly and all-time lists.
+
 ## v2.8.3 — 2026-11-23
 
 ### New stuff

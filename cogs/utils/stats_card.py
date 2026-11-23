@@ -163,8 +163,11 @@ def _count_line(label: str, weekly: int, all_time: int | None = None) -> str:
 
 
 def _command_label(name: str, kind: str) -> str:
-    prefix = "/" if kind == "slash" else "!"
-    return f"{prefix}{name}"
+    if kind == "both":
+        return name
+    if kind == "slash":
+        return f"/{name}"
+    return f"!{name}"
 
 
 def _pct(rate: float | None) -> str:

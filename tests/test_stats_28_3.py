@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 
 import pytest
 
 from cogs.utils.stats_card import CardNames
+from cogs.utils.stats_card import _command_label as card_command_label
 from cogs.utils.stats_commands import is_owner_only_name, owner_only_names_from_source
-from cogs.utils.stats_designs._common import prepare
+from cogs.utils.stats_designs._common import _command_label, prepare
+from cogs.utils.stats_designs.design_a import fold_imagegen_models
 from cogs.utils.stats_schedule import LA
-from cogs.utils.stats_store import StatsStore
+from cogs.utils.stats_store import StatsStore, _apply_closed_card, _imagegen_from_payload
 from scripts.backfill_imagegen_history import guild_allowed as image_guild_allowed
 from scripts.backfill_imagegen_history import image_decision, model_from_caption
 from scripts.backfill_slash_history import guild_allowed as slash_guild_allowed
@@ -204,3 +206,170 @@ def test_image_and_slash_classifiers_drop_text():
     )
     assert edit == "imagegen edit"
     assert slash_command_name({"interaction": {"type": 5, "name": "imagegen"}}) is None
+
+
+def test_model_from_caption_accepts_current_and_older_labels():
+    assert model_from_caption("p — `krea2_turbo` — u") == "krea2_turbo"
+    assert model_from_caption("p - flux3_klein_int8 model - u") == "flux3_klein_int8"
+    assert model_from_caption("p \u2013 z_image_turbo_fp8 model \u2013 u") == "z_image_turbo_fp8"
+    assert model_from_caption("p \u2014 anime_wai_anima model \u2014 u") == "anime_wai_anima"
+    assert model_from_caption("p mentions krea2_turbo only") == "unknown"
+    assert model_from_caption("") == "unknown"
+
+
+def test_replace_all_time_imagegen_models_is_idempotent(store):
+    store.record_imagegen(1, model="unknown", success=True)
+    store.record_imagegen(1, model="krea2_turbo", success=True)
+    store.flush()
+    before = {
+        (row["metric"], row["weekly"], row["all_time"])
+        for row in store._conn.execute("SELECT metric, weekly, all_time FROM imagegen_totals WHERE guild_id = 1")
+    }
+    weekly_models = {
+        row["item_key"]: row["weekly"]
+        for row in store._conn.execute(
+            "SELECT item_key, weekly FROM imagegen_counts WHERE guild_id = 1 AND dimension = 'model'"
+        )
+    }
+    assert store.replace_all_time_imagegen_models(1, {"krea2_turbo": 4, "flux3_klein_int8": 2}) is True
+    counts = {
+        row["item_key"]: (row["weekly"], row["all_time"])
+        for row in store._conn.execute(
+            "SELECT item_key, weekly, all_time FROM imagegen_counts WHERE guild_id = 1 AND dimension = 'model'"
+        )
+    }
+    assert counts["krea2_turbo"][1] == 4
+    assert counts["flux3_klein_int8"] == (0, 2)
+    assert counts["krea2_turbo"][0] == weekly_models["krea2_turbo"]
+    assert "unknown" not in counts or counts["unknown"][1] == 0
+    after = {
+        (row["metric"], row["weekly"], row["all_time"])
+        for row in store._conn.execute("SELECT metric, weekly, all_time FROM imagegen_totals WHERE guild_id = 1")
+    }
+    assert after == before
+    assert store.replace_all_time_imagegen_models(1, {"krea2_turbo": 4, "flux3_klein_int8": 2}) is False
+
+
+def _snowflake(moment: datetime) -> int:
+    millis = int(moment.timestamp() * 1000)
+    return (millis - 1_420_070_400_000) << 22
+
+
+def test_imagegen_since_is_separate_from_live_since(store):
+    store._conn.execute(
+        "INSERT INTO history_applied (guild_id, source, message_id) VALUES (1, 'imagegen', ?)",
+        (_snowflake(datetime(2025, 5, 17, 19, 0, tzinfo=timezone.utc)),),
+    )
+    stats = store.build_stats(1, WHEN)
+    assert stats.imagegen_since == date(2025, 5, 17)
+    assert stats.live_since == date(2026, 11, 19)
+    view = prepare(stats, CardNames({}, {}, {}), "Guild", scope="all_time")
+    assert view.imagegen_since == "May 17, 2025"
+    assert view.tracking_since == "Nov 19, 2026"
+    empty = prepare(store.build_stats(2, WHEN), CardNames({}, {}, {}), "Guild", scope="all_time")
+    assert empty.imagegen_since == ""
+    assert "Nov 19" not in empty.imagegen_since
+    assert empty.tracking_since == "Nov 19, 2026"
+
+
+def test_prefix_and_slash_forms_merge(store):
+    for _ in range(2):
+        store.record_command(1, "play", "prefix")
+    for _ in range(3):
+        store.record_command(1, "play", "slash")
+    store.record_command(1, "onlypre", "prefix")
+    store.record_command(1, "onlyslash", "slash")
+    store.flush()
+    command_map = {"play": "play", "onlypre": "onlypre", "onlyslash": "onlyslash"}
+    stats = store.build_stats(1, WHEN, command_map=command_map)
+    weekly = {row.name: row for row in stats.top_commands}
+    assert weekly["play"].weekly == 5
+    assert weekly["play"].all_time == 5
+    assert weekly["play"].kind == "both"
+    assert weekly["onlypre"].kind == "prefix"
+    assert weekly["onlyslash"].kind == "slash"
+    all_time = {row.name: row for row in stats.top_commands_all_time}
+    assert all_time["play"].all_time == 5
+    assert all_time["play"].kind == "both"
+    assert _command_label(weekly["play"]) == "play"
+    assert _command_label(weekly["onlypre"]) == "!onlypre"
+    assert _command_label(weekly["onlyslash"]) == "/onlyslash"
+    assert card_command_label("play", "both") == "play"
+    assert card_command_label("onlypre", "prefix") == "!onlypre"
+    assert card_command_label("onlyslash", "slash") == "/onlyslash"
+    assert stats.commands_weekly == 7
+
+
+def test_fold_imagegen_models_top_five_other_and_unknown():
+    labels = [f"model-{index}" for index in range(7)]
+    counts = [70, 60, 50, 40, 30, 20, 10]
+    folded = fold_imagegen_models(list(zip(labels, counts)))
+    assert folded == [
+        ("model-0", 70),
+        ("model-1", 60),
+        ("model-2", 50),
+        ("model-3", 40),
+        ("model-4", 30),
+        ("other", 30),
+    ]
+    in_top = fold_imagegen_models(
+        [
+            ("krea2 edit", 4),
+            ("unknown", 100),
+            ("flux", 3),
+            ("klein", 2),
+            ("anime", 1),
+            ("extra", 1),
+            ("tail", 1),
+        ]
+    )
+    assert in_top[0] == ("unknown", 100)
+    assert ("other", 2) in in_top
+    assert [label for label, _count in in_top].count("unknown") == 1
+    outside = fold_imagegen_models(
+        [
+            ("a", 50),
+            ("b", 40),
+            ("c", 30),
+            ("d", 20),
+            ("e", 10),
+            ("f", 6),
+            ("unknown", 1),
+        ]
+    )
+    assert outside[-1] == ("unknown", 1)
+    assert ("other", 6) in outside
+    other_count = next(count for label, count in outside if label == "other")
+    assert other_count == 6
+    assert fold_imagegen_models([]) == []
+    assert fold_imagegen_models(None) == []
+
+
+def test_imagegen_summary_keeps_models_past_top_n(store):
+    names = [f"model_{index}" for index in range(7)]
+    for name in names:
+        store.record_imagegen(1, model=name, success=True)
+    store.flush()
+    stats = store.build_stats(1, WHEN)
+    assert len(stats.imagegen.models) == 7
+    assert {row.key for row in stats.imagegen.models} == set(names)
+    weekly = prepare(stats, CardNames({}, {}, {}), "Guild", scope="weekly")
+    all_time = prepare(stats, CardNames({}, {}, {}), "Guild", scope="all_time")
+    assert len(weekly.models) == 5
+    assert len(all_time.models) == 7
+
+
+def test_closed_card_keeps_live_all_time_models_when_payload_models_empty(store):
+    for name in ("a", "b", "c", "d", "e", "f"):
+        store.record_imagegen(1, model=name, success=True)
+    store.flush()
+    live = store.build_stats(1, WHEN)
+    merged = _imagegen_from_payload({"models": []}, live.imagegen)
+    assert len(merged.models) == 6
+    assert all(row.weekly == 0 and row.all_time > 0 for row in merged.models)
+    assert merged.generation_count_all_time == live.imagegen.generation_count_all_time
+    assert merged.success_count_all_time == live.imagegen.success_count_all_time
+    assert merged.error_count_all_time == live.imagegen.error_count_all_time
+    applied = _apply_closed_card(live, {"imagegen": {"models": []}})
+    assert {row.key for row in applied.imagegen.models} == {row.key for row in live.imagegen.models}
+    assert all(row.all_time > 0 for row in applied.imagegen.models)
