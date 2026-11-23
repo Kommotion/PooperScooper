@@ -2,6 +2,22 @@
 
 This is the first versioned changelog for PooperScooper, covering about Oct 14–Nov 15, 2026.
 
+## v2.8.2 — 2026-11-22
+
+### New stuff
+
+- Inbox and Party Prompt image jobs now count on the stats cards like /imagegen.
+- All-time quiet channels show real names and only rooms that have had messages.
+- Least-used commands now shows the bottom of the real command list, including unused commands.
+- All-time history will go back to the start of the MTS server (January 2022).
+
+### Background
+
+- Image stats hook runs on the background generation path using the job guild id.
+- Idempotent closed-week imagegen correction helper.
+- Command split is top 5 and least-used 5.
+- Card name lookup covers all-time channel lists.
+
 ## v2.8.1 — 2026-11-21
 
 ### New stuff

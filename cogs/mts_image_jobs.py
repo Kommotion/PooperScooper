@@ -700,6 +700,7 @@ async def generate_pngs(
     retry_delay: float = QUEUE_RETRY_SECONDS,
     wait_seconds: float = QUEUE_WAIT_SECONDS,
     sleep: Callable = asyncio.sleep,
+    guild_id: int | None = None,
 ) -> list[GeneratedImage]:
     """Enqueue one prompt at a time on the shared ImageDiffusion queue.
 
@@ -727,6 +728,7 @@ async def generate_pngs(
             result_future=future,
             output_width=job.width,
             output_height=job.height,
+            guild_id=guild_id,
         )
         while True:
             if loop.time() - started > wait_seconds:
@@ -876,6 +878,7 @@ async def execute_claimed_job(
                 retry_delay=retry_delay,
                 wait_seconds=wait_seconds,
                 sleep=sleep,
+                guild_id=channel_guild_id(channel),
             )
             await post_generated_images(channel, job, generated)
             posted_count = len(generated)

@@ -519,6 +519,7 @@ def test_generate_uses_the_shared_queue_one_prompt_at_a_time(tmp_path):
     for image in diffusion.created:
         assert image.llm_prompt_enhance is False
         assert image.interaction is None
+        assert image.guild_id == 5150
         assert image.result_future is not None
         assert image.output_width == 768
         assert image.output_height == 1280

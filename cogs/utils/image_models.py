@@ -127,6 +127,12 @@ class Models(StrEnum):
         raise ValueError(f"{value} is not a valid {cls.__name__}")
 
 
+def _optional_guild_id(value) -> Optional[int]:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
+
+
 class ImageCreation:
     def __init__(
         self,
@@ -151,6 +157,7 @@ class ImageCreation:
         result_future: Optional[asyncio.Future] = None,
         output_width: Optional[int] = None,
         output_height: Optional[int] = None,
+        guild_id: Optional[int] = None,
     ):
         self.interaction: discord.Interaction = interaction
         self.negative_prompt = negative_prompt
@@ -189,6 +196,8 @@ class ImageCreation:
         # workflow default. /imagegen leaves these unset.
         self.output_width: Optional[int] = None if output_width is None else int(output_width)
         self.output_height: Optional[int] = None if output_height is None else int(output_height)
+        # Inbox jobs have no Interaction. 0 and junk are the same as missing.
+        self.guild_id: Optional[int] = _optional_guild_id(guild_id)
 
 
 class ComfyOutput:

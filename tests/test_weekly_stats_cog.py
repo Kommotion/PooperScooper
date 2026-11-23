@@ -552,6 +552,27 @@ def test_imagegen_hook_is_optional_and_never_receives_the_prompt():
     assert "prompt" not in captured["kwargs"]
     assert captured["kwargs"]["model"] == "krea2_turbo"
 
+    captured.clear()
+    background = ImageCreation("super secret prompt", Models.KREA2_TURBO, guild_id=ENABLED)
+    assert background.interaction is None
+    _record_image_result(bot, background, seconds=2.0, success=True)
+    assert captured["guild_id"] == ENABLED
+    assert "prompt" not in captured["kwargs"]
+    assert "super secret" not in str(captured["kwargs"])
+    captured.clear()
+    missing = ImageCreation("super secret prompt", Models.KREA2_TURBO, interaction=SimpleNamespace(guild_id=None))
+    _record_image_result(bot, missing, seconds=1.0, success=False)
+    assert captured == {}
+    zero = ImageCreation("super secret prompt", Models.KREA2_TURBO, guild_id=0)
+    assert zero.guild_id is None
+    _record_image_result(bot, zero, seconds=1.0, success=False)
+    assert captured == {}
+    background_source = inspect.getsource(ImageDiffusion._complete_background_generation)
+    assert "_record_image_result" in background_source
+    assert "success=True" in background_source
+    assert "success=False" in background_source
+    assert "prompt" not in background_source
+
     regenerate = inspect.getsource(PromptDetailButton.regenerate_button)
     edit = inspect.getsource(PromptDetailButton.edit_regenerate_button)
     generation = inspect.getsource(ImageDiffusion._image_generation_interaction)
@@ -805,10 +826,50 @@ def test_card_post_does_not_resolve_member_names(tmp_path):
         assert "<@" not in rendered
         card_source = inspect.getsource(WeeklyStats._card_names)
         assert "get_member" not in card_source
+        assert "top_channels_all_time" in card_source
+        assert "bottom_channels_all_time" in card_source
+        assert "top_voice_channels_all_time" in card_source
         assert "leaderboard" not in card_source
         assert not hasattr(WeeklyStats, "_named_leaderboard")
     finally:
         store.close()
+
+
+def test_card_names_cover_all_time_lists_and_guild_channels():
+    stats = SimpleNamespace(
+        top_channels=[SimpleNamespace(channel_id=1)],
+        bottom_channels=[],
+        dead_channels=[SimpleNamespace(channel_id=6)],
+        top_voice_channels=[],
+        top_channels_all_time=[SimpleNamespace(channel_id=2)],
+        bottom_channels_all_time=[SimpleNamespace(channel_id=3)],
+        top_voice_channels_all_time=[SimpleNamespace(channel_id=4)],
+        top_reactions=[],
+        least_custom_emojis=[],
+    )
+
+    def get_channel(channel_id):
+        if channel_id == 1:
+            return SimpleNamespace(id=1, name="weekly-room")
+        if channel_id == 6:
+            return None
+        raise AssertionError(channel_id)
+
+    guild = SimpleNamespace(
+        text_channels=[SimpleNamespace(id=2, name="busy")],
+        forums=[SimpleNamespace(id=3, name="forum-room")],
+        forum_channels=[SimpleNamespace(id=5, name="other-forum")],
+        voice_channels=[SimpleNamespace(id=4, name="voice-room")],
+        get_channel=get_channel,
+        get_member=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("member")),
+    )
+    names = WeeklyStats._card_names(SimpleNamespace(), guild, stats)
+    assert names.channels[1] == "weekly-room"
+    assert names.channels[2] == "busy"
+    assert names.channels[3] == "forum-room"
+    assert names.channels[4] == "voice-room"
+    assert names.channels[5] == "other-forum"
+    assert 6 not in names.channels
 
 
 def test_voice_restarts_seed_open_sessions_and_unload_flushes_them(tmp_path):

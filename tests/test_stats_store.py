@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 import sqlite3
 from datetime import date, datetime, timedelta
 
@@ -216,7 +217,8 @@ def test_rankings_heatmaps_and_least_used_custom_emojis(store):
 
     assert stats.top_commands[0].name == "cmd12"
     assert stats.top_commands[0].all_time == 12
-    assert [row.name for row in stats.bottom_commands] == ["cmd01", "cmd02"]
+    assert [row.name for row in stats.top_commands] == ["cmd12", "cmd11", "cmd10", "cmd09", "cmd08"]
+    assert [row.name for row in stats.bottom_commands] == ["cmd01", "cmd02", "cmd03", "cmd04", "cmd05"]
     assert len(stats.heatmap) == 7
     assert all(len(row) == 24 for row in stats.heatmap)
     assert stats.heatmap[2][15] == 78 + 3  # messages this hour plus three reactions
@@ -517,14 +519,26 @@ def test_all_time_heatmap_rankings_history_and_earliest_week(store):
     store.record_command(1, "oldcmd", "prefix")
     store.close_week(1, date(2026, 11, 9), datetime(2026, 11, 15, 21, tzinfo=LA))
     store.record_message(1, 10, 7, WHEN)
+    for channel_id in range(101, 111):
+        store.record_message(1, channel_id, 7, WHEN + timedelta(hours=1))
     store.record_reaction(1, 7, "new", name="new", is_custom=True, when=WHEN)
     store.record_command(1, "newcmd", "slash")
-    stats = store.build_stats(1, WHEN, known_channel_ids=[10, 11, 12], known_custom_emojis=[("old", "old"), ("new", "new"), ("zzz", "zzz")])
+    known_channels = [10, 11, 12, *range(101, 111)]
+    stats = store.build_stats(
+        1,
+        WHEN,
+        known_channel_ids=known_channels,
+        known_custom_emojis=[("old", "old"), ("new", "new"), ("zzz", "zzz")],
+    )
     assert stats.heatmap[2][15] == 2  # one message and one reaction this week
     assert stats.heatmap_all_time[2][15] == 5  # prior week: 2 messages + 1 reaction, plus this week
     assert stats.heatmap_all_time != stats.heatmap
-    assert [row.channel_id for row in stats.top_channels_all_time] == [11, 10]
-    assert any(row.channel_id == 12 and row.all_time == 0 for row in stats.bottom_channels_all_time)
+    assert [row.channel_id for row in stats.top_channels_all_time] == [
+        11, 10, 101, 102, 103, 104, 105, 106, 107, 108
+    ]
+    assert [row.channel_id for row in stats.bottom_channels_all_time] == [109, 110]
+    assert all(row.all_time > 0 for row in stats.bottom_channels_all_time)
+    assert not any(row.channel_id == 12 for row in stats.bottom_channels_all_time)
     assert [row.emoji_key for row in stats.top_reactions] == ["new"]
     assert [row.emoji_key for row in stats.top_reactions_all_time] == ["new", "old"]
     assert stats.least_custom_emojis[0].emoji_key == "zzz"
@@ -534,7 +548,7 @@ def test_all_time_heatmap_rankings_history_and_earliest_week(store):
     assert [point.week_start for point in stats.week_history] == [date(2026, 11, 9), date(2026, 11, 16)]
     assert stats.week_history[0].messages == 2
     assert stats.week_history[0].reactions == 1
-    assert stats.week_history[1].messages == 1
+    assert stats.week_history[1].messages == 11
     assert stats.week_history[1].active_members == 1
     assert stats.live_since == LIVE_TRACKING_SINCE
 
@@ -549,3 +563,116 @@ def test_all_time_heatmap_rankings_history_and_earliest_week(store):
     )
     marked = store.build_stats(1, WHEN)
     assert marked.live_since == date(2026, 11, 20)
+
+
+def test_all_time_quiet_channels_are_lowest_nonzero(store):
+    for channel_id, count in enumerate(range(1, 13), start=1):
+        for _ in range(count):
+            store.record_message(1, channel_id, 5, WHEN)
+    stats = store.build_stats(1, WHEN, known_channel_ids=list(range(1, 14)))
+    assert [row.channel_id for row in stats.top_channels_all_time] == list(range(12, 2, -1))
+    assert [(row.channel_id, row.all_time) for row in stats.bottom_channels_all_time] == [(1, 1), (2, 2)]
+    assert all(row.all_time > 0 for row in stats.top_channels_all_time + stats.bottom_channels_all_time)
+    weekly = store.build_stats(1, WHEN, known_channel_ids=list(range(1, 14)))
+    assert any(row.channel_id == 13 and row.weekly == 0 for row in weekly.dead_channels)
+
+
+def test_command_lists_are_top_and_least_five_including_unused(store):
+    command_map = {name: name for name in [f"cmd{count:02d}" for count in range(1, 10)]}
+    command_map["unused"] = "unused"
+    for count in range(1, 10):
+        for _ in range(count):
+            store.record_command(1, f"cmd{count:02d}", "prefix")
+    store.flush()
+    stats = store.build_stats(1, WHEN, command_map=command_map)
+    assert [row.name for row in stats.top_commands_all_time] == ["cmd09", "cmd08", "cmd07", "cmd06", "cmd05"]
+    assert [row.name for row in stats.bottom_commands_all_time] == ["unused", "cmd01", "cmd02", "cmd03", "cmd04"]
+    assert stats.bottom_commands_all_time[0].all_time == 0
+    assert [row.name for row in stats.top_commands] == ["cmd09", "cmd08", "cmd07", "cmd06", "cmd05"]
+    assert [row.name for row in stats.bottom_commands] == ["unused", "cmd01", "cmd02", "cmd03", "cmd04"]
+    assert stats.commands_weekly == 45
+
+    store.close_week(1, date(2026, 11, 9), datetime(2026, 11, 15, 21, tzinfo=LA))
+    for _ in range(3):
+        store.record_command(1, "cmd01", "prefix")
+    weekly = store.build_stats(1, WHEN, command_map=command_map)
+    assert [row.name for row in weekly.top_commands] == ["cmd01", "cmd09", "cmd08", "cmd07", "cmd06"]
+    least = [row.name for row in weekly.bottom_commands]
+    assert least[0] == "unused"
+    assert weekly.bottom_commands[0].weekly == 0
+    assert "cmd01" not in least
+    plain = store.build_stats(1, WHEN)
+    assert "unused" not in {row.name for row in plain.top_commands + plain.bottom_commands}
+
+
+def test_closed_week_imagegen_backfill_is_idempotent(store):
+    store.record_message(1, 8, 10, WHEN)
+    closed = store.close_week(1, date(2026, 11, 9), datetime(2026, 11, 15, 21, tzinfo=LA))
+    assert closed is not None
+    posted = store.last_posted_week_start(1)
+    before_messages = store._conn.execute(
+        "SELECT weekly, all_time FROM channel_messages WHERE guild_id = 1"
+    ).fetchone()
+    applied = store.apply_closed_week_imagegen_backfill(
+        1,
+        date(2026, 11, 9),
+        {"krea2_turbo": 3, "flux": 1},
+        success=3,
+        error=1,
+        key="inbox-2022-01",
+    )
+    assert applied is True
+    models = {
+        row["item_key"]: (row["weekly"], row["all_time"])
+        for row in store._conn.execute(
+            "SELECT item_key, weekly, all_time FROM imagegen_counts WHERE guild_id = 1 AND dimension = 'model'"
+        )
+    }
+    assert models == {"krea2_turbo": (0, 3), "flux": (0, 1)}
+    outcomes = {
+        row["item_key"]: (row["weekly"], row["all_time"])
+        for row in store._conn.execute(
+            "SELECT item_key, weekly, all_time FROM imagegen_counts WHERE guild_id = 1 AND dimension = 'outcome'"
+        )
+    }
+    assert outcomes == {"success": (0, 3), "error": (0, 1)}
+    totals = store._conn.execute(
+        "SELECT weekly, all_time FROM imagegen_totals WHERE guild_id = 1 AND metric = 'generations'"
+    ).fetchone()
+    assert (totals["weekly"], totals["all_time"]) == (0, 4)
+    payload = json.loads(
+        store._conn.execute(
+            "SELECT summary_json FROM weekly_snapshots WHERE guild_id = 1 AND week_start = '2026-11-09'"
+        ).fetchone()["summary_json"]
+    )
+    assert payload["imagegen_success"] == 3
+    assert payload["imagegen_error"] == 1
+    assert payload["messages"] == closed.messages_weekly
+    assert store.last_posted_week_start(1) == posted
+    after_messages = store._conn.execute(
+        "SELECT weekly, all_time FROM channel_messages WHERE guild_id = 1"
+    ).fetchone()
+    assert (after_messages["weekly"], after_messages["all_time"]) == (
+        before_messages["weekly"],
+        before_messages["all_time"],
+    )
+    again = store.apply_closed_week_imagegen_backfill(
+        1,
+        date(2026, 11, 9),
+        {"krea2_turbo": 9},
+        success=9,
+        error=9,
+        key="inbox-2022-01",
+    )
+    assert again is False
+    totals = store._conn.execute(
+        "SELECT weekly, all_time FROM imagegen_totals WHERE guild_id = 1 AND metric = 'generations'"
+    ).fetchone()
+    assert (totals["weekly"], totals["all_time"]) == (0, 4)
+    payload_again = json.loads(
+        store._conn.execute(
+            "SELECT summary_json FROM weekly_snapshots WHERE guild_id = 1"
+        ).fetchone()["summary_json"]
+    )
+    assert payload_again["imagegen_success"] == 3
+    assert payload_again["imagegen_error"] == 1

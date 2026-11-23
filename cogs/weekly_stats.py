@@ -447,20 +447,37 @@ class WeeklyStats(commands.Cog):
     def _card_names(self, guild, stats) -> CardNames:
         channels: dict[int, str] = {}
         emojis: dict[str, str] = {}
-        rows = (
-            list(stats.top_channels)
-            + list(stats.bottom_channels)
-            + list(stats.dead_channels)
-            + list(stats.top_voice_channels)
-        )
-        getter = getattr(guild, "get_channel", None) if guild is not None else None
-        for row in rows:
-            if row.channel_id in channels or not callable(getter):
-                continue
-            channel = getter(row.channel_id)
-            name = getattr(channel, "name", None) if channel is not None else None
-            if name:
-                channels[row.channel_id] = str(name)
+
+        def remember(channel) -> None:
+            if channel is None:
+                return
+            channel_id = getattr(channel, "id", None)
+            name = getattr(channel, "name", None)
+            if isinstance(channel_id, bool) or not isinstance(channel_id, int) or not name:
+                return
+            channels.setdefault(channel_id, str(name))
+
+        if guild is not None:
+            for collection_name in ("text_channels", "forums", "forum_channels", "voice_channels"):
+                for channel in getattr(guild, collection_name, None) or []:
+                    remember(channel)
+            getter = getattr(guild, "get_channel", None)
+            rows = []
+            for attr in (
+                "top_channels",
+                "bottom_channels",
+                "dead_channels",
+                "top_voice_channels",
+                "top_channels_all_time",
+                "bottom_channels_all_time",
+                "top_voice_channels_all_time",
+            ):
+                rows.extend(getattr(stats, attr, ()) or ())
+            if callable(getter):
+                for row in rows:
+                    if row.channel_id in channels:
+                        continue
+                    remember(getter(row.channel_id))
         for row in list(stats.top_reactions) + list(stats.least_custom_emojis):
             emojis[row.emoji_key] = row.name
         return CardNames(channels, {}, emojis)

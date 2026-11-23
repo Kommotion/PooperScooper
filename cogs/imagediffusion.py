@@ -40,6 +40,7 @@ from cogs.utils.image_models import (
     ComfyLustifyKrea2Model,
     ComfyKrea2IdentityEditModel,
     sample_facts_for_image,
+    _optional_guild_id,
 )
 from PIL import Image as PILImage
 from cogs.utils import comfy_client
@@ -430,8 +431,14 @@ def _imagegen_stats_kwargs(image, *, seconds, success: bool) -> dict:
 
 
 def _record_image_result(bot, image, *, seconds, success: bool) -> None:
-    interaction = getattr(image, "interaction", None)
-    guild_id = getattr(interaction, "guild_id", None) if interaction is not None else None
+    guild_id = _optional_guild_id(getattr(image, "guild_id", None))
+    if guild_id is None:
+        interaction = getattr(image, "interaction", None)
+        guild_id = (
+            _optional_guild_id(getattr(interaction, "guild_id", None))
+            if interaction is not None
+            else None
+        )
     if guild_id is None:
         return
     _record_stats(
@@ -1602,11 +1609,25 @@ class ImageDiffusion(Cog):
         future = getattr(image, "result_future", None)
         result = None
         error: BaseException | None = None
+        started = time.perf_counter()
         try:
             result = await self._render_background_image(image)
         except Exception as exc:
             error = exc
             log.error("Background image generation failed: %s", exc)
+            _record_image_result(
+                getattr(self, "bot", None),
+                image,
+                seconds=time.perf_counter() - started,
+                success=False,
+            )
+        else:
+            _record_image_result(
+                getattr(self, "bot", None),
+                image,
+                seconds=getattr(result, "gen_time", None),
+                success=True,
+            )
         if future is None or future.done():
             return
         if error is not None:

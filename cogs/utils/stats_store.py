@@ -22,6 +22,7 @@ from cogs.utils.stats_schedule import LA, split_voice_minutes, week_start_for
 
 DEFAULT_DB_PATH = DATA_DIR / "weekly_stats.sqlite3"
 TOP_N = 10
+COMMAND_LIMIT = 5
 DEAD_LIMIT = 15
 IMAGE_TOP_N = 5
 
@@ -103,6 +104,11 @@ CREATE TABLE IF NOT EXISTS weekly_snapshots (
 CREATE TABLE IF NOT EXISTS guild_state (
     guild_id INTEGER PRIMARY KEY,
     last_posted_week_start TEXT
+);
+CREATE TABLE IF NOT EXISTS applied_corrections (
+    guild_id INTEGER NOT NULL,
+    key TEXT NOT NULL,
+    PRIMARY KEY (guild_id, key)
 );
 CREATE TABLE IF NOT EXISTS opt_outs (
     guild_id INTEGER NOT NULL,
@@ -1314,7 +1320,10 @@ class StatsStore:
             (guild_id,),
         ).fetchall()
         if command_map is not None:
-            commands = _merge_command_rows(commands, command_map)
+            commands = _merge_command_rows(
+                _inject_registered_prefix_rows(commands, command_map),
+                command_map,
+            )
         voice_rows = self._conn.execute(
             "SELECT channel_id, weekly, all_time FROM voice_channels WHERE guild_id = ?",
             (guild_id,),
@@ -1477,6 +1486,103 @@ class StatsStore:
             points.append(current)
         return tuple(points)
 
+    def apply_closed_week_imagegen_backfill(
+        self,
+        guild_id: int,
+        week_start: date | datetime | str,
+        models: dict[str, int],
+        *,
+        success: int,
+        error: int = 0,
+        key: str,
+    ) -> bool:
+        """Add closed-week image runs to all-time totals and that week's snapshot.
+
+        Weekly columns stay as they are. ``last_posted`` and message counts
+        are not touched. The same ``key`` for a guild applies once.
+        """
+        guild_id = int(guild_id)
+        token = str(key or "").strip()
+        if not token:
+            return False
+        week = _as_date(week_start)
+        success = int(success)
+        error = int(error)
+        model_counts: list[tuple[str, int]] = []
+        for name, amount in (models or {}).items():
+            model_name = _clip(name, 80) if name else ""
+            count = int(amount)
+            if model_name and count > 0:
+                model_counts.append((model_name, count))
+        self.flush()
+        with self._transaction():
+            already = self._conn.execute(
+                'SELECT 1 FROM applied_corrections WHERE guild_id = ? AND key = ?',
+                (guild_id, token),
+            ).fetchone()
+            if already is not None:
+                return False
+            self._conn.execute(
+                'INSERT INTO applied_corrections (guild_id, key) VALUES (?, ?)',
+                (guild_id, token),
+            )
+            for model_name, count in model_counts:
+                self._add_all_time_imagegen("model", guild_id, model_name, count)
+            if success > 0:
+                self._add_all_time_imagegen("outcome", guild_id, "success", success)
+            if error > 0:
+                self._add_all_time_imagegen("outcome", guild_id, "error", error)
+            generations = success + error
+            if generations > 0:
+                self._conn.execute(
+                    """
+                    INSERT INTO imagegen_totals (guild_id, metric, weekly, all_time)
+                    VALUES (?, 'generations', 0, ?)
+                    ON CONFLICT(guild_id, metric) DO UPDATE SET
+                        all_time = all_time + excluded.all_time
+                    """,
+                    (guild_id, generations),
+                )
+            row = self._conn.execute(
+                """
+                SELECT summary_json FROM weekly_snapshots
+                WHERE guild_id = ? AND week_start = ?
+                """,
+                (guild_id, week.isoformat()),
+            ).fetchone()
+            if row is not None:
+                try:
+                    payload = json.loads(row["summary_json"])
+                except (TypeError, json.JSONDecodeError):
+                    payload = None
+                if isinstance(payload, dict):
+                    payload["imagegen_success"] = int(payload.get("imagegen_success") or 0) + success
+                    payload["imagegen_error"] = int(payload.get("imagegen_error") or 0) + error
+                    self._conn.execute(
+                        """
+                        UPDATE weekly_snapshots
+                        SET summary_json = ?
+                        WHERE guild_id = ? AND week_start = ?
+                        """,
+                        (
+                            json.dumps(payload, separators=(",", ":"), sort_keys=True),
+                            guild_id,
+                            week.isoformat(),
+                        ),
+                    )
+        return True
+
+    def _add_all_time_imagegen(self, dimension: str, guild_id: int, item_key: str, amount: int) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO imagegen_counts (guild_id, dimension, item_key, weekly, all_time)
+            VALUES (?, ?, ?, 0, ?)
+            ON CONFLICT(guild_id, dimension, item_key) DO UPDATE SET
+                all_time = all_time + excluded.all_time
+            """,
+            (guild_id, dimension, item_key, amount),
+        )
+
     def _previous_snapshot(self, guild_id: int, week: date) -> dict | None:
         row = self._conn.execute(
             """
@@ -1543,8 +1649,7 @@ def _split_channels(rows, known_channel_ids=None, metric: str = "weekly") -> tup
         active.sort(key=lambda row: (-int(row["all_time"]), -int(row["weekly"]), int(row["channel_id"])))
         top = active[:TOP_N]
         top_ids = {int(row["channel_id"]) for row in top}
-        # Zeros stay in the quiet list so never-used known channels still show.
-        quiet = [row for row in rows if int(row["channel_id"]) not in top_ids]
+        quiet = [row for row in active if int(row["channel_id"]) not in top_ids]
         quiet.sort(key=lambda row: (int(row["all_time"]), int(row["weekly"]), int(row["channel_id"])))
         return top, quiet[:TOP_N], []
     active = [row for row in rows if int(row["weekly"]) > 0]
@@ -1615,6 +1720,26 @@ def _least_custom(rows, known, metric: str = "all_time") -> list[ReactionCount]:
     ]
 
 
+def _inject_registered_prefix_rows(rows, command_map: dict[str, str]) -> list:
+    """Add each canonical prefix name that is not already stored, at zero."""
+    present = {
+        (str(row["command_name"]), str(row["kind"]))
+        for row in rows
+    }
+    extra = []
+    seen: set[str] = set()
+    for canonical in command_map.values():
+        if not canonical or canonical in seen:
+            continue
+        seen.add(canonical)
+        if (canonical, "prefix") in present:
+            continue
+        extra.append({"command_name": canonical, "kind": "prefix", "weekly": 0, "all_time": 0})
+    if not extra:
+        return rows
+    return list(rows) + extra
+
+
 def _merge_command_rows(rows, command_map: dict[str, str]) -> list[dict]:
     """Keep slash rows. Drop unregistered prefix names and merge aliases."""
     merged: dict[tuple[str, str], list[int]] = {}
@@ -1646,13 +1771,27 @@ def _merge_command_rows(rows, command_map: dict[str, str]) -> list[dict]:
 def _split_commands(rows, metric: str = "weekly") -> tuple[list[CommandCount], list[CommandCount]]:
     primary = "all_time" if metric == "all_time" else "weekly"
     secondary = "weekly" if primary == "all_time" else "all_time"
-    used = [row for row in rows if int(row[primary]) > 0]
-    used.sort(key=lambda row: (-int(row[primary]), -int(row[secondary]), str(row["command_name"]), str(row["kind"])))
-    top = used[:TOP_N]
+    ranked = list(rows)
+    ranked.sort(
+        key=lambda row: (
+            -int(row[primary]),
+            -int(row[secondary]),
+            str(row["command_name"]),
+            str(row["kind"]),
+        )
+    )
+    top = ranked[:COMMAND_LIMIT]
     top_keys = {(str(row["command_name"]), str(row["kind"])) for row in top}
-    rest = [row for row in rows if (str(row["command_name"]), str(row["kind"])) not in top_keys]
-    rest.sort(key=lambda row: (int(row[primary]), int(row[secondary]), str(row["command_name"]), str(row["kind"])))
-    return [_command(row) for row in top], [_command(row) for row in rest[:TOP_N]]
+    rest = [row for row in ranked if (str(row["command_name"]), str(row["kind"])) not in top_keys]
+    rest.sort(
+        key=lambda row: (
+            int(row[primary]),
+            int(row[secondary]),
+            str(row["command_name"]),
+            str(row["kind"]),
+        )
+    )
+    return [_command(row) for row in top], [_command(row) for row in rest[:COMMAND_LIMIT]]
 
 
 def _command(row) -> CommandCount:
