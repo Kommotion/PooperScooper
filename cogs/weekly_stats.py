@@ -22,7 +22,12 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from cogs.utils.stats_card import CardNames, render_alltime_card, render_stats_card
-from cogs.utils.stats_commands import alias_map_from_bot, alias_map_from_source, canonical_command_name
+from cogs.utils.stats_commands import (
+    alias_map_from_bot,
+    alias_map_from_source,
+    canonical_command_name,
+    is_owner_only_name,
+)
 from cogs.utils.stats_schedule import LA, LA_NAME, PostSchedule, due_week
 from cogs.utils.stats_store import StatsStore
 
@@ -291,6 +296,8 @@ class WeeklyStats(commands.Cog):
         name = getattr(command, "qualified_name", None) or getattr(command, "name", None)
         if not name or not str(name).strip():
             return
+        if is_owner_only_name(str(name)):
+            return
         self.store.record_command(int(guild_id), str(name), "slash")
 
     @commands.Cog.listener()
@@ -311,7 +318,7 @@ class WeeklyStats(commands.Cog):
         canonical = mapping.get(raw.casefold())
         if canonical is None:
             canonical = canonical_command_name(raw, mapping)
-        if not canonical:
+        if not canonical or is_owner_only_name(canonical):
             return
         self.store.record_command(int(guild_id), canonical, "prefix")
 

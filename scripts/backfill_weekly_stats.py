@@ -39,7 +39,7 @@ import discord
 from discord.http import Route
 from discord.utils import parse_time, time_snowflake
 
-from cogs.utils.stats_commands import alias_map_from_source
+from cogs.utils.stats_commands import alias_map_from_source, is_owner_only_name
 from cogs.utils.stats_schedule import LA, week_start_for
 from cogs.utils.stats_store import BackfillPart, StatsStore
 
@@ -294,6 +294,8 @@ def _tally_message(
     command = prefix_command_name(payload.get("content"))
     if command and command_map is not None:
         command = command_map.get(command.casefold())
+    if command and is_owner_only_name(command):
+        command = None
     if command:
         bucket.commands[command] = bucket.commands.get(command, 0) + 1
         tally.commands += 1

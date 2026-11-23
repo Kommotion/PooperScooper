@@ -244,7 +244,6 @@ def test_tracking_ignores_disabled_guilds_dms_and_bots(tmp_path):
         assert stats.top_reactions[0].emoji_key == "111"
         assert {(row.name, row.kind) for row in stats.top_commands} == {
             ("imagegen pose", "slash"),
-            ("statscard", "prefix"),
         }
         assert stats.imagegen.models[0].key == "krea2_turbo"
         assert store.build_stats(DISABLED, WHEN).messages_weekly == 0
@@ -708,7 +707,7 @@ def test_first_deploy_on_wednesday_posts_the_following_sunday(tmp_path):
         assert "2026-11-16" in calls[0]["content"]
         assert store.last_posted_week_start(ENABLED) == date(2026, 11, 16)
         posted = store.build_stats(ENABLED, sunday)
-        assert posted.messages_weekly == 0
+        assert posted.messages_weekly == 1
         assert posted.messages_all_time == 1
     finally:
         store.close()
@@ -1040,7 +1039,7 @@ def test_thursday_deploy_posts_this_sunday_and_not_before(tmp_path):
         assert snapshots[0][1]["messages"] == 2
         assert snapshots[1][1]["messages"] == 1
         closed = store.build_stats(ENABLED, next_sunday)
-        assert closed.messages_weekly == 0
+        assert closed.messages_weekly == 1
         assert closed.messages_all_time == 3
     finally:
         store.close()
@@ -1092,7 +1091,7 @@ def test_restart_before_sunday_keeps_the_baseline_and_still_posts(tmp_path):
         assert [week for week, _payload in snapshots] == ["2026-11-16"]
         assert snapshots[0][1]["messages"] == 1
         fresh = restarted.build_stats(ENABLED, sunday)
-        assert fresh.messages_weekly == 0
+        assert fresh.messages_weekly == 1
         assert fresh.messages_all_time == 1
     finally:
         restarted.close()

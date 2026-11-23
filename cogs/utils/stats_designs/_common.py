@@ -519,9 +519,10 @@ def prepare(stats, names, guild_name: str, *, scope: str = "weekly", least_metri
         for row in least_source
     ]
     image = stats.imagegen
-    models = [(_model_label(row.key), int(row.weekly)) for row in image.models if int(row.weekly) > 0]
-    if not models:
+    if all_time:
         models = [(_model_label(row.key), int(row.all_time)) for row in image.models if int(row.all_time) > 0]
+    else:
+        models = [(_model_label(row.key), int(row.weekly)) for row in image.models if int(row.weekly) > 0]
     channel_rows = stats.top_channels
     quiet_rows = stats.bottom_channels
     dead_rows = stats.dead_channels

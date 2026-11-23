@@ -13,11 +13,12 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from cogs.utils.constants import DATA_DIR
+from cogs.utils.stats_commands import is_owner_only_name
 from cogs.utils.stats_schedule import LA, split_voice_minutes, week_start_for
 
 DEFAULT_DB_PATH = DATA_DIR / "weekly_stats.sqlite3"
@@ -135,6 +136,18 @@ CREATE TABLE IF NOT EXISTS backfill_week (
 CREATE TABLE IF NOT EXISTS backfill_meta (
     guild_id INTEGER PRIMARY KEY,
     live_at TEXT
+);
+CREATE TABLE IF NOT EXISTS weekly_card_state (
+    guild_id INTEGER NOT NULL,
+    week_start TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    PRIMARY KEY (guild_id, week_start)
+);
+CREATE TABLE IF NOT EXISTS history_applied (
+    guild_id INTEGER NOT NULL,
+    source TEXT NOT NULL,
+    message_id INTEGER NOT NULL,
+    PRIMARY KEY (guild_id, source, message_id)
 );
 """
 
@@ -560,7 +573,7 @@ class StatsStore:
         if kind not in {"slash", "prefix"}:
             return
         label = _clip(name, 80)
-        if not label:
+        if not label or is_owner_only_name(label):
             return
         self._buffer.add_command(int(guild_id), label, kind, 1)
 
@@ -740,6 +753,8 @@ class StatsStore:
                         label = _clip(canonical, 80)
                         if not label:
                             continue
+                    if is_owner_only_name(label):
+                        continue
                     merged_commands[label] = merged_commands.get(label, 0) + count
                 for label, count in merged_commands.items():
                     weekly_amount = count if part.into_current_week else 0
@@ -1258,10 +1273,57 @@ class StatsStore:
                 command_map,
             )
             self._save_snapshot(guild_id, week, closed, stats)
+            self._save_card_state(guild_id, week, stats)
             self._zero_weekly(guild_id)
             self._set_last_posted(guild_id, week)
         self._buffer.clear()
         return stats
+
+    def _save_card_state(self, guild_id: int, week: date, stats: WeeklyStats) -> None:
+        payload = json.dumps(_card_payload(stats), separators=(",", ":"), sort_keys=True)
+        self._conn.execute(
+            """
+            INSERT INTO weekly_card_state (guild_id, week_start, payload)
+            VALUES (?, ?, ?)
+            ON CONFLICT(guild_id, week_start) DO UPDATE SET
+                payload = excluded.payload
+            """,
+            (guild_id, week.isoformat(), payload),
+        )
+
+    def write_weekly_card_state(self, guild_id: int, week_start: date | datetime | str, payload: dict) -> None:
+        """Replace one closed-week card payload. Does not touch counters."""
+        guild_id = int(guild_id)
+        week = _as_date(week_start)
+        body = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+        with self._transaction():
+            self._conn.execute(
+                """
+                INSERT INTO weekly_card_state (guild_id, week_start, payload)
+                VALUES (?, ?, ?)
+                ON CONFLICT(guild_id, week_start) DO UPDATE SET
+                    payload = excluded.payload
+                """,
+                (guild_id, week.isoformat(), body),
+            )
+
+    def _load_card_state(self, guild_id: int, week: date) -> dict | None:
+        row = self._conn.execute(
+            """
+            SELECT payload FROM weekly_card_state
+            WHERE guild_id = ? AND week_start = ?
+            """,
+            (guild_id, week.isoformat()),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        return payload
 
     def _save_snapshot(self, guild_id: int, week: date, closed_at: datetime, stats: WeeklyStats) -> None:
         payload = json.dumps(_summary_payload(stats), separators=(",", ":"), sort_keys=True)
@@ -1319,11 +1381,13 @@ class StatsStore:
             """,
             (guild_id,),
         ).fetchall()
+        commands = [row for row in commands if not is_owner_only_name(str(row["command_name"]))]
         if command_map is not None:
             commands = _merge_command_rows(
                 _inject_registered_prefix_rows(commands, command_map),
                 command_map,
             )
+            commands = [row for row in commands if not is_owner_only_name(str(row["command_name"]))]
         voice_rows = self._conn.execute(
             "SELECT channel_id, weekly, all_time FROM voice_channels WHERE guild_id = ?",
             (guild_id,),
@@ -1376,7 +1440,7 @@ class StatsStore:
         reactions_weekly = sum(int(row["weekly"]) for row in reactions)
         commands_weekly = sum(int(row["weekly"]) for row in commands)
         active_count = int(active)
-        return WeeklyStats(
+        built = WeeklyStats(
             guild_id=guild_id,
             week_start=week,
             generated_at=now,
@@ -1425,6 +1489,11 @@ class StatsStore:
             bottom_commands_all_time=tuple(bottom_commands_all),
             top_voice_channels_all_time=tuple(_channel(row) for row in voice_sorted_all[:TOP_N]),
         )
+        if self.last_posted_week_start(guild_id) == week:
+            card = self._load_card_state(guild_id, week)
+            if card is not None:
+                built = _apply_closed_card(built, card)
+        return built
 
     def _earliest_week(self, guild_id: int, week: date) -> date:
         row = self._conn.execute(
@@ -1570,7 +1639,357 @@ class StatsStore:
                             week.isoformat(),
                         ),
                     )
+            if success > 0:
+                self._bump_card_imagegen(guild_id, week, "", success)
+            for model_name, count in model_counts:
+                self._bump_card_model(guild_id, week, model_name, count)
         return True
+
+    def apply_history_imagegen(
+        self,
+        guild_id: int,
+        message_id: int,
+        week_start: date | datetime | str,
+        model: str,
+    ) -> bool:
+        """Add one historical success image to all-time totals.
+
+        The weekly columns stay unchanged. The same message id is a no-op.
+        A closed week's thin snapshot and card state, when present, gain the
+        same success. The model name is a short key, never a caption.
+        """
+        guild_id = int(guild_id)
+        message_id = int(message_id)
+        week = _as_date(week_start)
+        model_name = _clip(model, 80) or "unknown"
+        self.flush()
+        with self._transaction():
+            if not self._claim_history(guild_id, "imagegen", message_id):
+                return False
+            self._add_all_time_imagegen("model", guild_id, model_name, 1)
+            self._add_all_time_imagegen("outcome", guild_id, "success", 1)
+            self._conn.execute(
+                """
+                INSERT INTO imagegen_totals (guild_id, metric, weekly, all_time)
+                VALUES (?, 'generations', 0, 1)
+                ON CONFLICT(guild_id, metric) DO UPDATE SET
+                    all_time = all_time + 1
+                """,
+                (guild_id,),
+            )
+            self._bump_snapshot_imagegen(guild_id, week, 1, 0)
+            self._bump_card_imagegen(guild_id, week, "", 1)
+            self._bump_card_model(guild_id, week, model_name, 1)
+        return True
+
+    def apply_history_slash(
+        self,
+        guild_id: int,
+        message_id: int,
+        week_start: date | datetime | str,
+        name: str,
+    ) -> bool:
+        """Add one historical slash command to all-time totals.
+
+        Weekly columns stay unchanged. Owner-only names are marked seen and
+        do not change counts. A bare ``imagegen`` name is stored as
+        ``imagegen generate``. The same message id is a no-op.
+        """
+        guild_id = int(guild_id)
+        message_id = int(message_id)
+        week = _as_date(week_start)
+        label = _clip(name, 80)
+        if label == "imagegen":
+            label = "imagegen generate"
+        self.flush()
+        with self._transaction():
+            if not self._claim_history(guild_id, "slash", message_id):
+                return False
+            if not label or is_owner_only_name(label):
+                return True
+            self._conn.execute(
+                """
+                INSERT INTO command_counts (guild_id, command_name, kind, weekly, all_time)
+                VALUES (?, ?, 'slash', 0, 1)
+                ON CONFLICT(guild_id, command_name, kind) DO UPDATE SET
+                    all_time = all_time + 1
+                """,
+                (guild_id, label),
+            )
+            self._bump_snapshot_command(guild_id, week, label, "slash", 1)
+            self._bump_card_command(guild_id, week, label, "slash", 1)
+        return True
+
+    def purge_owner_only_commands(self, names: set[str] | frozenset[str]) -> list[dict]:
+        """Delete owner-only command rows from this database.
+
+        Touches ``command_counts``, command week buckets, thin snapshots, and
+        card-state command lists. Meant for a copy or a temporary database.
+        """
+        blocked = {str(name).casefold() for name in names if str(name).strip()}
+        if not blocked:
+            return []
+        self.flush()
+        dropped: list[dict] = []
+        with self._transaction():
+            rows = self._conn.execute(
+                "SELECT guild_id, command_name, kind, weekly, all_time FROM command_counts"
+            ).fetchall()
+            for row in rows:
+                if str(row["command_name"]).casefold() not in blocked:
+                    continue
+                dropped.append(
+                    {
+                        "name": str(row["command_name"]),
+                        "kind": str(row["kind"]),
+                        "weekly": int(row["weekly"]),
+                        "all_time": int(row["all_time"]),
+                    }
+                )
+                self._conn.execute(
+                    """
+                    DELETE FROM command_counts
+                    WHERE guild_id = ? AND command_name = ? AND kind = ?
+                    """,
+                    (int(row["guild_id"]), str(row["command_name"]), str(row["kind"])),
+                )
+            buckets = self._conn.execute(
+                """
+                SELECT guild_id, week_start, item_key
+                FROM backfill_week
+                WHERE kind = 'command'
+                """
+            ).fetchall()
+            for row in buckets:
+                if str(row["item_key"]).casefold() not in blocked:
+                    continue
+                self._conn.execute(
+                    """
+                    DELETE FROM backfill_week
+                    WHERE guild_id = ? AND week_start = ? AND kind = 'command' AND item_key = ?
+                    """,
+                    (int(row["guild_id"]), str(row["week_start"]), str(row["item_key"])),
+                )
+            snapshots = self._conn.execute(
+                "SELECT guild_id, week_start, summary_json FROM weekly_snapshots"
+            ).fetchall()
+            for snap in snapshots:
+                self._rewrite_snapshot_commands(int(snap["guild_id"]), str(snap["week_start"]), snap["summary_json"])
+            cards = self._conn.execute(
+                "SELECT guild_id, week_start, payload FROM weekly_card_state"
+            ).fetchall()
+            for card in cards:
+                self._strip_card_commands(int(card["guild_id"]), str(card["week_start"]), card["payload"], blocked)
+        dropped.sort(key=lambda item: (item["name"], item["kind"]))
+        return dropped
+
+    def _claim_history(self, guild_id: int, source: str, message_id: int) -> bool:
+        existing = self._conn.execute(
+            """
+            SELECT 1 FROM history_applied
+            WHERE guild_id = ? AND source = ? AND message_id = ?
+            """,
+            (guild_id, source, message_id),
+        ).fetchone()
+        if existing is not None:
+            return False
+        self._conn.execute(
+            """
+            INSERT INTO history_applied (guild_id, source, message_id)
+            VALUES (?, ?, ?)
+            """,
+            (guild_id, source, message_id),
+        )
+        return True
+
+    def _bump_snapshot_imagegen(self, guild_id: int, week: date, success: int, error: int) -> None:
+        row = self._conn.execute(
+            """
+            SELECT summary_json FROM weekly_snapshots
+            WHERE guild_id = ? AND week_start = ?
+            """,
+            (guild_id, week.isoformat()),
+        ).fetchone()
+        if row is None:
+            return
+        try:
+            payload = json.loads(row["summary_json"])
+        except (TypeError, json.JSONDecodeError):
+            return
+        if not isinstance(payload, dict):
+            return
+        payload["imagegen_success"] = int(payload.get("imagegen_success") or 0) + int(success)
+        payload["imagegen_error"] = int(payload.get("imagegen_error") or 0) + int(error)
+        self._conn.execute(
+            """
+            UPDATE weekly_snapshots
+            SET summary_json = ?
+            WHERE guild_id = ? AND week_start = ?
+            """,
+            (json.dumps(payload, separators=(",", ":"), sort_keys=True), guild_id, week.isoformat()),
+        )
+
+    def _bump_snapshot_command(self, guild_id: int, week: date, name: str, kind: str, amount: int) -> None:
+        row = self._conn.execute(
+            """
+            SELECT summary_json FROM weekly_snapshots
+            WHERE guild_id = ? AND week_start = ?
+            """,
+            (guild_id, week.isoformat()),
+        ).fetchone()
+        if row is None:
+            return
+        try:
+            payload = json.loads(row["summary_json"])
+        except (TypeError, json.JSONDecodeError):
+            return
+        if not isinstance(payload, dict):
+            return
+        payload["commands"] = int(payload.get("commands") or 0) + int(amount)
+        rows = list(payload.get("top_commands") or [])
+        found = False
+        for item in rows:
+            if not isinstance(item, dict):
+                continue
+            if item.get("name") == name and item.get("kind") == kind:
+                item["weekly"] = int(item.get("weekly") or 0) + int(amount)
+                found = True
+                break
+        if not found:
+            rows.append({"name": name, "kind": kind, "weekly": int(amount)})
+        rows.sort(key=lambda item: (-int(item.get("weekly") or 0), str(item.get("name") or "")))
+        payload["top_commands"] = rows[:5]
+        self._conn.execute(
+            """
+            UPDATE weekly_snapshots
+            SET summary_json = ?
+            WHERE guild_id = ? AND week_start = ?
+            """,
+            (json.dumps(payload, separators=(",", ":"), sort_keys=True), guild_id, week.isoformat()),
+        )
+
+    def _bump_card_imagegen(self, guild_id: int, week: date, model: str, success: int) -> None:
+        payload = self._load_card_state(guild_id, week)
+        if payload is None or success <= 0:
+            return
+        image = payload.get("imagegen")
+        if not isinstance(image, dict):
+            image = {}
+            payload["imagegen"] = image
+        image["success_count"] = int(image.get("success_count") or 0) + int(success)
+        image["generation_count"] = int(image.get("generation_count") or 0) + int(success)
+        attempts = int(image["success_count"]) + int(image.get("error_count") or 0)
+        image["success_rate"] = (int(image["success_count"]) / attempts) if attempts else None
+        image["kept_first"] = max(
+            0,
+            int(image["success_count"]) - int(image.get("regenerate_count") or 0) - int(image.get("edit_count") or 0),
+        )
+        self._conn.execute(
+            """
+            UPDATE weekly_card_state
+            SET payload = ?
+            WHERE guild_id = ? AND week_start = ?
+            """,
+            (json.dumps(payload, separators=(",", ":"), sort_keys=True), guild_id, week.isoformat()),
+        )
+
+    def _bump_card_model(self, guild_id: int, week: date, model: str, amount: int) -> None:
+        if not model or amount <= 0:
+            return
+        payload = self._load_card_state(guild_id, week)
+        if payload is None:
+            return
+        image = payload.get("imagegen")
+        if not isinstance(image, dict):
+            image = {}
+            payload["imagegen"] = image
+        models = list(image.get("models") or [])
+        found = False
+        for item in models:
+            if isinstance(item, dict) and item.get("key") == model:
+                item["weekly"] = int(item.get("weekly") or 0) + int(amount)
+                found = True
+                break
+        if not found:
+            models.append({"key": model, "weekly": int(amount), "all_time": 0})
+        image["models"] = models
+        self._conn.execute(
+            """
+            UPDATE weekly_card_state
+            SET payload = ?
+            WHERE guild_id = ? AND week_start = ?
+            """,
+            (json.dumps(payload, separators=(",", ":"), sort_keys=True), guild_id, week.isoformat()),
+        )
+
+    def _bump_card_command(self, guild_id: int, week: date, name: str, kind: str, amount: int) -> None:
+        payload = self._load_card_state(guild_id, week)
+        if payload is None:
+            return
+        payload["commands"] = int(payload.get("commands") or 0) + int(amount)
+        rows = list(payload.get("command_rows") or [])
+        if not rows:
+            rows = list(payload.get("top_commands") or []) + list(payload.get("bottom_commands") or [])
+        found = False
+        for item in rows:
+            if isinstance(item, dict) and item.get("name") == name and item.get("kind") == kind:
+                item["weekly"] = int(item.get("weekly") or 0) + int(amount)
+                found = True
+                break
+        if not found:
+            rows.append({"name": name, "kind": kind, "weekly": int(amount), "all_time": 0})
+        split_top, split_bottom = _split_commands(_command_dicts(rows), metric="weekly")
+        payload["command_rows"] = rows
+        payload["top_commands"] = [
+            {"name": row.name, "kind": row.kind, "weekly": row.weekly, "all_time": row.all_time}
+            for row in split_top
+        ]
+        payload["bottom_commands"] = [
+            {"name": row.name, "kind": row.kind, "weekly": row.weekly, "all_time": row.all_time}
+            for row in split_bottom
+        ]
+        self._conn.execute(
+            """
+            UPDATE weekly_card_state
+            SET payload = ?
+            WHERE guild_id = ? AND week_start = ?
+            """,
+            (json.dumps(payload, separators=(",", ":"), sort_keys=True), guild_id, week.isoformat()),
+        )
+
+    def _strip_card_commands(self, guild_id: int, week_start: str, raw: str, blocked: set[str]) -> None:
+        try:
+            payload = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            return
+        if not isinstance(payload, dict):
+            return
+        rows = [
+            item
+            for item in list(payload.get("command_rows") or [])
+            if isinstance(item, dict) and str(item.get("name") or "").casefold() not in blocked
+        ]
+        if not payload.get("command_rows"):
+            rows = [
+                item
+                for item in list(payload.get("top_commands") or []) + list(payload.get("bottom_commands") or [])
+                if isinstance(item, dict) and str(item.get("name") or "").casefold() not in blocked
+            ]
+        payload["commands"] = sum(int(item.get("weekly") or 0) for item in rows)
+        split_top, split_bottom = _split_commands(_command_dicts(rows), metric="weekly") if rows else ([], [])
+        payload["command_rows"] = rows
+        payload["top_commands"] = [
+            {"name": row.name, "kind": row.kind, "weekly": row.weekly, "all_time": row.all_time} for row in split_top
+        ]
+        payload["bottom_commands"] = [
+            {"name": row.name, "kind": row.kind, "weekly": row.weekly, "all_time": row.all_time} for row in split_bottom
+        ]
+        self._conn.execute(
+            """
+            UPDATE weekly_card_state SET payload = ? WHERE guild_id = ? AND week_start = ?
+            """,
+            (json.dumps(payload, separators=(",", ":"), sort_keys=True), guild_id, week_start),
+        )
 
     def _add_all_time_imagegen(self, dimension: str, guild_id: int, item_key: str, amount: int) -> None:
         self._conn.execute(
@@ -1602,6 +2021,212 @@ class StatsStore:
         if not isinstance(payload, dict):
             return None
         return payload
+
+
+def _card_payload(stats: WeeklyStats) -> dict:
+    """Closed-week fields the weekly card renders. No user ids and no text."""
+
+    def channels(rows) -> list[dict]:
+        return [
+            {"id": int(row.channel_id), "weekly": int(row.weekly), "all_time": int(row.all_time)}
+            for row in rows
+        ]
+
+    def reactions(rows) -> list[dict]:
+        return [
+            {
+                "key": row.emoji_key,
+                "name": row.name,
+                "is_custom": bool(row.is_custom),
+                "weekly": int(row.weekly),
+                "all_time": int(row.all_time),
+            }
+            for row in rows
+        ]
+
+    def commands(rows) -> list[dict]:
+        return [
+            {"name": row.name, "kind": row.kind, "weekly": int(row.weekly), "all_time": int(row.all_time)}
+            for row in rows
+        ]
+
+    image = stats.imagegen
+
+    def dims(rows) -> list[dict]:
+        return [{"key": row.key, "weekly": int(row.weekly), "all_time": int(row.all_time)} for row in rows]
+
+    command_rows = commands(stats.top_commands) + commands(stats.bottom_commands)
+    return {
+        "messages": int(stats.messages_weekly),
+        "reactions": int(stats.reactions_weekly),
+        "commands": int(stats.commands_weekly),
+        "active_members": int(stats.active_members),
+        "voice_minutes": int(stats.voice_minutes),
+        "top_channels": channels(stats.top_channels),
+        "bottom_channels": channels(stats.bottom_channels),
+        "dead_channels": channels(stats.dead_channels),
+        "top_reactions": reactions(stats.top_reactions),
+        "least_custom_emojis": reactions(stats.least_custom_emojis),
+        "least_custom_emojis_weekly": reactions(stats.least_custom_emojis_weekly),
+        "top_commands": commands(stats.top_commands),
+        "bottom_commands": commands(stats.bottom_commands),
+        "command_rows": command_rows,
+        "heatmap": [list(row) for row in stats.heatmap],
+        "voice_heatmap": [list(row) for row in stats.voice_heatmap],
+        "top_voice_channels": channels(stats.top_voice_channels),
+        "imagegen": {
+            "models": dims(image.models),
+            "loras": dims(image.loras),
+            "edit_modes": dims(image.edit_modes),
+            "resolutions": dims(image.resolutions),
+            "steps": dims(image.steps),
+            "samplers": dims(image.samplers),
+            "avg_seconds": image.avg_seconds,
+            "success_rate": image.success_rate,
+            "error_rate": image.error_rate,
+            "success_count": int(image.success_count),
+            "error_count": int(image.error_count),
+            "regenerate_count": int(image.regenerate_count),
+            "edit_count": int(image.edit_count),
+            "kept_first": int(image.kept_first),
+            "generation_count": int(image.generation_count),
+        },
+    }
+
+
+def _channels_from(raw) -> tuple[ChannelCount, ...]:
+    rows = []
+    for item in raw or []:
+        if not isinstance(item, dict):
+            continue
+        rows.append(ChannelCount(int(item.get("id") or 0), int(item.get("weekly") or 0), int(item.get("all_time") or 0)))
+    return tuple(rows)
+
+
+def _reactions_from(raw) -> tuple[ReactionCount, ...]:
+    rows = []
+    for item in raw or []:
+        if not isinstance(item, dict):
+            continue
+        rows.append(
+            ReactionCount(
+                str(item.get("key") or ""),
+                str(item.get("name") or ""),
+                bool(item.get("is_custom")),
+                int(item.get("weekly") or 0),
+                int(item.get("all_time") or 0),
+            )
+        )
+    return tuple(rows)
+
+
+def _commands_from(raw) -> tuple[CommandCount, ...]:
+    rows = []
+    for item in raw or []:
+        if not isinstance(item, dict) or is_owner_only_name(str(item.get("name") or "")):
+            continue
+        rows.append(
+            CommandCount(
+                str(item.get("name") or ""),
+                str(item.get("kind") or ""),
+                int(item.get("weekly") or 0),
+                int(item.get("all_time") or 0),
+            )
+        )
+    return tuple(rows)
+
+
+def _grid_from(raw) -> tuple[tuple[int, ...], ...]:
+    grid = [[0 for _ in range(24)] for _ in range(7)]
+    for weekday, row in enumerate(list(raw or [])[:7]):
+        for hour, value in enumerate(list(row or [])[:24]):
+            grid[weekday][hour] = int(value or 0)
+    return tuple(tuple(line) for line in grid)
+
+
+def _dims_from(raw) -> tuple[DimCount, ...]:
+    rows = []
+    for item in raw or []:
+        if not isinstance(item, dict):
+            continue
+        rows.append(DimCount(str(item.get("key") or ""), int(item.get("weekly") or 0), int(item.get("all_time") or 0)))
+    return tuple(rows)
+
+
+def _imagegen_from_payload(raw, live: ImageGenSummary) -> ImageGenSummary:
+    raw = raw if isinstance(raw, dict) else {}
+    return ImageGenSummary(
+        models=_dims_from(raw.get("models")),
+        loras=_dims_from(raw.get("loras")),
+        edit_modes=_dims_from(raw.get("edit_modes")),
+        resolutions=_dims_from(raw.get("resolutions")),
+        steps=_dims_from(raw.get("steps")),
+        samplers=_dims_from(raw.get("samplers")),
+        avg_seconds=raw.get("avg_seconds"),
+        success_rate=raw.get("success_rate"),
+        error_rate=raw.get("error_rate"),
+        success_count=int(raw.get("success_count") or 0),
+        error_count=int(raw.get("error_count") or 0),
+        regenerate_count=int(raw.get("regenerate_count") or 0),
+        edit_count=int(raw.get("edit_count") or 0),
+        kept_first=int(raw.get("kept_first") or 0),
+        generation_count=int(raw.get("generation_count") or 0),
+        generation_count_all_time=live.generation_count_all_time,
+        success_count_all_time=live.success_count_all_time,
+        error_count_all_time=live.error_count_all_time,
+    )
+
+
+def _apply_closed_card(stats: WeeklyStats, payload: dict) -> WeeklyStats:
+    """Weekly lists and KPIs from the closed card. All-time fields stay live."""
+    messages = int(payload.get("messages") or 0)
+    reactions = int(payload.get("reactions") or 0)
+    commands = int(payload.get("commands") or 0)
+    active = int(payload.get("active_members") or 0)
+    history = []
+    for point in stats.week_history:
+        if point.week_start == stats.week_start:
+            history.append(WeekPoint(point.week_start, messages, reactions, active, commands))
+        else:
+            history.append(point)
+    return replace(
+        stats,
+        top_channels=_channels_from(payload.get("top_channels")),
+        bottom_channels=_channels_from(payload.get("bottom_channels")),
+        dead_channels=_channels_from(payload.get("dead_channels")),
+        top_reactions=_reactions_from(payload.get("top_reactions")),
+        least_custom_emojis_weekly=_reactions_from(
+            payload.get("least_custom_emojis_weekly") or payload.get("least_custom_emojis")
+        ),
+        top_commands=_commands_from(payload.get("top_commands")),
+        bottom_commands=_commands_from(payload.get("bottom_commands")),
+        imagegen=_imagegen_from_payload(payload.get("imagegen"), stats.imagegen),
+        active_members=active,
+        heatmap=_grid_from(payload.get("heatmap")),
+        voice_minutes=int(payload.get("voice_minutes") or 0),
+        top_voice_channels=_channels_from(payload.get("top_voice_channels")),
+        voice_heatmap=_grid_from(payload.get("voice_heatmap")),
+        messages_weekly=messages,
+        reactions_weekly=reactions,
+        commands_weekly=commands,
+        week_history=tuple(history),
+    )
+
+
+def _command_dicts(rows) -> list[dict]:
+    normalized = []
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        normalized.append(
+            {
+                "command_name": item.get("name") or item.get("command_name") or "",
+                "kind": item.get("kind") or "",
+                "weekly": int(item.get("weekly") or 0),
+                "all_time": int(item.get("all_time") or 0),
+            }
+        )
+    return normalized
 
 
 def _snapshot_int(payload, key: str) -> int | None:
@@ -1729,7 +2354,7 @@ def _inject_registered_prefix_rows(rows, command_map: dict[str, str]) -> list:
     extra = []
     seen: set[str] = set()
     for canonical in command_map.values():
-        if not canonical or canonical in seen:
+        if not canonical or canonical in seen or is_owner_only_name(canonical):
             continue
         seen.add(canonical)
         if (canonical, "prefix") in present:
@@ -1754,6 +2379,8 @@ def _merge_command_rows(rows, command_map: dict[str, str]) -> list[dict]:
             if not canonical:
                 continue
             name = canonical
+        if is_owner_only_name(name):
+            continue
         key = (name, kind)
         slot = merged.get(key)
         if slot is None:
@@ -1780,7 +2407,8 @@ def _split_commands(rows, metric: str = "weekly") -> tuple[list[CommandCount], l
             str(row["kind"]),
         )
     )
-    top = ranked[:COMMAND_LIMIT]
+    pool = ranked if metric == "all_time" else [row for row in ranked if int(row["weekly"]) > 0]
+    top = pool[:COMMAND_LIMIT]
     top_keys = {(str(row["command_name"]), str(row["kind"])) for row in top}
     rest = [row for row in ranked if (str(row["command_name"]), str(row["kind"])) not in top_keys]
     rest.sort(

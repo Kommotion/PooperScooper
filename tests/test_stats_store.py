@@ -121,16 +121,22 @@ def test_all_time_survives_close_and_weekly_resets_for_that_guild_only(store):
     assert closed.voice_minutes == 90
 
     fresh = store.build_stats(1, WHEN)
-    assert fresh.messages_weekly == 0
+    assert fresh.messages_weekly == 1
     assert fresh.messages_all_time == 1
-    assert fresh.reactions_weekly == 0
+    assert fresh.reactions_weekly == 1
     assert fresh.reactions_all_time == 1
-    assert fresh.commands_weekly == 0
+    assert fresh.commands_weekly == 1
     assert fresh.commands_all_time == 1
-    assert fresh.voice_minutes == 0
+    assert fresh.voice_minutes == 90
     assert fresh.voice_minutes_all_time == 90
-    assert fresh.active_members == 0
-    assert [row.channel_id for row in fresh.dead_channels] == [10]
+
+    rolled = store.build_stats(1, datetime(2026, 11, 23, 0, 0, tzinfo=LA))
+    assert rolled.messages_weekly == 0
+    assert rolled.reactions_weekly == 0
+    assert rolled.commands_weekly == 0
+    assert rolled.voice_minutes == 0
+    assert rolled.messages_all_time == 1
+    assert rolled.voice_minutes_all_time == 90
 
     other = store.build_stats(2, other_when)
     assert other.messages_weekly == 1
@@ -596,7 +602,7 @@ def test_command_lists_are_top_and_least_five_including_unused(store):
     for _ in range(3):
         store.record_command(1, "cmd01", "prefix")
     weekly = store.build_stats(1, WHEN, command_map=command_map)
-    assert [row.name for row in weekly.top_commands] == ["cmd01", "cmd09", "cmd08", "cmd07", "cmd06"]
+    assert [row.name for row in weekly.top_commands] == ["cmd01"]
     least = [row.name for row in weekly.bottom_commands]
     assert least[0] == "unused"
     assert weekly.bottom_commands[0].weekly == 0

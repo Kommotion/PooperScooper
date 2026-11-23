@@ -2,6 +2,22 @@
 
 This is the first versioned changelog for PooperScooper, covering about Oct 14–Nov 15, 2026.
 
+## v2.8.3 — 2026-11-23
+
+### New stuff
+
+- After Sunday's post, !statscard and previews show the week that just closed instead of an empty new-week stub under the old title.
+- The weekly model mix no longer borrows all-time numbers. A week with no image gens says n/a.
+- Weekly top commands only lists commands that were actually used that week.
+- Owner-only admin commands stay off the command lists.
+- All-time and weekly snapshots can include historical #image-diffusion gens and historical MTS slash commands.
+
+### Background
+
+- The close saves the full closed-week card, and a rebuild script can refill the Nov 16 week.
+- Owner-only names come from a prefix-versus-slash filter.
+- History backfill scripts are idempotent, REST-only, and MTS only.
+
 ## v2.8.2 — 2026-11-22
 
 ### New stuff
