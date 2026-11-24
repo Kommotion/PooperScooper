@@ -21,6 +21,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
+from cogs.utils.constants import POOPER_APP_ID
 from cogs.utils.stats_card import CardNames, render_alltime_card, render_stats_card
 from cogs.utils.stats_commands import (
     alias_map_from_bot,
@@ -30,8 +31,103 @@ from cogs.utils.stats_commands import (
 )
 from cogs.utils.stats_schedule import LA, LA_NAME, PostSchedule, due_week
 from cogs.utils.stats_store import StatsStore
+from scripts.backfill_slash_history import (
+    live_bot_name,
+    payload_application_id,
+    slash_interaction_name,
+)
 
 log = logging.getLogger(__name__)
+
+
+def interaction_is_foreign(interaction, bot) -> bool:
+    """True when both application ids are present and they differ.
+
+    A missing id on either side still records. This bot's id is
+    ``application_id`` after login, then ``client_id`` from config.
+    """
+    incoming = getattr(interaction, "application_id", None)
+    if incoming in (None, ""):
+        return False
+    expected = getattr(bot, "application_id", None)
+    if expected in (None, ""):
+        expected = getattr(bot, "client_id", None)
+    if expected in (None, ""):
+        return False
+    try:
+        return int(incoming) != int(expected)
+    except (TypeError, ValueError):
+        return False
+
+
+def _interaction_block(value) -> dict | None:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return value
+    data: dict = {}
+    raw_type = getattr(value, "type", None)
+    if raw_type is not None:
+        try:
+            data["type"] = int(getattr(raw_type, "value", raw_type))
+        except (TypeError, ValueError):
+            pass
+    app = getattr(value, "application_id", None)
+    if app not in (None, ""):
+        data["application_id"] = app
+    for field in ("name", "qualified_name"):
+        text = getattr(value, field, None)
+        if isinstance(text, str) and text.strip():
+            data[field] = text
+    options = getattr(value, "options", None)
+    if isinstance(options, list):
+        data["options"] = options
+    return data or None
+
+
+def message_slash_payload(message) -> dict:
+    """Dict shape used by the history slash parsers."""
+    payload: dict = {}
+    app = getattr(message, "application_id", None)
+    if app not in (None, ""):
+        payload["application_id"] = app
+    for key in ("interaction", "interaction_metadata"):
+        block = _interaction_block(getattr(message, key, None))
+        if block:
+            payload[key] = block
+    return payload
+
+
+def _application_is_this_bot(application_id: int, bot) -> bool:
+    if int(application_id) == POOPER_APP_ID:
+        return True
+    for attr in ("application_id", "client_id"):
+        expected = getattr(bot, attr, None)
+        if expected in (None, ""):
+            continue
+        try:
+            if int(expected) == int(application_id):
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def foreign_slash_from_message(message, bot) -> tuple[str, int, str] | None:
+    """Another bot's type-2 slash command on this message, or None.
+
+    This bot's own application id is left for ``on_app_command_completion``.
+    Type 3 and type 5 are ignored.
+    """
+    payload = message_slash_payload(message)
+    name = slash_interaction_name(payload)
+    if not name:
+        return None
+    app_id = payload_application_id(payload)
+    if app_id is None or _application_is_this_bot(app_id, bot):
+        return None
+    return name, int(app_id), live_bot_name(getattr(message, "author", None), int(app_id))
+
 
 # Menaces to Sobriety. Same id as cogs.candyhunt.MTS_GUILD_ID.
 MTS_GUILD_ID = 932057681307512922
@@ -221,6 +317,10 @@ class WeeklyStats(commands.Cog):
         guild = getattr(message, "guild", None)
         if guild is None or not self._enabled(getattr(guild, "id", None)):
             return
+        foreign = foreign_slash_from_message(message, self.bot)
+        if foreign is not None:
+            name, app_id, bot_name = foreign
+            self.store.record_command(int(guild.id), name, "slash", app_id=app_id, bot_name=bot_name)
         author = getattr(message, "author", None)
         if author is None or getattr(author, "bot", False):
             return
@@ -290,12 +390,20 @@ class WeeklyStats(commands.Cog):
         user = getattr(interaction, "user", None)
         if user is not None and getattr(user, "bot", False):
             return
+        if interaction_is_foreign(interaction, self.bot):
+            return
         name = getattr(command, "qualified_name", None) or getattr(command, "name", None)
         if not name or not str(name).strip():
             return
         if is_owner_only_name(str(name)):
             return
-        self.store.record_command(int(guild_id), str(name), "slash")
+        self.store.record_command(
+            int(guild_id),
+            str(name),
+            "slash",
+            app_id=POOPER_APP_ID,
+            bot_name="",
+        )
 
     @commands.Cog.listener()
     async def on_command_completion(self, ctx) -> None:
@@ -317,7 +425,7 @@ class WeeklyStats(commands.Cog):
             canonical = canonical_command_name(raw, mapping)
         if not canonical or is_owner_only_name(canonical):
             return
-        self.store.record_command(int(guild_id), canonical, "prefix")
+        self.store.record_command(int(guild_id), canonical, "prefix", app_id=POOPER_APP_ID, bot_name="")
 
     def _prefix_command_map(self) -> dict[str, str]:
         """Bot command tree when it is loaded. Otherwise the source scan."""

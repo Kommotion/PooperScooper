@@ -251,11 +251,7 @@ self.active_model = image.model
 
 ### Owner diagnostics
 
-`/imagegen status` (bot owner only) reports:
-
-- ComfyUI running / source (`external` vs `bot_started`)
-- Host, port, PID (if bot-started)
-- Queue depth (`current/30`)
+`!status` reports ComfyUI running or down, host, port, and queue depth. The bot owner also sees source (`external` vs `bot_started`), root, PID (if bot-started), and any startup error. `/imagegen status` is no longer a slash command. That drop shows up in Discord after `!sync_commands`.
 
 Logs:
 

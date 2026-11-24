@@ -116,9 +116,10 @@ class General(Cog):
         embed = discord.Embed(title="Lavalink", description="\n".join(lines), colour=discord.Colour.blue())
         await ctx.send(embed=embed)
 
+    @commands.is_owner()
     @commands.command()
     async def reload_music(self, ctx):
-        """Reload the music cog in case of any errors."""
+        """Owner-only. Reload the music cog. Drops the current voice connection."""
         try:
             await self.bot.unload_extension("cogs.music")
             log.info("Music Cog unloaded")
@@ -250,14 +251,32 @@ class General(Cog):
             else:
                 ret += 1
 
+    async def _caller_is_owner(self, ctx: commands.Context) -> bool:
+        checker = getattr(self.bot, "is_owner", None)
+        if not callable(checker):
+            return False
+        try:
+            return bool(await checker(ctx.author))
+        except Exception:
+            log.exception("Could not check bot owner")
+            return False
+
     @commands.command(name="status")
     async def status(self, ctx: commands.Context):
-        """Show bot health: uptime, services, and subsystem status."""
+        """Show bot health: uptime, version, services, and subsystem status.
+
+        The bot owner also sees ComfyUI source, root, PID, and startup error.
+        """
         async with ctx.typing():
             lines = [
                 f"**Uptime:** {self._get_bot_uptime()}",
+                f"**Version:** PooperScooper {VERSION}",
+                f"**Author:** {BOT_AUTHOR}",
                 f"**Guilds:** {len(self.bot.guilds)}",
+                f"**Members:** {len(self.bot.users)}",
                 f"**Commands processed:** {self.bot.commands_executed}",
+                f"**Cogs loaded:** {len(self.bot.cogs)}",
+                "**Source:** https://github.com/Kommotion/PooperScooper",
             ]
 
             lavalink_server = getattr(self.bot, "lavalink_server", None)
@@ -277,6 +296,7 @@ class General(Cog):
                 lines.append("**Lavalink:** disabled")
 
             image_cog = self.bot.get_cog("ImageDiffusion")
+            comfy_status = None
             if image_cog is not None:
                 from cogs.utils import comfy_client
                 comfy_status = comfy_client.get_comfy_status()
@@ -286,8 +306,6 @@ class General(Cog):
                     f"({comfy_status['host']}:{comfy_status['port']})"
                 )
                 lines.append(f"**Image queue:** {queue_depth}/{image_cog.image_queue.maxsize}")
-                if image_cog.comfy_startup_error:
-                    lines.append(f"**ComfyUI error:** {image_cog.comfy_startup_error}")
             else:
                 lines.append("**ImageDiffusion:** cog not loaded")
 
@@ -303,6 +321,13 @@ class General(Cog):
             configured_guilds = get_server_config_manager().list_configured_guild_ids()
             lines.append(f"**Server configs:** {len(configured_guilds)} guild(s)")
 
+            if comfy_status is not None and await self._caller_is_owner(ctx):
+                lines.append(f"**ComfyUI source:** {comfy_status.get('source', 'n/a')}")
+                lines.append(f"**ComfyUI root:** {comfy_status.get('root') or 'n/a'}")
+                lines.append(f"**ComfyUI PID:** {comfy_status.get('pid') or 'n/a'}")
+                if image_cog.comfy_startup_error:
+                    lines.append(f"**ComfyUI error:** {image_cog.comfy_startup_error}")
+
             embed = discord.Embed(
                 title="PooperScooper Status",
                 description="\n".join(lines),
@@ -311,96 +336,10 @@ class General(Cog):
             embed.set_footer(text=f"PooperScooper {VERSION}")
             await ctx.send(embed=embed)
 
-    @commands.command()
-    async def stats(self, ctx):
-        """Prints out the stats of the bot."""
-        async with ctx.typing():
-            embed = discord.Embed(
-                title='Pooper Stats 📝',
-                colour=discord.Colour.blue()
-            )
-            name = 'Commands Processed'
-            value = self.bot.commands_executed
-            embed.add_field(name=name, value=value, inline=True)
-
-            name = 'Members Connected'
-            value = str(len(self.bot.users))
-            embed.add_field(name=name, value=value, inline=True)
-
-            name = 'Total Uptime'
-            value = self._get_bot_uptime()
-            embed.add_field(name=name, value=value, inline=True)
-
-            name = 'Cogs Loaded'
-            value = '{}: '.format(len(self.bot.cogs))
-            for cog in self.bot.cogs:
-                value += '{}, '.format(cog)
-            embed.add_field(name=name, value=value.rstrip(', '), inline=True)
-
-            await ctx.send(embed=embed)
-
-    @commands.command()
-    async def uptime(self, ctx):
-        """Prints out how long the bot has been online."""
-        await ctx.send('Uptime: **{}**'.format(self._get_bot_uptime()))
-
     @commands.command(name="gay")
     async def gay(self, ctx):
         """Tell Wolfy he's wrong about his waifus."""
         await ctx.send("Wolfy you're wrong about your waifus")
-
-    @commands.command()
-    async def about(self, ctx):
-        """Displays information about the bot."""
-        async with ctx.typing():
-            pics_path = utils.get_pics_path()
-            pooper_scooper_author_path = os.path.join(pics_path, POOPERSCOOPER_PICTURE)
-            pooper_scooper_thumbnail_path = os.path.join(pics_path, COOKS_AND_MOCHA)
-            pooper_scooper_image_path = os.path.join(pics_path, GOOD_BOYS_AND_GIRLS)
-
-            pooper_scooper_author_name = 'pooper.png'
-            pooper_scooper_thumbnail_name = 'thumb.png'
-            pooper_scooper_image_name = 'image.png'
-
-            pooper_scooper_author = discord.File(pooper_scooper_author_path, filename=pooper_scooper_author_name)
-            pooper_scooper_thumb = discord.File(pooper_scooper_thumbnail_path, filename=pooper_scooper_thumbnail_name)
-            pooper_scooper_image = discord.File(pooper_scooper_image_path, filename=pooper_scooper_image_name)
-            file_list = list([pooper_scooper_author, pooper_scooper_thumb, pooper_scooper_image])
-
-            embed = discord.Embed(
-                title='PooperScooper',
-                description='A personal bot made for fun and scooping your poop.',
-                colour=discord.Colour.blue()
-            )
-
-            attachment = 'attachment://{}'.format(pooper_scooper_author_name)
-            embed.set_author(name='Want to know more about me?', icon_url=attachment)
-            embed.set_thumbnail(url='attachment://{}'.format(pooper_scooper_thumbnail_name))
-            embed.set_image(url='attachment://{}'.format(pooper_scooper_image_name))
-
-            name = 'Version'
-            value = 'PooperScooper ' + VERSION
-            embed.add_field(name=name, value=value, inline=True)
-
-            name = 'Author'
-            value = BOT_AUTHOR
-            embed.add_field(name=name, value=value, inline=True)
-
-            name = 'Github Link'
-            value = 'https://github.com/Kommotion/PooperScooper'
-            embed.add_field(name=name, value=value, inline=False)
-
-            name = 'Library'
-            value = '[Discord.py](https://github.com/Rapptz/discord.py)'
-            embed.add_field(name=name, value=value, inline=True)
-
-            name = 'Language'
-            value = 'Python'
-            embed.add_field(name=name, value=value, inline=True)
-
-            embed.set_footer(text='In memory of all the good boys and girls - Junior, Cole, Shirley, and Mocha.')
-
-            await ctx.send(files=file_list, embed=embed)
 
 
 async def setup(bot):

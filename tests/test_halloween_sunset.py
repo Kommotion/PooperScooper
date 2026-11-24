@@ -197,6 +197,34 @@ def test_setup_hook_does_not_call_tree_sync(monkeypatch):
     asyncio.run(run())
 
 
+def test_halloweenify_off_season_invoke_replies_unavailable(monkeypatch):
+    monkeypatch.setattr("cogs.imagediffusion.HALLOWEENIFY_ENABLED", False)
+    sent = {}
+
+    async def send_message(message, *, ephemeral=False):
+        sent["message"] = message
+        sent["ephemeral"] = ephemeral
+
+    interaction = SimpleNamespace(
+        response=SimpleNamespace(send_message=send_message, is_done=lambda: False),
+        guild_id=1,
+        channel_id=2,
+        user=SimpleNamespace(id=3),
+    )
+
+    def _blocked(*args, **kwargs):
+        raise AssertionError("off-season halloweenify should not continue")
+
+    cog = SimpleNamespace(_is_allowed_channel=_blocked)
+
+    async def run():
+        await ImageDiffusion.halloweenify.callback(cog, interaction, costume="vampire")
+
+    asyncio.run(run())
+    assert sent["ephemeral"] is True
+    assert "unavailable" in sent["message"].lower()
+
+
 def test_example_config_and_next_year_note():
     example = json.loads((ROOT / "config.example.json").read_text(encoding="utf-8"))
     assert example["halloween_enabled"] is False

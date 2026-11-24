@@ -7,6 +7,10 @@ from datetime import date, datetime, timezone
 
 import pytest
 
+import sqlite3
+from types import SimpleNamespace
+
+from cogs.utils.constants import POOPER_APP_ID
 from cogs.utils.stats_card import CardNames
 from cogs.utils.stats_card import _command_label as card_command_label
 from cogs.utils.stats_commands import is_owner_only_name, owner_only_names_from_source
@@ -17,7 +21,19 @@ from cogs.utils.stats_store import StatsStore, _apply_closed_card, _imagegen_fro
 from scripts.backfill_imagegen_history import guild_allowed as image_guild_allowed
 from scripts.backfill_imagegen_history import image_decision, model_from_caption
 from scripts.backfill_slash_history import guild_allowed as slash_guild_allowed
-from scripts.backfill_slash_history import normalize_slash_name, slash_command_name
+from scripts.backfill_slash_history import (
+    DEFAULT_DB,
+    LIVE_RETAG_ERROR,
+    _is_live_db,
+    build_parser,
+    classify_slash_use,
+    live_retag_refusal,
+    normalize_slash_name,
+    resolve_own_application_id,
+    slash_command_name,
+    slash_event_name,
+)
+from cogs.weekly_stats import GuildStatsConfig, WeeklyStats, foreign_slash_from_message, interaction_is_foreign
 from scripts.rebuild_closed_week_card import (
     guild_allowed,
     message_in_closed_window,
@@ -41,7 +57,8 @@ def store(tmp_path):
 
 
 def test_owner_set_includes_imagegen_status_and_skips_public_commands():
-    assert "imagegen status" in ROOT_NAMES
+    assert "imagegen status" not in ROOT_NAMES
+    assert "reload_music" in ROOT_NAMES
     assert "sync_commands" in ROOT_NAMES
     assert "candyadmin" in ROOT_NAMES
     assert "candyadmin cleanup" in ROOT_NAMES
@@ -51,12 +68,23 @@ def test_owner_set_includes_imagegen_status_and_skips_public_commands():
     assert "imagegen show_default_prompts" not in ROOT_NAMES
     assert "grok" not in ROOT_NAMES
     assert "palworld" not in ROOT_NAMES
-    assert is_owner_only_name("imagegen status") is True
+    assert "play" not in ROOT_NAMES
+    assert "status" not in ROOT_NAMES
+    assert "join" not in ROOT_NAMES
+    assert "count" not in ROOT_NAMES
+    assert "stats" not in ROOT_NAMES
+    assert "about" not in ROOT_NAMES
+    assert "uptime" not in ROOT_NAMES
+    assert "played" not in ROOT_NAMES
+    assert is_owner_only_name("imagegen status") is False
+    assert is_owner_only_name("reload_music") is True
     assert is_owner_only_name("imagegen generate") is False
+    assert is_owner_only_name("status") is False
+    assert is_owner_only_name("play") is False
 
 
 def test_record_command_drops_owner_only_names(store):
-    store.record_command(1, "imagegen status", "slash")
+    store.record_command(1, "reload_music", "prefix")
     store.record_command(1, "statscard", "prefix")
     store.record_command(1, "imagegen generate", "slash")
     store.flush()
@@ -151,12 +179,50 @@ def test_history_imagegen_and_slash_are_idempotent(store):
     assert row["command_name"] == "imagegen generate"
     assert (row["weekly"], row["all_time"]) == (0, 1)
     before = row["all_time"]
-    assert store.apply_history_slash(1, 9003, WEEK, "imagegen status") is True
-    assert store.apply_history_slash(1, 9003, WEEK, "imagegen status") is False
+    assert store.apply_history_slash(1, 9003, WEEK, "reload_music") is True
+    assert store.apply_history_slash(1, 9003, WEEK, "reload_music") is False
+    assert store.apply_history_slash(
+        1,
+        9004,
+        WEEK,
+        "play",
+        application_id=222,
+        own_application_id=111,
+        bot_name="Jockie Music",
+    ) is True
+    assert store.apply_history_slash(
+        1,
+        9004,
+        WEEK,
+        "play",
+        application_id=222,
+        own_application_id=111,
+        bot_name="Jockie Music",
+    ) is False
+    foreign = store._conn.execute(
+        """
+        SELECT weekly, all_time, app_id, bot_name FROM command_counts
+        WHERE guild_id = 1 AND command_name = 'play' AND kind = 'slash'
+        """
+    ).fetchone()
+    assert (foreign["weekly"], foreign["all_time"], foreign["app_id"], foreign["bot_name"]) == (
+        0,
+        1,
+        222,
+        "Jockie Music",
+    )
     after = store._conn.execute(
         "SELECT SUM(all_time) FROM command_counts WHERE guild_id = 1"
     ).fetchone()[0]
-    assert after == before
+    assert after == before + 1
+    assert store.apply_history_slash(1, 9005, WEEK, "queue", application_id="nope") is True
+    missing = store._conn.execute(
+        """
+        SELECT app_id, all_time FROM command_counts
+        WHERE guild_id = 1 AND command_name = 'queue' AND kind = 'slash'
+        """
+    ).fetchone()
+    assert (missing["app_id"], missing["all_time"]) == (0, 1)
     assert card["commands"] >= 0
 
 
@@ -199,13 +265,54 @@ def test_image_and_slash_classifiers_drop_text():
     upload = dict(kept)
     upload["attachments"] = [{"filename": "photo.png"}]
     assert image_decision(upload) == "skip"
-    assert slash_command_name({"interaction": {"type": 2, "name": "imagegen"}}) == "imagegen generate"
+    own = 111
+    assert slash_command_name(
+        {"interaction": {"type": 2, "name": "imagegen", "application_id": own}},
+        own,
+    ) == "imagegen generate"
+    assert slash_command_name(
+        {"application_id": str(own), "interaction": {"type": 2, "name": "imagegen"}},
+        own,
+    ) == "imagegen generate"
+    foreign_image = {"interaction": {"type": 2, "name": "imagegen", "application_id": 222}}
+    assert slash_event_name(foreign_image, own) == "imagegen generate"
+    assert classify_slash_use(foreign_image, own) == ("imagegen generate", "foreign")
+    assert slash_command_name(foreign_image, own) is None
+    missing_app = {"interaction": {"type": 2, "name": "imagegen"}}
+    assert slash_event_name(missing_app, own) == "imagegen generate"
+    assert slash_command_name(missing_app, own) is None
+    mismatch = {
+        "application_id": own,
+        "interaction": {"type": 2, "name": "imagegen", "application_id": 222},
+    }
+    assert slash_event_name(mismatch, own) == "imagegen generate"
+    assert slash_command_name(mismatch, own) is None
     assert normalize_slash_name("imagegen") == "imagegen generate"
     edit = slash_command_name(
-        {"interaction_metadata": {"type": 2, "name": "imagegen", "options": [{"type": 1, "name": "edit"}]}}
+        {
+            "interaction_metadata": {
+                "type": 2,
+                "name": "imagegen",
+                "application_id": own,
+                "options": [{"type": 1, "name": "edit"}],
+            }
+        },
+        own,
     )
     assert edit == "imagegen edit"
-    assert slash_command_name({"interaction": {"type": 5, "name": "imagegen"}}) is None
+    assert slash_command_name(
+        {"interaction": {"type": 5, "name": "imagegen", "application_id": own}},
+        own,
+    ) is None
+    assert classify_slash_use(
+        {"interaction": {"type": 2, "name": "play", "application_id": 222}},
+        own,
+    ) == ("play", "foreign")
+    assert resolve_own_application_id(own) == own
+    assert resolve_own_application_id("111") == 111
+    for bad in ("", "0", "-5", "nope", "12.5"):
+        with pytest.raises(ValueError):
+            resolve_own_application_id(bad)
 
 
 def test_model_from_caption_accepts_current_and_older_labels():
@@ -272,7 +379,7 @@ def test_imagegen_since_is_separate_from_live_since(store):
     assert empty.tracking_since == "Nov 19, 2026"
 
 
-def test_prefix_and_slash_forms_merge(store):
+def test_prefix_and_slash_forms_stay_separate(store):
     for _ in range(2):
         store.record_command(1, "play", "prefix")
     for _ in range(3):
@@ -282,22 +389,260 @@ def test_prefix_and_slash_forms_merge(store):
     store.flush()
     command_map = {"play": "play", "onlypre": "onlypre", "onlyslash": "onlyslash"}
     stats = store.build_stats(1, WHEN, command_map=command_map)
-    weekly = {row.name: row for row in stats.top_commands}
-    assert weekly["play"].weekly == 5
-    assert weekly["play"].all_time == 5
-    assert weekly["play"].kind == "both"
-    assert weekly["onlypre"].kind == "prefix"
-    assert weekly["onlyslash"].kind == "slash"
-    all_time = {row.name: row for row in stats.top_commands_all_time}
-    assert all_time["play"].all_time == 5
-    assert all_time["play"].kind == "both"
-    assert _command_label(weekly["play"]) == "play"
-    assert _command_label(weekly["onlypre"]) == "!onlypre"
-    assert _command_label(weekly["onlyslash"]) == "/onlyslash"
-    assert card_command_label("play", "both") == "play"
+    weekly = {(row.name, row.kind): row for row in stats.top_commands}
+    assert weekly[("play", "prefix")].weekly == 2
+    assert weekly[("play", "prefix")].all_time == 2
+    assert weekly[("play", "slash")].weekly == 3
+    assert weekly[("play", "slash")].all_time == 3
+    assert weekly[("onlypre", "prefix")].kind == "prefix"
+    assert weekly[("onlyslash", "slash")].kind == "slash"
+    assert "both" not in {row.kind for row in stats.top_commands}
+    all_time = {(row.name, row.kind): row for row in stats.top_commands_all_time}
+    assert all_time[("play", "prefix")].all_time == 2
+    assert all_time[("play", "slash")].all_time == 3
+    assert "both" not in {row.kind for row in stats.top_commands_all_time}
+    assert weekly[("play", "prefix")].app_id == POOPER_APP_ID
+    assert weekly[("play", "prefix")].bot_name == ""
+    assert weekly[("play", "slash")].app_id == POOPER_APP_ID
+    assert weekly[("play", "slash")].bot_name == ""
+    assert _command_label(weekly[("play", "prefix")]) == "!play"
+    assert _command_label(weekly[("play", "slash")]) == "/play"
+    assert _command_label(weekly[("onlypre", "prefix")]) == "!onlypre"
+    assert _command_label(weekly[("onlyslash", "slash")]) == "/onlyslash"
+    assert "·" not in _command_label(weekly[("play", "prefix")])
+    assert "·" not in _command_label(weekly[("play", "slash")])
+    assert card_command_label("play", "prefix") == "!play"
+    assert card_command_label("play", "slash") == "/play"
+    assert card_command_label(weekly[("play", "prefix")]) == "!play"
+    assert card_command_label(weekly[("play", "slash")]) == "/play"
     assert card_command_label("onlypre", "prefix") == "!onlypre"
     assert card_command_label("onlyslash", "slash") == "/onlyslash"
+    assert card_command_label("play", "slash", 222, "Jockie Music") == "/play · Jockie Music"
     assert stats.commands_weekly == 7
+
+
+def test_command_counts_migration_tags_prefix_and_leaves_slash_untagged(tmp_path):
+    path = tmp_path / "legacy.sqlite3"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """
+        CREATE TABLE command_counts (
+            guild_id INTEGER NOT NULL,
+            command_name TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            weekly INTEGER NOT NULL DEFAULT 0,
+            all_time INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (guild_id, command_name, kind)
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO command_counts VALUES (1, 'play', 'prefix', 2, 975)"
+    )
+    conn.execute(
+        "INSERT INTO command_counts VALUES (1, 'play', 'slash', 0, 460)"
+    )
+    conn.commit()
+    conn.close()
+    store = StatsStore(path)
+    rows = {
+        (row["command_name"], row["kind"]): (row["weekly"], row["all_time"], row["app_id"], row["bot_name"])
+        for row in store._conn.execute(
+            "SELECT command_name, kind, weekly, all_time, app_id, bot_name FROM command_counts"
+        )
+    }
+    assert rows[("play", "prefix")] == (2, 975, POOPER_APP_ID, "")
+    assert rows[("play", "slash")] == (0, 460, 0, "")
+    store.close()
+    again = StatsStore(path)
+    second = {
+        (row["command_name"], row["kind"]): (row["weekly"], row["all_time"], row["app_id"], row["bot_name"])
+        for row in again._conn.execute(
+            "SELECT command_name, kind, weekly, all_time, app_id, bot_name FROM command_counts"
+        )
+    }
+    assert second == rows
+    info = again._conn.execute("PRAGMA table_info(command_counts)").fetchall()
+    assert sum(1 for row in info if row["name"] == "app_id") == 1
+    again.close()
+
+
+def test_top_commands_label_foreign_bots_and_least_used_stays_own(store):
+    for _ in range(20):
+        store.record_command(1, "play", "slash", app_id=222, bot_name="Jockie Music")
+    for _ in range(10):
+        store.record_command(1, "imagegen generate", "slash", app_id=POOPER_APP_ID)
+    for _ in range(8):
+        store.record_command(1, "play", "prefix")
+    for _ in range(7):
+        store.record_command(1, "skip", "prefix")
+    for _ in range(6):
+        store.record_command(1, "stop", "prefix")
+    store.record_command(1, "quiet", "prefix")
+    store.flush()
+    command_map = {"play": "play", "quiet": "quiet", "skip": "skip", "stop": "stop", "zzzzunused": "zzzzunused"}
+    stats = store.build_stats(1, WHEN, command_map=command_map)
+    top = {(row.name, row.kind, row.app_id): row for row in stats.top_commands}
+    assert ("play", "slash", 222) in top
+    assert ("play", "prefix", POOPER_APP_ID) in top or any(
+        row.name == "play" and row.kind == "prefix" for row in stats.top_commands
+    )
+    assert _command_label(top[("play", "slash", 222)]) == "/play · Jockie Music"
+    own_slash = next(row for row in list(stats.top_commands) + list(stats.bottom_commands) if row.name == "imagegen generate")
+    assert "·" not in _command_label(own_slash)
+    own_prefix = next(row for row in list(stats.top_commands) + list(stats.bottom_commands) if row.name == "play" and row.kind == "prefix")
+    assert _command_label(own_prefix) == "!play"
+    least = list(stats.bottom_commands)
+    assert all(row.app_id == POOPER_APP_ID or row.kind == "prefix" for row in least)
+    assert all(row.app_id != 222 for row in least)
+    assert all("Jockie" not in _command_label(row) for row in least)
+    assert any(row.name == "quiet" for row in least)
+    assert any(row.name == "zzzzunused" and row.all_time == 0 for row in least)
+
+
+def test_tag_history_bots_is_idempotent(store):
+    store.record_command(1, "play", "prefix")
+    store.flush()
+    store.close_week(1, WEEK, SUNDAY)
+    assert store.apply_history_slash(1, 9101, WEEK, "play") is True
+    assert store.apply_history_slash(1, 9102, WEEK, "play") is True
+    assert store.apply_history_slash(1, 9103, WEEK, "imagegen generate") is True
+    store._conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS slash_history_span (
+            guild_id INTEGER NOT NULL,
+            channel_id INTEGER NOT NULL,
+            low_id INTEGER NOT NULL,
+            high_id INTEGER NOT NULL,
+            PRIMARY KEY (guild_id, channel_id, low_id)
+        )
+        """
+    )
+    store._conn.execute(
+        "INSERT INTO slash_history_span (guild_id, channel_id, low_id, high_id) VALUES (1, 8, 1, 50)"
+    )
+    claims = store._conn.execute("SELECT COUNT(*) FROM history_applied").fetchone()[0]
+    prefix = store._conn.execute(
+        """
+        SELECT weekly, all_time, app_id FROM command_counts
+        WHERE guild_id = 1 AND command_name = 'play' AND kind = 'prefix'
+        """
+    ).fetchone()
+    assert store.tag_history_bots(
+        1,
+        {"imagegen generate": 1},
+        {("play", 222, "Jockie Music"): 2},
+    ) is True
+    play = store._conn.execute(
+        """
+        SELECT weekly, all_time, app_id, bot_name FROM command_counts
+        WHERE guild_id = 1 AND command_name = 'play' AND kind = 'slash'
+        """
+    ).fetchall()
+    assert len(play) == 1
+    assert (play[0]["weekly"], play[0]["all_time"], play[0]["app_id"], play[0]["bot_name"]) == (
+        0,
+        2,
+        222,
+        "Jockie Music",
+    )
+    own = store._conn.execute(
+        """
+        SELECT weekly, all_time, app_id, bot_name FROM command_counts
+        WHERE guild_id = 1 AND command_name = 'imagegen generate' AND kind = 'slash'
+        """
+    ).fetchone()
+    assert (own["weekly"], own["all_time"], own["app_id"], own["bot_name"]) == (0, 1, POOPER_APP_ID, "")
+    kept_prefix = store._conn.execute(
+        """
+        SELECT weekly, all_time, app_id FROM command_counts
+        WHERE guild_id = 1 AND command_name = 'play' AND kind = 'prefix'
+        """
+    ).fetchone()
+    assert (kept_prefix["weekly"], kept_prefix["all_time"], kept_prefix["app_id"]) == (
+        prefix["weekly"],
+        prefix["all_time"],
+        prefix["app_id"],
+    )
+    zero = store._conn.execute(
+        """
+        SELECT COUNT(*) FROM command_counts
+        WHERE guild_id = 1 AND kind = 'slash' AND app_id = 0
+        """
+    ).fetchone()[0]
+    assert zero == 0
+    assert store._conn.execute("SELECT COUNT(*) FROM history_applied").fetchone()[0] == claims
+    assert store._conn.execute("SELECT COUNT(*) FROM slash_history_span").fetchone()[0] == 1
+    snapshot = {
+        (row["command_name"], row["kind"], row["app_id"], row["guild_id"]): (row["weekly"], row["all_time"], row["bot_name"])
+        for row in store._conn.execute(
+            "SELECT guild_id, command_name, kind, weekly, all_time, app_id, bot_name FROM command_counts"
+        )
+    }
+    assert store.tag_history_bots(
+        1,
+        {"imagegen generate": 1},
+        {("play", 222, "Jockie Music"): 2},
+    ) is False
+    after = {
+        (row["command_name"], row["kind"], row["app_id"], row["guild_id"]): (row["weekly"], row["all_time"], row["bot_name"])
+        for row in store._conn.execute(
+            "SELECT guild_id, command_name, kind, weekly, all_time, app_id, bot_name FROM command_counts"
+        )
+    }
+    assert after == snapshot
+    assert store._conn.execute("SELECT COUNT(*) FROM history_applied").fetchone()[0] == claims
+
+
+def test_retag_refuses_the_live_default_db(tmp_path):
+    copy = tmp_path / "weekly_stats.sqlite3"
+    copy.write_bytes(b"")
+    assert _is_live_db(DEFAULT_DB) is True
+    assert _is_live_db(copy) is False
+    assert live_retag_refusal(DEFAULT_DB) == LIVE_RETAG_ERROR
+    assert live_retag_refusal(copy) is None
+    args = build_parser().parse_args(["--retag-bots", "--db", str(copy)])
+    assert args.retag_bots is True
+    alias = build_parser().parse_args(["--purge-foreign", "--db", str(copy)])
+    assert alias.purge_foreign is True
+
+
+def test_live_slash_guard_skips_a_different_application():
+    interaction = type("Interaction", (), {"application_id": 222})()
+    bot = type("Bot", (), {"application_id": 111, "client_id": "111"})()
+    assert interaction_is_foreign(interaction, bot) is True
+    same = type("Interaction", (), {"application_id": "111"})()
+    assert interaction_is_foreign(same, bot) is False
+    missing = type("Interaction", (), {"application_id": None})()
+    assert interaction_is_foreign(missing, bot) is False
+    client_only = type("Bot", (), {"application_id": None, "client_id": "111"})()
+    assert interaction_is_foreign(interaction, client_only) is True
+    unknown = type("Bot", (), {"application_id": None, "client_id": None})()
+    assert interaction_is_foreign(interaction, unknown) is False
+
+    bot = type("Bot", (), {"application_id": POOPER_APP_ID, "client_id": str(POOPER_APP_ID)})()
+    metadata = SimpleNamespace(type=2, name="play", application_id=222)
+    foreign_msg = SimpleNamespace(
+        application_id=222,
+        interaction=None,
+        interaction_metadata=metadata,
+        author=SimpleNamespace(bot=True, display_name="Jockie Music", global_name=None, name="Jockie Music"),
+    )
+    assert foreign_slash_from_message(foreign_msg, bot) == ("play", 222, "Jockie Music")
+    own_msg = SimpleNamespace(
+        application_id=POOPER_APP_ID,
+        interaction=None,
+        interaction_metadata=SimpleNamespace(type=2, name="imagegen generate", application_id=POOPER_APP_ID),
+        author=SimpleNamespace(bot=True, display_name="PooperScooper", global_name=None, name="PooperScooper"),
+    )
+    assert foreign_slash_from_message(own_msg, bot) is None
+    component = SimpleNamespace(
+        application_id=222,
+        interaction=None,
+        interaction_metadata=SimpleNamespace(type=3, name="play", application_id=222),
+        author=SimpleNamespace(bot=True, display_name="Jockie Music", global_name=None, name="Jockie Music"),
+    )
+    assert foreign_slash_from_message(component, bot) is None
 
 
 def test_fold_imagegen_models_top_five_other_and_unknown():

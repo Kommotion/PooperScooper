@@ -424,16 +424,5 @@ class Gametime(Cog):
             ephemeral=True,
         )
 
-    @commands.command(name="played", hidden=True)
-    async def played_legacy(self, ctx: commands.Context) -> None:
-        await ctx.send("Use `/gametime played` instead.")
-
-    @commands.command(name="save", hidden=True)
-    @commands.is_owner()
-    async def save_legacy(self, ctx: commands.Context) -> None:
-        await self.save_game_data(force=True)
-        await ctx.message.add_reaction("👍")
-
-
 async def setup(bot):
     await bot.add_cog(Gametime(bot))

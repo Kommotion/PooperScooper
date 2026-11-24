@@ -1208,28 +1208,6 @@ class ImageDiffusion(Cog):
 
     imagegen_group = app_commands.Group(name="imagegen", description="Image Generation Commands.")
 
-    @imagegen_group.command(name="status", description="Show ComfyUI health (owner only).")
-    @app_commands.guild_only()
-    async def comfy_status(self, interaction: discord.Interaction) -> None:
-        if not await self.bot.is_owner(interaction.user):
-            await interaction.response.send_message("Owner only.", ephemeral=True)
-            return
-
-        status = comfy_client.get_comfy_status()
-        queue_depth = self.image_queue.qsize()
-        lines = [
-            f"**ComfyUI status**",
-            f"Running: {status['running']}",
-            f"Source: {status['source']}",
-            f"Address: {status['host']}:{status['port']}",
-            f"Root: {status.get('root', 'n/a')}",
-            f"PID (bot-started): {status['pid'] or 'n/a'}",
-            f"Queue depth: {queue_depth}/{self.image_queue.maxsize}",
-        ]
-        if self.comfy_startup_error:
-            lines.append(f"Startup error: {self.comfy_startup_error}")
-        await interaction.response.send_message("\n".join(lines), ephemeral=True)
-
     @imagegen_group.command(name="show_default_prompts", description='Print the default negative or positive prompts for the given model.')
     @app_commands.describe(
         model=f'The model you want to see the default prompt of.',
@@ -1397,6 +1375,10 @@ class ImageDiffusion(Cog):
         Omitting the costume adds only a local frame and does not call the AI.
         No other member's avatar is used.
         """
+        if not HALLOWEENIFY_ENABLED:
+            await _send_ephemeral(interaction, "This command is unavailable.")
+            return
+
         guild_id = getattr(interaction, "guild_id", None)
         channel_id = getattr(interaction, "channel_id", None)
         if guild_id is None or channel_id is None or not self._is_allowed_channel(guild_id, channel_id):

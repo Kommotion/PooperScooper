@@ -14,6 +14,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
+from cogs.utils.constants import POOPER_APP_ID
 from cogs.utils.stats_store import WeeklyStats
 
 # Nick: set this to "A", "B", "C", or "D".
@@ -162,12 +163,30 @@ def _count_line(label: str, weekly: int, all_time: int | None = None) -> str:
     return f"{label}  {_fmt(weekly)} this week  /  {_fmt(all_time)} all time"
 
 
-def _command_label(name: str, kind: str) -> str:
+def _command_label(name, kind: str | None = None, app_id: int = 0, bot_name: str = "") -> str:
+    """Slash and prefix label. A row may be passed as the first argument."""
+    if kind is None or not isinstance(name, str):
+        row = name
+        kind = str(getattr(row, "kind", "") or "")
+        name = str(getattr(row, "name", "") or "")
+        app_id = getattr(row, "app_id", app_id)
+        bot_name = str(getattr(row, "bot_name", bot_name) or "")
+    else:
+        kind = str(kind or "")
+        name = str(name or "")
     if kind == "both":
         return name
-    if kind == "slash":
-        return f"/{name}"
-    return f"!{name}"
+    if kind != "slash":
+        return f"!{name}"
+    try:
+        stored_app = int(app_id or 0)
+    except (TypeError, ValueError):
+        stored_app = 0
+    label = f"/{name}"
+    if stored_app in (0, POOPER_APP_ID):
+        return label
+    bot = str(bot_name or "").strip() or "Unknown bot"
+    return f"{label} · {bot}"
 
 
 def _pct(rate: float | None) -> str:
@@ -323,13 +342,13 @@ def _sections(stats: WeeklyStats, names: CardNames) -> list[tuple[str, list[str]
     if stats.top_commands:
         commands.append("Most used")
         commands.extend(
-            _count_line(_command_label(row.name, row.kind), row.weekly, row.all_time)
+            _count_line(_command_label(row), row.weekly, row.all_time)
             for row in stats.top_commands
         )
     if stats.bottom_commands:
         commands.append("Least used")
         commands.extend(
-            _count_line(_command_label(row.name, row.kind), row.weekly, row.all_time)
+            _count_line(_command_label(row), row.weekly, row.all_time)
             for row in stats.bottom_commands
         )
     if not commands:

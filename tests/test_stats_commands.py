@@ -10,6 +10,7 @@ from pathlib import Path
 
 from types import SimpleNamespace
 
+from cogs.utils.constants import POOPER_APP_ID
 from cogs.utils.stats_commands import alias_map_from_source, canonical_command_name
 from PooperScooper import extensions_to_load
 from cogs.utils.stats_schedule import LA, week_start_for
@@ -38,14 +39,12 @@ def test_source_map_has_registered_names_only():
         "gay",
         "help",
         "stop",
-        "join",
-        "uptime",
         "candyadmin",
         "sync_commands",
         "statscard",
     ):
         assert name in SOURCE_MAP
-    for name in ("spot", "plworld", "gay!gay!gay"):
+    for name in ("spot", "plworld", "gay!gay!gay", "join", "uptime", "count", "about", "played", "stats"):
         assert name not in SOURCE_MAP
 
 
@@ -143,15 +142,15 @@ def _seed(store: StatsStore) -> None:
     for name, weekly, all_time in prefix_rows:
         store._conn.execute(
             """
-            INSERT INTO command_counts (guild_id, command_name, kind, weekly, all_time)
-            VALUES (1, ?, 'prefix', ?, ?)
+            INSERT INTO command_counts (guild_id, command_name, kind, weekly, all_time, app_id)
+            VALUES (1, ?, 'prefix', ?, ?, ?)
             """,
-            (name, weekly, all_time),
+            (name, weekly, all_time, POOPER_APP_ID),
         )
     store._conn.execute(
         """
-        INSERT INTO command_counts (guild_id, command_name, kind, weekly, all_time)
-        VALUES (1, 'imagine', 'slash', 9, 9)
+        INSERT INTO command_counts (guild_id, command_name, kind, weekly, all_time, app_id)
+        VALUES (1, 'imagine', 'slash', 9, 9, 0)
         """
     )
     for name, _weekly, all_time in prefix_rows:
@@ -229,9 +228,10 @@ def test_unloaded_costume_is_absent_from_least_used_commands(tmp_path):
     try:
         store._conn.execute(
             """
-            INSERT INTO command_counts (guild_id, command_name, kind, weekly, all_time)
-            VALUES (1, 'costume', 'prefix', 0, 0)
-            """
+            INSERT INTO command_counts (guild_id, command_name, kind, weekly, all_time, app_id)
+            VALUES (1, 'costume', 'prefix', 0, 0, ?)
+            """,
+            (POOPER_APP_ID,),
         )
         store.record_command(1, "play", "prefix")
         command_map = {"play": "play", "lavalink": "lavalink"}

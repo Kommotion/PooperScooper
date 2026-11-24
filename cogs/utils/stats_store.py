@@ -17,7 +17,7 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from cogs.utils.constants import DATA_DIR
+from cogs.utils.constants import DATA_DIR, POOPER_APP_ID
 from cogs.utils.stats_commands import is_owner_only_name
 from cogs.utils.stats_schedule import LA, split_voice_minutes, week_start_for
 
@@ -50,7 +50,9 @@ CREATE TABLE IF NOT EXISTS command_counts (
     kind TEXT NOT NULL,
     weekly INTEGER NOT NULL DEFAULT 0,
     all_time INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (guild_id, command_name, kind)
+    app_id INTEGER NOT NULL,
+    bot_name TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (guild_id, command_name, kind, app_id)
 );
 CREATE TABLE IF NOT EXISTS voice_channels (
     guild_id INTEGER NOT NULL,
@@ -212,6 +214,8 @@ class CommandCount:
     kind: str
     weekly: int
     all_time: int
+    app_id: int = 0
+    bot_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -335,7 +339,8 @@ class _Buffer:
         # The last key field is whether the amount belongs in the open weekly column.
         self.channels: dict[tuple[int, int, bool], int] = {}
         self.reactions: dict[tuple[int, str, bool], list] = {}
-        self.commands: dict[tuple[int, str, str, bool], int] = {}
+        self.commands: dict[tuple[int, str, str, int, bool], int] = {}
+        self.command_bots: dict[tuple[int, str, str, int], str] = {}
         self.voice_channels: dict[tuple[int, int, bool], int] = {}
         self.heatmap: dict[tuple[int, int, int, bool], int] = {}
         self.voice_heatmap: dict[tuple[int, int, int, bool], int] = {}
@@ -375,9 +380,26 @@ class _Buffer:
         current[1] = name
         current[2] = bool(is_custom)
 
-    def add_command(self, guild_id: int, name: str, kind: str, amount: int = 1, *, weekly: bool = True) -> None:
-        key = (guild_id, name, kind, bool(weekly))
+    def add_command(
+        self,
+        guild_id: int,
+        name: str,
+        kind: str,
+        amount: int = 1,
+        *,
+        app_id: int = 0,
+        bot_name: str = "",
+        weekly: bool = True,
+    ) -> None:
+        app_id = int(app_id)
+        key = (int(guild_id), name, kind, app_id, bool(weekly))
         self.commands[key] = self.commands.get(key, 0) + amount
+        name_key = (int(guild_id), name, kind, app_id)
+        incoming = str(bot_name or "").strip()
+        if incoming:
+            self.command_bots[name_key] = incoming
+        elif name_key not in self.command_bots:
+            self.command_bots[name_key] = ""
 
     def add_voice_channel(self, guild_id: int, channel_id: int, minutes: int, *, weekly: bool = True) -> None:
         key = (guild_id, channel_id, bool(weekly))
@@ -441,7 +463,14 @@ def _summary_payload(stats: WeeklyStats) -> dict:
             {"id": row.channel_id, "weekly": row.weekly} for row in stats.top_channels[:5]
         ],
         "top_commands": [
-            {"name": row.name, "kind": row.kind, "weekly": row.weekly} for row in stats.top_commands[:5]
+            {
+                "name": row.name,
+                "kind": row.kind,
+                "weekly": row.weekly,
+                "app_id": int(row.app_id),
+                "bot_name": row.bot_name,
+            }
+            for row in stats.top_commands[:5]
         ],
         "top_reactions": [
             {"key": row.emoji_key, "weekly": row.weekly} for row in stats.top_reactions[:5]
@@ -480,11 +509,53 @@ class StatsStore:
             self._conn.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
+        self._migrate_command_counts()
         # Earlier builds stored per-person totals. Drop that table if it is still here.
         self._conn.execute("DROP TABLE IF EXISTS user_counters")
         self._buffer = _Buffer()
         self._opted: set[tuple[int, int]] = set()
         self._load_opt_outs()
+
+    def _migrate_command_counts(self) -> None:
+        """Add app_id to command_counts. Prefix rows are this bot. Old slash stays untagged."""
+        info = self._conn.execute("PRAGMA table_info(command_counts)").fetchall()
+        names = {str(row["name"]) for row in info}
+        if "app_id" in names:
+            return
+        with self._transaction():
+            self._conn.execute(
+                """
+                CREATE TABLE command_counts_new (
+                    guild_id INTEGER NOT NULL,
+                    command_name TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    weekly INTEGER NOT NULL DEFAULT 0,
+                    all_time INTEGER NOT NULL DEFAULT 0,
+                    app_id INTEGER NOT NULL,
+                    bot_name TEXT NOT NULL DEFAULT '',
+                    PRIMARY KEY (guild_id, command_name, kind, app_id)
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                INSERT INTO command_counts_new (
+                    guild_id, command_name, kind, weekly, all_time, app_id, bot_name
+                )
+                SELECT
+                    guild_id,
+                    command_name,
+                    kind,
+                    weekly,
+                    all_time,
+                    CASE WHEN kind = 'prefix' THEN ? ELSE 0 END,
+                    ''
+                FROM command_counts
+                """,
+                (POOPER_APP_ID,),
+            )
+            self._conn.execute("DROP TABLE command_counts")
+            self._conn.execute("ALTER TABLE command_counts_new RENAME TO command_counts")
 
     def close(self) -> None:
         try:
@@ -583,15 +654,43 @@ class StatsStore:
             return
         self._buffer.add_active(guild_id, user_id)
 
-    def record_command(self, guild_id: int, name: str, kind: str) -> None:
+    def record_command(
+        self,
+        guild_id: int,
+        name: str,
+        kind: str,
+        app_id: int = 0,
+        bot_name: str = "",
+    ) -> None:
         if kind not in {"slash", "prefix"}:
             return
         label = _clip(name, 80)
         if not label or is_owner_only_name(label):
             return
+        if kind == "prefix":
+            stored_app = POOPER_APP_ID
+            stored_name = ""
+        else:
+            try:
+                stored_app = int(app_id)
+            except (TypeError, ValueError):
+                stored_app = 0
+            if stored_app <= 0:
+                stored_app = POOPER_APP_ID
+                stored_name = ""
+            else:
+                stored_name = str(bot_name or "").strip()
         guild_id = int(guild_id)
         weekly = self._weekly_open(guild_id, datetime.now(timezone.utc))
-        self._buffer.add_command(guild_id, label, kind, 1, weekly=weekly)
+        self._buffer.add_command(
+            guild_id,
+            label,
+            kind,
+            1,
+            app_id=stored_app,
+            bot_name=stored_name,
+            weekly=weekly,
+        )
 
     def record_voice(
         self,
@@ -790,8 +889,8 @@ class StatsStore:
                     weekly_amount = count if part.into_current_week else 0
                     self._upsert_split(
                         "command_counts",
-                        ("guild_id", "command_name", "kind"),
-                        (guild_id, label, "prefix"),
+                        ("guild_id", "command_name", "kind", "app_id"),
+                        (guild_id, label, "prefix", POOPER_APP_ID),
                         weekly_amount,
                         count,
                     )
@@ -950,7 +1049,9 @@ class StatsStore:
                 )
             elif kind == "command":
                 command_total += amount
-                commands.append(CommandCount(str(row["item_key"]), "prefix", amount, amount))
+                commands.append(
+                    CommandCount(str(row["item_key"]), "prefix", amount, amount, POOPER_APP_ID, "")
+                )
             elif kind == "members":
                 members += amount
         channels.sort(key=lambda row: (-row.weekly, row.channel_id))
@@ -1046,14 +1147,24 @@ class StatsStore:
                 """,
                 (guild_id, emoji_key, name, 1 if is_custom else 0, amount if weekly_on else 0, amount),
             )
-        for (guild_id, name, kind, weekly_on), amount in buffer.commands.items():
+        for (guild_id, name, kind, app_id, weekly_on), amount in buffer.commands.items():
             self._upsert_split(
                 "command_counts",
-                ("guild_id", "command_name", "kind"),
-                (guild_id, name, kind),
+                ("guild_id", "command_name", "kind", "app_id"),
+                (guild_id, name, kind, app_id),
                 amount if weekly_on else 0,
                 amount,
             )
+            bot_name = buffer.command_bots.get((guild_id, name, kind, app_id), "")
+            if bot_name:
+                self._conn.execute(
+                    """
+                    UPDATE command_counts SET bot_name = ?
+                    WHERE guild_id = ? AND command_name = ? AND kind = ? AND app_id = ?
+                      AND (bot_name = '' OR bot_name IS NULL)
+                    """,
+                    (bot_name, guild_id, name, kind, app_id),
+                )
         for (guild_id, channel_id, weekly_on), amount in buffer.voice_channels.items():
             self._upsert_split(
                 "voice_channels",
@@ -1201,7 +1312,7 @@ class StatsStore:
         with self._transaction():
             rows = self._conn.execute(
                 """
-                SELECT guild_id, command_name, kind, weekly, all_time
+                SELECT guild_id, command_name, kind, weekly, all_time, app_id
                 FROM command_counts
                 """
             ).fetchall()
@@ -1211,11 +1322,14 @@ class StatsStore:
                     continue
                 prefix_by_guild.setdefault(int(row["guild_id"]), []).append(row)
             for guild_id, guild_rows in prefix_by_guild.items():
-                merged: dict[str, list[int]] = {}
+                merged: dict[tuple[str, int], list[int]] = {}
                 for row in guild_rows:
                     name = str(row["command_name"])
                     weekly = int(row["weekly"])
                     all_time = int(row["all_time"])
+                    app_id = _command_app_id(row)
+                    if app_id == 0:
+                        app_id = POOPER_APP_ID
                     canonical = mapping.get(name.casefold()) if mapping else None
                     if not canonical:
                         dropped.append(
@@ -1223,9 +1337,9 @@ class StatsStore:
                         )
                         continue
                     canonical = _clip(canonical, 80) or canonical
-                    slot = merged.get(canonical)
+                    slot = merged.get((canonical, app_id))
                     if slot is None:
-                        merged[canonical] = [weekly, all_time]
+                        merged[(canonical, app_id)] = [weekly, all_time]
                     else:
                         slot[0] += weekly
                         slot[1] += all_time
@@ -1233,14 +1347,14 @@ class StatsStore:
                     "DELETE FROM command_counts WHERE guild_id = ? AND kind = 'prefix'",
                     (guild_id,),
                 )
-                for name, (weekly, all_time) in merged.items():
+                for (name, app_id), (weekly, all_time) in merged.items():
                     self._conn.execute(
                         """
                         INSERT INTO command_counts
-                            (guild_id, command_name, kind, weekly, all_time)
-                        VALUES (?, ?, 'prefix', ?, ?)
+                            (guild_id, command_name, kind, weekly, all_time, app_id, bot_name)
+                        VALUES (?, ?, 'prefix', ?, ?, ?, '')
                         """,
-                        (guild_id, name, weekly, all_time),
+                        (guild_id, name, weekly, all_time, app_id),
                     )
             buckets = self._conn.execute(
                 """
@@ -1461,7 +1575,7 @@ class StatsStore:
         ).fetchall()
         commands = self._conn.execute(
             """
-            SELECT command_name, kind, weekly, all_time
+            SELECT command_name, kind, weekly, all_time, app_id, bot_name
             FROM command_counts WHERE guild_id = ?
             """,
             (guild_id,),
@@ -1866,36 +1980,66 @@ class StatsStore:
         message_id: int,
         week_start: date | datetime | str,
         name: str,
+        *,
+        application_id: int | None = None,
+        bot_name: str = "",
+        own_application_id: int | None = None,
     ) -> bool:
         """Add one historical slash command to all-time totals.
 
-        Weekly columns stay unchanged. Owner-only names are marked seen and
-        do not change counts. A bare ``imagegen`` name is stored as
-        ``imagegen generate``. The same message id is a no-op.
+        Weekly columns stay unchanged. A bare ``imagegen`` name is stored as
+        ``imagegen generate``. The same message id is a no-op. A missing or
+        invalid application id is stored as 0. Owner-only PooperScooper names
+        are marked seen and do not change counts. Another bot's command is
+        stored even when the name matches one of those.
         """
+        try:
+            app_id = int(application_id) if application_id not in (None, "") else 0
+        except (TypeError, ValueError):
+            app_id = 0
+        if app_id < 0:
+            app_id = 0
+        own_ids = {0, POOPER_APP_ID}
+        if own_application_id not in (None, ""):
+            try:
+                own_ids.add(int(own_application_id))
+            except (TypeError, ValueError):
+                pass
         guild_id = int(guild_id)
         message_id = int(message_id)
         week = _as_date(week_start)
         label = _clip(name, 80)
         if label == "imagegen":
             label = "imagegen generate"
+        stored_bot = str(bot_name or "").strip()
         self.flush()
         with self._transaction():
             if not self._claim_history(guild_id, "slash", message_id):
                 return False
-            if not label or is_owner_only_name(label):
+            if not label or (is_owner_only_name(label) and app_id in own_ids):
                 return True
             self._conn.execute(
                 """
-                INSERT INTO command_counts (guild_id, command_name, kind, weekly, all_time)
-                VALUES (?, ?, 'slash', 0, 1)
-                ON CONFLICT(guild_id, command_name, kind) DO UPDATE SET
+                INSERT INTO command_counts (
+                    guild_id, command_name, kind, weekly, all_time, app_id, bot_name
+                )
+                VALUES (?, ?, 'slash', 0, 1, ?, ?)
+                ON CONFLICT(guild_id, command_name, kind, app_id) DO UPDATE SET
                     all_time = all_time + 1
                 """,
-                (guild_id, label),
+                (guild_id, label, app_id, stored_bot),
             )
-            self._bump_snapshot_command(guild_id, week, label, "slash", 1)
-            self._bump_card_command(guild_id, week, label, "slash", 1)
+            if stored_bot:
+                self._conn.execute(
+                    """
+                    UPDATE command_counts SET bot_name = ?
+                    WHERE guild_id = ? AND command_name = ? AND kind = 'slash' AND app_id = ?
+                      AND (bot_name = '' OR bot_name IS NULL)
+                    """,
+                    (stored_bot, guild_id, label, app_id),
+                )
+            self._bump_snapshot_command(guild_id, week, label, "slash", 1, app_id, stored_bot)
+            self._bump_card_command(guild_id, week, label, "slash", 1, app_id, stored_bot)
         return True
 
     def purge_owner_only_commands(self, names: set[str] | frozenset[str]) -> list[dict]:
@@ -1961,6 +2105,209 @@ class StatsStore:
         dropped.sort(key=lambda item: (item["name"], item["kind"]))
         return dropped
 
+    def tag_history_bots(
+        self,
+        guild_id: int,
+        own_counts: dict | None,
+        foreign_counts: dict | None,
+        *,
+        key: str = "slash_tag_bots_v1",
+    ) -> bool:
+        """Tag untagged slash rows from one history walk. Applies once per guild.
+
+        Prefix rows, history claims, and coverage spans stay. A second call
+        with the same key changes nothing. Own all-time counts are kept.
+        Foreign rows take the walk count. A name the walk never saw stays
+        at app id 0.
+        """
+        guild_id = int(guild_id)
+        token = str(key or "").strip()
+        if not token:
+            return False
+        own_names: set[str] = set()
+        for name, amount in (own_counts or {}).items():
+            label = _clip(str(name), 80)
+            try:
+                count = int(amount)
+            except (TypeError, ValueError):
+                continue
+            if label and count > 0:
+                own_names.add(label)
+        folded: dict[tuple[str, int], list] = {}
+        for raw_key, raw_count in (foreign_counts or {}).items():
+            if not isinstance(raw_key, tuple) or len(raw_key) < 2:
+                continue
+            label = _clip(str(raw_key[0]), 80)
+            try:
+                app_id = int(raw_key[1])
+            except (TypeError, ValueError):
+                app_id = 0
+            if app_id < 0:
+                app_id = 0
+            bot_name = str(raw_key[2] if len(raw_key) > 2 else "").strip()
+            try:
+                count = int(raw_count)
+            except (TypeError, ValueError):
+                continue
+            if not label or count <= 0 or app_id == POOPER_APP_ID:
+                continue
+            slot = folded.get((label, app_id))
+            if slot is None:
+                folded[(label, app_id)] = [count, bot_name]
+            else:
+                slot[0] += count
+                if bot_name and not slot[1]:
+                    slot[1] = bot_name
+        self.flush()
+        with self._transaction():
+            already = self._conn.execute(
+                "SELECT 1 FROM applied_corrections WHERE guild_id = ? AND key = ?",
+                (guild_id, token),
+            ).fetchone()
+            if already is not None:
+                return False
+            self._conn.execute(
+                "INSERT INTO applied_corrections (guild_id, key) VALUES (?, ?)",
+                (guild_id, token),
+            )
+            real: dict[str, list[tuple[int, int, str]]] = {}
+            unknown: dict[str, tuple[int, str]] = {}
+            for (name, app_id), (count, bot_name) in folded.items():
+                if app_id == 0:
+                    unknown[name] = (count, bot_name or "Unknown bot")
+                    continue
+                label = bot_name or "Unknown bot"
+                real.setdefault(name, []).append((app_id, count, label))
+                self._conn.execute(
+                    """
+                    INSERT INTO command_counts (
+                        guild_id, command_name, kind, weekly, all_time, app_id, bot_name
+                    )
+                    VALUES (?, ?, 'slash', 0, ?, ?, ?)
+                    ON CONFLICT(guild_id, command_name, kind, app_id) DO UPDATE SET
+                        all_time = excluded.all_time,
+                        bot_name = CASE
+                            WHEN command_counts.bot_name = '' OR command_counts.bot_name IS NULL
+                            THEN excluded.bot_name
+                            ELSE command_counts.bot_name
+                        END
+                    """,
+                    (guild_id, name, count, app_id, label),
+                )
+
+            def name_is_own(name: str) -> bool:
+                if name in own_names:
+                    return True
+                found = self._conn.execute(
+                    """
+                    SELECT 1 FROM command_counts
+                    WHERE guild_id = ? AND command_name = ? AND kind = 'slash' AND app_id = ?
+                    """,
+                    (guild_id, name, POOPER_APP_ID),
+                ).fetchone()
+                return found is not None
+
+            def retag_zero(name: str) -> None:
+                zero = self._conn.execute(
+                    """
+                    SELECT weekly, all_time FROM command_counts
+                    WHERE guild_id = ? AND command_name = ? AND kind = 'slash' AND app_id = 0
+                    """,
+                    (guild_id, name),
+                ).fetchone()
+                if zero is None:
+                    return
+                own = self._conn.execute(
+                    """
+                    SELECT 1 FROM command_counts
+                    WHERE guild_id = ? AND command_name = ? AND kind = 'slash' AND app_id = ?
+                    """,
+                    (guild_id, name, POOPER_APP_ID),
+                ).fetchone()
+                if own is None:
+                    self._conn.execute(
+                        """
+                        UPDATE command_counts SET app_id = ?, bot_name = ''
+                        WHERE guild_id = ? AND command_name = ? AND kind = 'slash' AND app_id = 0
+                        """,
+                        (POOPER_APP_ID, guild_id, name),
+                    )
+                    return
+                self._conn.execute(
+                    """
+                    UPDATE command_counts
+                    SET weekly = weekly + ?, all_time = all_time + ?
+                    WHERE guild_id = ? AND command_name = ? AND kind = 'slash' AND app_id = ?
+                    """,
+                    (int(zero["weekly"]), int(zero["all_time"]), guild_id, name, POOPER_APP_ID),
+                )
+                self._conn.execute(
+                    """
+                    DELETE FROM command_counts
+                    WHERE guild_id = ? AND command_name = ? AND kind = 'slash' AND app_id = 0
+                    """,
+                    (guild_id, name),
+                )
+
+            zero_rows = self._conn.execute(
+                """
+                SELECT command_name FROM command_counts
+                WHERE guild_id = ? AND kind = 'slash' AND app_id = 0
+                """,
+                (guild_id,),
+            ).fetchall()
+            seen: set[str] = set()
+            for row in zero_rows:
+                name = str(row["command_name"])
+                seen.add(name)
+                if name in real:
+                    if name_is_own(name):
+                        retag_zero(name)
+                    else:
+                        self._conn.execute(
+                            """
+                            DELETE FROM command_counts
+                            WHERE guild_id = ? AND command_name = ? AND kind = 'slash' AND app_id = 0
+                            """,
+                            (guild_id, name),
+                        )
+                elif name in own_names:
+                    retag_zero(name)
+                elif name in unknown:
+                    count, bot_name = unknown[name]
+                    self._conn.execute(
+                        """
+                        UPDATE command_counts
+                        SET all_time = ?,
+                            bot_name = CASE
+                                WHEN bot_name = '' OR bot_name IS NULL THEN ?
+                                ELSE bot_name
+                            END
+                        WHERE guild_id = ? AND command_name = ? AND kind = 'slash' AND app_id = 0
+                        """,
+                        (count, bot_name, guild_id, name),
+                    )
+            for name, (count, bot_name) in unknown.items():
+                if name in seen or name in own_names:
+                    continue
+                self._conn.execute(
+                    """
+                    INSERT INTO command_counts (
+                        guild_id, command_name, kind, weekly, all_time, app_id, bot_name
+                    )
+                    VALUES (?, ?, 'slash', 0, ?, 0, ?)
+                    ON CONFLICT(guild_id, command_name, kind, app_id) DO UPDATE SET
+                        all_time = excluded.all_time,
+                        bot_name = CASE
+                            WHEN command_counts.bot_name = '' OR command_counts.bot_name IS NULL
+                            THEN excluded.bot_name
+                            ELSE command_counts.bot_name
+                        END
+                    """,
+                    (guild_id, name, count, bot_name),
+                )
+        return True
+
     def _claim_history(self, guild_id: int, source: str, message_id: int) -> bool:
         existing = self._conn.execute(
             """
@@ -2007,7 +2354,16 @@ class StatsStore:
             (json.dumps(payload, separators=(",", ":"), sort_keys=True), guild_id, week.isoformat()),
         )
 
-    def _bump_snapshot_command(self, guild_id: int, week: date, name: str, kind: str, amount: int) -> None:
+    def _bump_snapshot_command(
+        self,
+        guild_id: int,
+        week: date,
+        name: str,
+        kind: str,
+        amount: int,
+        app_id: int = 0,
+        bot_name: str = "",
+    ) -> None:
         row = self._conn.execute(
             """
             SELECT summary_json FROM weekly_snapshots
@@ -2026,15 +2382,28 @@ class StatsStore:
         payload["commands"] = int(payload.get("commands") or 0) + int(amount)
         rows = list(payload.get("top_commands") or [])
         found = False
+        stored_bot = str(bot_name or "")
         for item in rows:
             if not isinstance(item, dict):
                 continue
-            if item.get("name") == name and item.get("kind") == kind:
-                item["weekly"] = int(item.get("weekly") or 0) + int(amount)
-                found = True
-                break
+            if not _command_json_match(item, name, kind, app_id):
+                continue
+            item["weekly"] = int(item.get("weekly") or 0) + int(amount)
+            item["app_id"] = int(app_id)
+            if stored_bot and not str(item.get("bot_name") or "").strip():
+                item["bot_name"] = stored_bot
+            found = True
+            break
         if not found:
-            rows.append({"name": name, "kind": kind, "weekly": int(amount)})
+            rows.append(
+                {
+                    "name": name,
+                    "kind": kind,
+                    "weekly": int(amount),
+                    "app_id": int(app_id),
+                    "bot_name": stored_bot,
+                }
+            )
         rows.sort(key=lambda item: (-int(item.get("weekly") or 0), str(item.get("name") or "")))
         payload["top_commands"] = rows[:5]
         self._conn.execute(
@@ -2100,7 +2469,16 @@ class StatsStore:
             (json.dumps(payload, separators=(",", ":"), sort_keys=True), guild_id, week.isoformat()),
         )
 
-    def _bump_card_command(self, guild_id: int, week: date, name: str, kind: str, amount: int) -> None:
+    def _bump_card_command(
+        self,
+        guild_id: int,
+        week: date,
+        name: str,
+        kind: str,
+        amount: int,
+        app_id: int = 0,
+        bot_name: str = "",
+    ) -> None:
         payload = self._load_card_state(guild_id, week)
         if payload is None:
             return
@@ -2109,23 +2487,31 @@ class StatsStore:
         if not rows:
             rows = list(payload.get("top_commands") or []) + list(payload.get("bottom_commands") or [])
         found = False
+        stored_bot = str(bot_name or "")
         for item in rows:
-            if isinstance(item, dict) and item.get("name") == name and item.get("kind") == kind:
-                item["weekly"] = int(item.get("weekly") or 0) + int(amount)
-                found = True
-                break
+            if not _command_json_match(item, name, kind, app_id):
+                continue
+            item["weekly"] = int(item.get("weekly") or 0) + int(amount)
+            item["app_id"] = int(app_id)
+            if stored_bot and not str(item.get("bot_name") or "").strip():
+                item["bot_name"] = stored_bot
+            found = True
+            break
         if not found:
-            rows.append({"name": name, "kind": kind, "weekly": int(amount), "all_time": 0})
+            rows.append(
+                {
+                    "name": name,
+                    "kind": kind,
+                    "weekly": int(amount),
+                    "all_time": 0,
+                    "app_id": int(app_id),
+                    "bot_name": stored_bot,
+                }
+            )
         split_top, split_bottom = _split_commands(_command_dicts(rows), metric="weekly")
         payload["command_rows"] = rows
-        payload["top_commands"] = [
-            {"name": row.name, "kind": row.kind, "weekly": row.weekly, "all_time": row.all_time}
-            for row in split_top
-        ]
-        payload["bottom_commands"] = [
-            {"name": row.name, "kind": row.kind, "weekly": row.weekly, "all_time": row.all_time}
-            for row in split_bottom
-        ]
+        payload["top_commands"] = [_command_public(row) for row in split_top]
+        payload["bottom_commands"] = [_command_public(row) for row in split_bottom]
         self._conn.execute(
             """
             UPDATE weekly_card_state
@@ -2156,12 +2542,8 @@ class StatsStore:
         payload["commands"] = sum(int(item.get("weekly") or 0) for item in rows)
         split_top, split_bottom = _split_commands(_command_dicts(rows), metric="weekly") if rows else ([], [])
         payload["command_rows"] = rows
-        payload["top_commands"] = [
-            {"name": row.name, "kind": row.kind, "weekly": row.weekly, "all_time": row.all_time} for row in split_top
-        ]
-        payload["bottom_commands"] = [
-            {"name": row.name, "kind": row.kind, "weekly": row.weekly, "all_time": row.all_time} for row in split_bottom
-        ]
+        payload["top_commands"] = [_command_public(row) for row in split_top]
+        payload["bottom_commands"] = [_command_public(row) for row in split_bottom]
         self._conn.execute(
             """
             UPDATE weekly_card_state SET payload = ? WHERE guild_id = ? AND week_start = ?
@@ -2223,10 +2605,7 @@ def _card_payload(stats: WeeklyStats) -> dict:
         ]
 
     def commands(rows) -> list[dict]:
-        return [
-            {"name": row.name, "kind": row.kind, "weekly": int(row.weekly), "all_time": int(row.all_time)}
-            for row in rows
-        ]
+        return [_command_public(row) for row in rows]
 
     image = stats.imagegen
 
@@ -2303,12 +2682,18 @@ def _commands_from(raw) -> tuple[CommandCount, ...]:
     for item in raw or []:
         if not isinstance(item, dict) or is_owner_only_name(str(item.get("name") or "")):
             continue
+        try:
+            app_id = int(item.get("app_id") or 0)
+        except (TypeError, ValueError):
+            app_id = 0
         rows.append(
             CommandCount(
                 str(item.get("name") or ""),
                 str(item.get("kind") or ""),
                 int(item.get("weekly") or 0),
                 int(item.get("all_time") or 0),
+                app_id,
+                str(item.get("bot_name") or ""),
             )
         )
     return tuple(rows)
@@ -2419,12 +2804,18 @@ def _command_dicts(rows) -> list[dict]:
     for item in rows:
         if not isinstance(item, dict):
             continue
+        try:
+            app_id = int(item.get("app_id") or 0)
+        except (TypeError, ValueError):
+            app_id = 0
         normalized.append(
             {
                 "command_name": item.get("name") or item.get("command_name") or "",
                 "kind": item.get("kind") or "",
                 "weekly": int(item.get("weekly") or 0),
                 "all_time": int(item.get("all_time") or 0),
+                "app_id": app_id,
+                "bot_name": str(item.get("bot_name") or ""),
             }
         )
     return normalized
@@ -2546,10 +2937,61 @@ def _least_custom(rows, known, metric: str = "all_time") -> list[ReactionCount]:
     ]
 
 
+def _command_app_id(row) -> int:
+    try:
+        raw = row["app_id"]
+    except (KeyError, IndexError, TypeError):
+        return 0
+    try:
+        return int(raw or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _command_bot_name(row) -> str:
+    try:
+        raw = row["bot_name"]
+    except (KeyError, IndexError, TypeError):
+        return ""
+    return str(raw or "")
+
+
+def _command_json_match(item, name: str, kind: str, app_id: int) -> bool:
+    if not isinstance(item, dict):
+        return False
+    try:
+        stored = int(item.get("app_id") or 0)
+    except (TypeError, ValueError):
+        stored = 0
+    return item.get("name") == name and item.get("kind") == kind and stored == int(app_id)
+
+
+def _command_public(row: CommandCount) -> dict:
+    return {
+        "name": row.name,
+        "kind": row.kind,
+        "weekly": int(row.weekly),
+        "all_time": int(row.all_time),
+        "app_id": int(row.app_id),
+        "bot_name": str(row.bot_name or ""),
+    }
+
+
+def _own_command_row(row) -> bool:
+    """Prefix rows and this bot's slash rows. Foreign slash is not own."""
+    if str(row["kind"]) == "prefix":
+        return True
+    return _command_app_id(row) == POOPER_APP_ID
+
+
+def _command_identity(row) -> tuple[str, str, int]:
+    return (str(row["command_name"]), str(row["kind"]), _command_app_id(row))
+
+
 def _inject_registered_prefix_rows(rows, command_map: dict[str, str]) -> list:
     """Add each canonical prefix name that is not already stored, at zero."""
     present = {
-        (str(row["command_name"]), str(row["kind"]))
+        (str(row["command_name"]), str(row["kind"]), _command_app_id(row))
         for row in rows
     }
     extra = []
@@ -2558,23 +3000,38 @@ def _inject_registered_prefix_rows(rows, command_map: dict[str, str]) -> list:
         if not canonical or canonical in seen or is_owner_only_name(canonical):
             continue
         seen.add(canonical)
-        if (canonical, "prefix") in present:
+        if (canonical, "prefix", POOPER_APP_ID) in present:
             continue
-        extra.append({"command_name": canonical, "kind": "prefix", "weekly": 0, "all_time": 0})
+        extra.append(
+            {
+                "command_name": canonical,
+                "kind": "prefix",
+                "weekly": 0,
+                "all_time": 0,
+                "app_id": POOPER_APP_ID,
+                "bot_name": "",
+            }
+        )
     if not extra:
         return rows
     return list(rows) + extra
 
 
 def _merge_command_rows(rows, command_map: dict[str, str]) -> list[dict]:
-    """Keep slash rows. Drop unregistered prefix names and merge aliases."""
-    merged: dict[tuple[str, str], list[int]] = {}
-    order: list[tuple[str, str]] = []
+    """Keep slash rows. Drop unregistered prefix names and merge aliases.
+
+    Prefix and slash rows that share a name stay separate. Rows merge only
+    when the name, kind, and application id all match.
+    """
+    merged: dict[tuple[str, str, int], list] = {}
+    order: list[tuple[str, str, int]] = []
     for row in rows:
         kind = str(row["kind"])
         name = str(row["command_name"])
         weekly = int(row["weekly"])
         all_time = int(row["all_time"])
+        app_id = _command_app_id(row)
+        bot_name = _command_bot_name(row)
         if kind == "prefix":
             canonical = command_map.get(name.casefold())
             if not canonical:
@@ -2582,55 +3039,36 @@ def _merge_command_rows(rows, command_map: dict[str, str]) -> list[dict]:
             name = canonical
         if is_owner_only_name(name):
             continue
-        key = (name, kind)
+        key = (name, kind, app_id)
         slot = merged.get(key)
         if slot is None:
-            merged[key] = [weekly, all_time]
+            merged[key] = [weekly, all_time, bot_name]
             order.append(key)
         else:
             slot[0] += weekly
             slot[1] += all_time
-    aliased = [
-        {"command_name": name, "kind": kind, "weekly": merged[(name, kind)][0], "all_time": merged[(name, kind)][1]}
-        for name, kind in order
+            if bot_name and not slot[2]:
+                slot[2] = bot_name
+    return [
+        {
+            "command_name": name,
+            "kind": kind,
+            "weekly": merged[(name, kind, app_id)][0],
+            "all_time": merged[(name, kind, app_id)][1],
+            "app_id": app_id,
+            "bot_name": merged[(name, kind, app_id)][2],
+        }
+        for name, kind, app_id in order
     ]
-    return _collapse_command_kinds(aliased)
 
 
 def _collapse_command_kinds(rows) -> list[dict]:
-    """Sum prefix and slash rows that share a canonical name."""
-    grouped: dict[str, list[dict]] = {}
-    order: list[str] = []
-    for row in rows:
-        name = str(row["command_name"])
-        if name not in grouped:
-            grouped[name] = []
-            order.append(name)
-        grouped[name].append(row)
-    collapsed = []
-    for name in order:
-        items = grouped[name]
-        contributing = [
-            item for item in items if int(item["weekly"]) > 0 or int(item["all_time"]) > 0
-        ]
-        kinds = {str(item["kind"]) for item in (contributing or items)}
-        if "prefix" in kinds and "slash" in kinds:
-            kind = "both"
-        elif "slash" in kinds:
-            kind = "slash"
-        elif "prefix" in kinds:
-            kind = "prefix"
-        else:
-            kind = next(iter(kinds)) if len(kinds) == 1 else "both"
-        collapsed.append(
-            {
-                "command_name": name,
-                "kind": kind,
-                "weekly": sum(int(item["weekly"]) for item in items),
-                "all_time": sum(int(item["all_time"]) for item in items),
-            }
-        )
-    return collapsed
+    """Return command rows unchanged.
+
+    Prefix and slash kinds are not combined. ``!play`` and ``/play`` stay
+    two rows.
+    """
+    return list(rows)
 
 
 def _split_commands(rows, metric: str = "weekly") -> tuple[list[CommandCount], list[CommandCount]]:
@@ -2643,25 +3081,34 @@ def _split_commands(rows, metric: str = "weekly") -> tuple[list[CommandCount], l
             -int(row[secondary]),
             str(row["command_name"]),
             str(row["kind"]),
+            _command_app_id(row),
         )
     )
     pool = ranked if metric == "all_time" else [row for row in ranked if int(row["weekly"]) > 0]
     top = pool[:COMMAND_LIMIT]
-    top_keys = {(str(row["command_name"]), str(row["kind"])) for row in top}
-    rest = [row for row in ranked if (str(row["command_name"]), str(row["kind"])) not in top_keys]
+    top_keys = {_command_identity(row) for row in top}
+    rest = [row for row in ranked if _command_identity(row) not in top_keys and _own_command_row(row)]
     rest.sort(
         key=lambda row: (
             int(row[primary]),
             int(row[secondary]),
             str(row["command_name"]),
             str(row["kind"]),
+            _command_app_id(row),
         )
     )
     return [_command(row) for row in top], [_command(row) for row in rest[:COMMAND_LIMIT]]
 
 
 def _command(row) -> CommandCount:
-    return CommandCount(str(row["command_name"]), str(row["kind"]), int(row["weekly"]), int(row["all_time"]))
+    return CommandCount(
+        str(row["command_name"]),
+        str(row["kind"]),
+        int(row["weekly"]),
+        int(row["all_time"]),
+        _command_app_id(row),
+        _command_bot_name(row),
+    )
 
 
 def _hide_future_hours(grid, week: date, now: datetime) -> tuple[tuple[int, ...], ...]:

@@ -21,6 +21,8 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
+from cogs.utils.constants import POOPER_APP_ID
+
 ROOT = Path(__file__).resolve().parents[3]
 FONT_DIR = ROOT / "assets" / "fonts"
 _FONT_FILES = {
@@ -469,9 +471,17 @@ def _command_label(row) -> str:
     name = str(getattr(row, "name", "") or "")
     if kind == "both":
         return name
-    if kind == "slash":
-        return f"/{name}"
-    return f"!{name}"
+    if kind != "slash":
+        return f"!{name}"
+    try:
+        app_id = int(getattr(row, "app_id", 0) or 0)
+    except (TypeError, ValueError):
+        app_id = 0
+    label = f"/{name}"
+    if app_id in (0, POOPER_APP_ID):
+        return label
+    bot_name = str(getattr(row, "bot_name", "") or "").strip() or "Unknown bot"
+    return f"{label} · {bot_name}"
 
 
 def _model_label(key: str) -> str:

@@ -50,6 +50,13 @@ from cogs.utils.identity_edit import (
 )
 from cogs.utils.image_models import ComfyKrea2IdentityEditModel, ImageCreation, Models, NsfwLevel
 
+
+@pytest.fixture(autouse=True)
+def _halloweenify_callbacks_run_in_season(monkeypatch):
+    """Callback tests exercise the command body. The off-season guard is separate."""
+    monkeypatch.setattr("cogs.imagediffusion.HALLOWEENIFY_ENABLED", True)
+
+
 _GUARDRAILS = (
     "same subject",
     "identity",

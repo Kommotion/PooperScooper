@@ -1299,7 +1299,7 @@ class Music(Cog):
     async def _ensure_connected_for_entry(self, session: GuildSession, entry: MusicEntry) -> bool:
         """Stay in the channel the bot already joined.
 
-        !play / !join move the bot. Starting the next queued track must not
+        !play moves the bot into the author's channel. Starting the next queued track must not
         follow the requester into another channel and pull the listening party apart.
         """
         ctx = entry.ctx
@@ -2018,11 +2018,6 @@ class Music(Cog):
             return
         await interaction.response.defer()
 
-    @commands.command()
-    async def join(self, ctx):
-        """Joins the voice channel."""
-        pass
-
     @commands.group(invoke_without_command=True)
     async def play(self, ctx, *, url):
         """Plays a URL or search query (YouTube, Spotify, SoundCloud, etc.)."""
@@ -2426,7 +2421,6 @@ class Music(Cog):
         await self.refresh_music_presence(idle=True)
 
     @play.before_invoke
-    @join.before_invoke
     @play_shuffle.before_invoke
     @play_playlist.before_invoke
     async def ensure_voice(self, ctx):
@@ -2483,13 +2477,6 @@ class Music(Cog):
     @loop.after_invoke
     async def thumbs_up(self, ctx):
         await ctx.message.add_reaction('👍')
-
-    @commands.command()
-    async def count(self, ctx):
-        """Current VC member count (Mostly for debug)."""
-        voice_states = ctx.voice_client.channel.voice_states
-        await ctx.send("{} people detected as connected to this channel".format(len(voice_states)))
-
 
 async def setup(bot):
     credentials = load_credentials()

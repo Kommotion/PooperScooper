@@ -2,6 +2,25 @@
 
 This is the first versioned changelog for PooperScooper, covering about Oct 14–Nov 15, 2026.
 
+## Unreleased
+
+## v2.8.5 — 2026-11-23
+
+### New stuff
+
+- Top commands now include every bot's slash command, with the other bot's name (`/play · MatchBox`). PooperScooper's own commands stay unlabeled.
+- Least-used commands are still this bot only.
+- Prefix and slash commands stay on separate rows on the stats cards.
+- ComfyUI source, root, PID, and startup error are owner-only lines on !status. `/imagegen status` is no longer a slash command.
+- `/halloweenify` stays config-gated. Invoking the leftover command off-season replies that it is unavailable.
+
+### Background
+
+- Other bots' prefix commands are not tracked.
+- History backfill tags each slash use with the application id and bot name. `--retag-bots` can retag a database copy and refuses the live database.
+- !reload_music is owner-only.
+- Removed !join, !count, !stats, !about, !uptime, !played, and !save. Dropping a slash command on Discord happens when Nick runs !sync_commands.
+
 ## v2.8.4 — 2026-11-23
 
 ### New stuff
