@@ -4,6 +4,17 @@ This is the first versioned changelog for PooperScooper, covering about Oct 14�
 
 ## Unreleased
 
+## v2.8.7 — 2026-11-25
+
+### New stuff
+
+- 🔔 PooperScooper updates now come with a Notify me button that gives you the Pooperscooper Updates role
+
+### Background
+
+- Owner-only `!announce`, `!announce preview`, and `!announce_setup`.
+
+
 ## v2.8.6 — 2026-11-25
 
 ### New stuff

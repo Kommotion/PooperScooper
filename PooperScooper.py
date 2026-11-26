@@ -37,6 +37,7 @@ initial_extensions = [
     'cogs.malfoyd',
     'cogs.turkeyhunt',
     'cogs.weekly_stats',
+    'cogs.updates',
 ]
 
 # Candy hunt and costume are the Halloween cogs. Malfoyd and the turkey hunt stay either way.
