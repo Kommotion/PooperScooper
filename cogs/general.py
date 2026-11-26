@@ -7,6 +7,7 @@ import os
 from discord.ext import commands
 from discord.ext.commands import Cog
 from cogs.utils import utils
+from cogs.utils.checks import is_admin_or_illuminaughty
 from cogs.utils.constants import *
 
 log = logging.getLogger(__name__)
@@ -251,89 +252,407 @@ class General(Cog):
             else:
                 ret += 1
 
-    async def _caller_is_owner(self, ctx: commands.Context) -> bool:
-        checker = getattr(self.bot, "is_owner", None)
-        if not callable(checker):
-            return False
-        try:
-            return bool(await checker(ctx.author))
-        except Exception:
-            log.exception("Could not check bot owner")
-            return False
-
-    @commands.command(name="status")
-    async def status(self, ctx: commands.Context):
-        """Show bot health: uptime, version, services, and subsystem status.
-
-        The bot owner also sees ComfyUI source, root, PID, and startup error.
-        """
+    @commands.command()
+    async def about(self, ctx):
+        """Displays information about the bot."""
         async with ctx.typing():
-            lines = [
-                f"**Uptime:** {self._get_bot_uptime()}",
-                f"**Version:** PooperScooper {VERSION}",
-                f"**Author:** {BOT_AUTHOR}",
-                f"**Guilds:** {len(self.bot.guilds)}",
-                f"**Members:** {len(self.bot.users)}",
-                f"**Commands processed:** {self.bot.commands_executed}",
-                f"**Cogs loaded:** {len(self.bot.cogs)}",
-                "**Source:** https://github.com/Kommotion/PooperScooper",
-            ]
+            pics_path = utils.get_pics_path()
+            pooper_scooper_author_path = os.path.join(pics_path, POOPERSCOOPER_PICTURE)
+            pooper_scooper_thumbnail_path = os.path.join(pics_path, COOKS_AND_MOCHA)
+            pooper_scooper_image_path = os.path.join(pics_path, GOOD_BOYS_AND_GIRLS)
 
-            lavalink_server = getattr(self.bot, "lavalink_server", None)
-            lavalink_settings = getattr(self.bot, "lavalink_settings", None)
-            if lavalink_settings and lavalink_settings.enabled:
-                if lavalink_server is not None:
-                    lines.append(f"**Lavalink:** {lavalink_server.status_summary()}")
-                else:
-                    lines.append("**Lavalink:** enabled (manager not ready)")
-                try:
-                    import wavelink
-                    wavelink_status = "connected" if wavelink.Pool.nodes else "not connected"
-                except Exception:
-                    wavelink_status = "unknown"
-                lines.append(f"**Wavelink:** {wavelink_status}")
-            else:
-                lines.append("**Lavalink:** disabled")
+            pooper_scooper_author_name = 'pooper.png'
+            pooper_scooper_thumbnail_name = 'thumb.png'
+            pooper_scooper_image_name = 'image.png'
 
-            image_cog = self.bot.get_cog("ImageDiffusion")
-            comfy_status = None
-            if image_cog is not None:
-                from cogs.utils import comfy_client
-                comfy_status = comfy_client.get_comfy_status()
-                queue_depth = image_cog.image_queue.qsize()
-                lines.append(
-                    f"**ComfyUI:** {'running' if comfy_status['running'] else 'down'} "
-                    f"({comfy_status['host']}:{comfy_status['port']})"
-                )
-                lines.append(f"**Image queue:** {queue_depth}/{image_cog.image_queue.maxsize}")
-            else:
-                lines.append("**ImageDiffusion:** cog not loaded")
-
-            pal_cog = self.bot.get_cog("PalWorld")
-            if pal_cog is not None:
-                online = await pal_cog.is_server_on()
-                players = await pal_cog.get_player_count() if online else 0
-                lines.append(f"**Palworld:** {'online' if online else 'offline'} ({players} players)")
-            else:
-                lines.append("**Palworld:** cog not loaded")
-
-            from cogs.utils.server_config import get_server_config_manager
-            configured_guilds = get_server_config_manager().list_configured_guild_ids()
-            lines.append(f"**Server configs:** {len(configured_guilds)} guild(s)")
-
-            if comfy_status is not None and await self._caller_is_owner(ctx):
-                lines.append(f"**ComfyUI source:** {comfy_status.get('source', 'n/a')}")
-                lines.append(f"**ComfyUI root:** {comfy_status.get('root') or 'n/a'}")
-                lines.append(f"**ComfyUI PID:** {comfy_status.get('pid') or 'n/a'}")
-                if image_cog.comfy_startup_error:
-                    lines.append(f"**ComfyUI error:** {image_cog.comfy_startup_error}")
+            pooper_scooper_author = discord.File(pooper_scooper_author_path, filename=pooper_scooper_author_name)
+            pooper_scooper_thumb = discord.File(pooper_scooper_thumbnail_path, filename=pooper_scooper_thumbnail_name)
+            pooper_scooper_image = discord.File(pooper_scooper_image_path, filename=pooper_scooper_image_name)
+            file_list = list([pooper_scooper_author, pooper_scooper_thumb, pooper_scooper_image])
 
             embed = discord.Embed(
-                title="PooperScooper Status",
-                description="\n".join(lines),
-                colour=discord.Colour.blue(),
+                title='PooperScooper',
+                description='A personal bot made for fun and scooping your poop.',
+                colour=discord.Colour.blue()
             )
-            embed.set_footer(text=f"PooperScooper {VERSION}")
+
+            attachment = 'attachment://{}'.format(pooper_scooper_author_name)
+            embed.set_author(name='Want to know more about me?', icon_url=attachment)
+            embed.set_thumbnail(url='attachment://{}'.format(pooper_scooper_thumbnail_name))
+            embed.set_image(url='attachment://{}'.format(pooper_scooper_image_name))
+
+            name = 'Version'
+            value = 'PooperScooper ' + VERSION
+            embed.add_field(name=name, value=value, inline=True)
+
+            name = 'Author'
+            value = BOT_AUTHOR
+            embed.add_field(name=name, value=value, inline=True)
+
+            name = 'Github Link'
+            value = 'https://github.com/Kommotion/PooperScooper'
+            embed.add_field(name=name, value=value, inline=False)
+
+            name = 'Library'
+            value = '[Discord.py](https://github.com/Rapptz/discord.py)'
+            embed.add_field(name=name, value=value, inline=True)
+
+            name = 'Language'
+            value = 'Python'
+            embed.add_field(name=name, value=value, inline=True)
+
+            embed.set_footer(text='In memory of all the good boys and girls - Junior, Cole, Shirley, and Mocha.')
+
+            await ctx.send(files=file_list, embed=embed)
+
+    def _status_dot(self, kind: str) -> str:
+        if kind == "healthy":
+            return "🟢"
+        if kind == "down":
+            return "🔴"
+        return "⚪"
+
+    def _health_colour(self, unhealthy: bool) -> discord.Colour:
+        if unhealthy:
+            return discord.Colour.from_rgb(243, 156, 18)
+        return discord.Colour.from_rgb(46, 204, 113)
+
+    def _set_status_thumbnail(self, embed: discord.Embed) -> None:
+        user = getattr(self.bot, "user", None)
+        if user is None:
+            return
+        avatar = getattr(user, "display_avatar", None)
+        url = getattr(avatar, "url", None) if avatar is not None else None
+        if url:
+            embed.set_thumbnail(url=url)
+
+    def _show_status_value(self, value) -> str:
+        if value is None or value == "":
+            return "n/a"
+        return str(value)
+
+    def _format_health_check(self, value) -> str:
+        if value is None or value == "":
+            return "n/a"
+        try:
+            stamp = float(value)
+        except (TypeError, ValueError):
+            return "n/a"
+        from datetime import datetime, timezone
+        try:
+            datetime.fromtimestamp(stamp, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return "n/a"
+        return f"<t:{int(stamp)}:R>"
+
+    def _yes_no(self, value) -> str:
+        if value is None or value == "":
+            return "n/a"
+        return "Yes" if value else "No"
+
+    def _endpoint(self, host, port) -> str:
+        host_missing = host is None or host == ""
+        port_missing = port is None or port == ""
+        if host_missing and port_missing:
+            return "n/a"
+        return f"{self._show_status_value(host)}:{self._show_status_value(port)}"
+
+    def _fenced_status_error(self, text: str) -> str:
+        prefix = "```text\n"
+        suffix = "\n```"
+        budget = 1024 - len(prefix) - len(suffix)
+        raw = str(text)
+        if len(raw) > budget:
+            raw = raw[:max(budget, 0)]
+        value = prefix + raw + suffix
+        if len(value) > 1024:
+            value = value[:1024]
+        return value
+
+    def _read_comfy_status(self) -> dict:
+        from cogs.utils.comfy_client import get_comfy_status
+        status = get_comfy_status()
+        return status if isinstance(status, dict) else {}
+
+    def _wavelink_connection(self) -> str:
+        try:
+            import wavelink
+        except Exception:
+            return "unknown"
+        try:
+            nodes = wavelink.Pool.nodes
+        except Exception:
+            return "unknown"
+        if nodes:
+            return "connected"
+        return "not connected"
+
+    def _lavalink_origin(self, server) -> str:
+        raw = getattr(server, "_started_by_bot", None)
+        if raw is None:
+            raw = getattr(server, "started_by_bot", False)
+        return "bot-managed" if raw else "external"
+
+    async def _image_facts(self, *, details: bool) -> dict:
+        image_cog = self.bot.get_cog("ImageDiffusion")
+        loaded = image_cog is not None
+        facts = {
+            "loaded": loaded,
+            "running": False,
+            "queue_depth": None,
+            "queue_max": None,
+            "startup_error": None,
+            "comfy": None,
+        }
+        if loaded:
+            queue = getattr(image_cog, "image_queue", None)
+            if queue is not None:
+                facts["queue_depth"] = queue.qsize()
+                facts["queue_max"] = getattr(queue, "maxsize", None)
+            if details:
+                facts["startup_error"] = getattr(image_cog, "comfy_startup_error", None)
+        if loaded or details:
+            comfy = self._read_comfy_status()
+            facts["running"] = bool(comfy.get("running"))
+            if details:
+                facts["comfy"] = comfy
+        return facts
+
+    def _lavalink_facts(self) -> dict:
+        settings = getattr(self.bot, "lavalink_settings", None)
+        enabled = bool(settings and getattr(settings, "enabled", False))
+        facts = {
+            "enabled": enabled,
+            "online": False,
+            "manager": False,
+            "host": None,
+            "port": None,
+            "origin": None,
+            "wavelink": "disabled",
+        }
+        if not enabled:
+            return facts
+        server = getattr(self.bot, "lavalink_server", None)
+        facts["manager"] = server is not None
+        if server is not None:
+            facts["online"] = bool(getattr(server, "running", False))
+            facts["origin"] = self._lavalink_origin(server)
+            server_settings = getattr(server, "settings", None)
+            if server_settings is not None:
+                facts["host"] = getattr(server_settings, "host", None)
+                facts["port"] = getattr(server_settings, "port", None)
+        facts["wavelink"] = self._wavelink_connection()
+        return facts
+
+    async def _palworld_facts(self) -> dict:
+        pal_cog = self.bot.get_cog("PalWorld")
+        if pal_cog is None:
+            return {"loaded": False, "online": False, "players": 0}
+        online = bool(await pal_cog.is_server_on())
+        players = await pal_cog.get_player_count() if online else 0
+        return {"loaded": True, "online": online, "players": players}
+
+    def _status_unhealthy(self, image: dict, lavalink: dict, pal: dict) -> bool:
+        if image["loaded"] and not image["running"]:
+            return True
+        if lavalink["enabled"] and not lavalink["online"]:
+            return True
+        if lavalink["enabled"] and lavalink["wavelink"] != "connected":
+            return True
+        if pal["loaded"] and not pal["online"]:
+            return True
+        return False
+
+    def _public_image_line(self, image: dict) -> str:
+        if not image["loaded"]:
+            return "⚪ **Image Gen** — Not loaded"
+        if not image["running"]:
+            return "🔴 **Image Gen** — Offline"
+        depth = image["queue_depth"]
+        maximum = image["queue_max"]
+        if depth is None or maximum is None:
+            queue = "Queue n/a"
+        else:
+            queue = f"Queue {depth}/{maximum}"
+        return f"🟢 **Image Gen** — Online · {queue}"
+
+    def _public_music_line(self, lavalink: dict) -> str:
+        if not lavalink["enabled"]:
+            return "⚪ **Music** — Disabled"
+        if not lavalink["online"]:
+            return "🔴 **Music** — Offline"
+        if lavalink["wavelink"] == "connected":
+            return "🟢 **Music** — Online · Wavelink connected"
+        return f"🟡 **Music** — Degraded · Wavelink {lavalink['wavelink']}"
+
+    def _public_pal_line(self, pal: dict) -> str:
+        if not pal["loaded"]:
+            return "⚪ **Palworld** — Not loaded"
+        if not pal["online"]:
+            return "🔴 **Palworld** — Offline"
+        return f"🟢 **Palworld** — Online · {pal['players']} players"
+
+    def _admin_queue(self, image: dict) -> str:
+        if not image["loaded"]:
+            return "n/a"
+        depth = image["queue_depth"]
+        maximum = image["queue_max"]
+        if depth is None or maximum is None:
+            return "n/a"
+        return f"{depth}/{maximum}"
+
+    def _admin_comfy_value(self, image: dict) -> str:
+        comfy = image["comfy"] if isinstance(image.get("comfy"), dict) else None
+        lines = []
+        if image["loaded"] or comfy is not None:
+            if comfy is not None and "running" in comfy and comfy.get("running") is not None:
+                if comfy.get("running"):
+                    dot = self._status_dot("healthy")
+                    label = "Running"
+                else:
+                    dot = self._status_dot("down")
+                    label = "Down"
+            else:
+                dot = self._status_dot("disabled")
+                label = "N/A"
+            ready = self._yes_no(None if comfy is None else comfy.get("ready"))
+            owned = self._yes_no(None if comfy is None else comfy.get("bot_owns_process"))
+            queue = self._admin_queue(image)
+            lines.append(
+                f"{dot} **{label}** (Ready: `{ready}` · Bot-managed: `{owned}` · Queue: `{queue}`)"
+            )
+        host = None if comfy is None else comfy.get("host")
+        port = None if comfy is None else comfy.get("port")
+        pid = self._show_status_value(None if comfy is None else comfy.get("pid"))
+        source = self._show_status_value(None if comfy is None else comfy.get("source"))
+        root = self._show_status_value(None if comfy is None else comfy.get("root"))
+        checked = self._format_health_check(None if comfy is None else comfy.get("last_health_check"))
+        lines.append(
+            f"Endpoint: `{self._endpoint(host, port)}`  •  PID: `{pid}`  •  Source: `{source}`"
+        )
+        lines.append(f"Root: `{root}`")
+        lines.append(f"Last check: {checked}")
+        return "\n".join(lines)
+
+    def _admin_music_value(self, lavalink: dict) -> str:
+        if not lavalink["enabled"]:
+            return f"{self._status_dot('disabled')} Disabled"
+        if lavalink["online"]:
+            lav_dot = self._status_dot("healthy")
+            lav_label = "Online"
+        else:
+            lav_dot = self._status_dot("down")
+            lav_label = "Offline"
+        origin = lavalink.get("origin") or "n/a"
+        wave = lavalink["wavelink"]
+        wave_dot = self._status_dot("healthy" if wave == "connected" else "down")
+        endpoint = self._endpoint(lavalink.get("host"), lavalink.get("port"))
+        return (
+            f"Lavalink: {lav_dot} **{lav_label}** ({origin})  •  "
+            f"Wavelink: {wave_dot} **{wave}**\n"
+            f"Endpoint: `{endpoint}`"
+        )
+
+    def _admin_pal_value(self, pal: dict, image: dict) -> str:
+        cogs = len(self.bot.cogs)
+        image_state = "loaded" if image["loaded"] else "not loaded"
+        tail = f"Cogs: **{cogs}**  •  ImageDiffusion: **{image_state}**"
+        if not pal["loaded"]:
+            return f"Palworld: {self._status_dot('disabled')} **Not loaded**  •  {tail}"
+        if pal["online"]:
+            state = f"{self._status_dot('healthy')} **Online** ({pal['players']} players)"
+        else:
+            state = f"{self._status_dot('down')} **Offline** ({pal['players']} players)"
+        return f"Palworld: {state}  •  {tail}"
+
+    async def build_public_status_embed(self) -> discord.Embed:
+        image = await self._image_facts(details=False)
+        lavalink = self._lavalink_facts()
+        pal = await self._palworld_facts()
+        unhealthy = self._status_unhealthy(image, lavalink, pal)
+        if unhealthy:
+            banner = "🟡 **Some services degraded**"
+        else:
+            banner = "🟢 **All systems operational**"
+        uptime = self._get_bot_uptime()
+        description = (
+            f"{banner}\n"
+            f"v{VERSION}  •  Up {uptime}  •  [GitHub](https://github.com/Kommotion/PooperScooper)"
+        )
+        embed = discord.Embed(
+            title="PooperScooper Status",
+            description=description,
+            colour=self._health_colour(unhealthy),
+        )
+        embed.timestamp = discord.utils.utcnow()
+        self._set_status_thumbnail(embed)
+        overview = (
+            f"Servers: **{len(self.bot.guilds)}**  •  "
+            f"Members: **{len(self.bot.users)}**  •  "
+            f"Commands: **{self.bot.commands_executed}**  •  "
+            f"Cogs: **{len(self.bot.cogs)}**"
+        )
+        services = "\n".join((
+            self._public_image_line(image),
+            self._public_music_line(lavalink),
+            self._public_pal_line(pal),
+        ))
+        embed.add_field(name="📊 Overview", value=overview, inline=False)
+        embed.add_field(name="⚙️ Services", value=services, inline=False)
+        embed.set_footer(text=f"PooperScooper v{VERSION}")
+        return embed
+
+    async def build_admin_status_embed(self) -> discord.Embed:
+        image = await self._image_facts(details=True)
+        lavalink = self._lavalink_facts()
+        pal = await self._palworld_facts()
+        from cogs.utils.server_config import get_server_config_manager
+        configured = get_server_config_manager().list_configured_guild_ids()
+        count = len(configured)
+        noun = "config" if count == 1 else "configs"
+        uptime = self._get_bot_uptime()
+        description = f"v{VERSION}  •  Up {uptime}  •  {count} server {noun}"
+        embed = discord.Embed(
+            title="PooperScooper Admin Diagnostics",
+            description=description,
+            colour=discord.Colour.from_rgb(88, 101, 242),
+        )
+        embed.timestamp = discord.utils.utcnow()
+        self._set_status_thumbnail(embed)
+        embed.add_field(name="🎨 ComfyUI", value=self._admin_comfy_value(image), inline=False)
+        startup_error = image["startup_error"]
+        if startup_error:
+            embed.add_field(
+                name="⚠️ ComfyUI Startup Error",
+                value=self._fenced_status_error(startup_error),
+                inline=False,
+            )
+        embed.add_field(
+            name="🎵 Lavalink & Wavelink",
+            value=self._admin_music_value(lavalink),
+            inline=False,
+        )
+        embed.add_field(
+            name="🦖 Palworld & Bot",
+            value=self._admin_pal_value(pal, image),
+            inline=False,
+        )
+        embed.set_footer(text=f"PooperScooper v{VERSION} • Admin Diagnostics")
+        return embed
+
+    @commands.group(name="status", invoke_without_command=True)
+    async def status(self, ctx: commands.Context):
+        """Show bot health: uptime, version, and service status."""
+        async with ctx.typing():
+            embed = await self.build_public_status_embed()
+            await ctx.send(embed=embed)
+
+    @status.command(name="admin")
+    @is_admin_or_illuminaughty()
+    async def status_admin(self, ctx: commands.Context):
+        """Admin-only. Show internal diagnostics, including local paths and process details."""
+        async with ctx.typing():
+            embed = await self.build_admin_status_embed()
             await ctx.send(embed=embed)
 
     @commands.command(name="gay")

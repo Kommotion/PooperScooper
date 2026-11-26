@@ -4,6 +4,20 @@ This is the first versioned changelog for PooperScooper, covering about Oct 14�
 
 ## Unreleased
 
+## v2.8.8 — 2026-11-26
+
+### New stuff
+
+- `!status` is now a public health card: a short banner, grouped fields, and none of the bot's local paths, PIDs, source info, or host:port.
+- `!status admin` is a new diagnostics view for the bot owner, Discord administrators, or the MTS `illuminaughty` role.
+- `!about` is back.
+- `!statscard` is still owner-only, and the command description now says so.
+
+### Background
+
+- Public `!status` no longer mixes machine diagnostics into the public page. Local ComfyUI and Lavalink details live under `!status admin` only.
+
+
 ## v2.8.7 — 2026-11-25
 
 ### New stuff

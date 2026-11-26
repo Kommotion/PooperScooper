@@ -717,7 +717,7 @@ class WeeklyStats(commands.Cog):
     @commands.command(name="statscard")
     @commands.is_owner()
     async def statscard(self, ctx: commands.Context, guild_id: int | None = None) -> None:
-        """Post the current weekly stats card here without closing the week."""
+        """Owner-only. Post the current weekly stats card here without closing the week."""
         target = int(guild_id) if guild_id is not None else getattr(getattr(ctx, "guild", None), "id", None)
         if target is None:
             await ctx.send("Pass a guild id.", allowed_mentions=discord.AllowedMentions.none())

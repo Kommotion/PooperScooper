@@ -159,6 +159,8 @@ def test_loops_listeners_and_commands_are_wired(tmp_path):
             "on_command_completion",
         } <= listener_names
         assert any("is_owner" in getattr(check, "__qualname__", "") for check in cog.statscard.checks)
+        help_text = cog.statscard.help or WeeklyStats.statscard.__doc__
+        assert help_text is not None and "Owner-only" in help_text
         signature = inspect.signature(WeeklyStats.record_imagegen)
         assert "prompt" not in signature.parameters
         source = inspect.getsource(WeeklyStats._send_card)

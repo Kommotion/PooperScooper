@@ -42,9 +42,10 @@ def test_source_map_has_registered_names_only():
         "candyadmin",
         "sync_commands",
         "statscard",
+        "about",
     ):
         assert name in SOURCE_MAP
-    for name in ("spot", "plworld", "gay!gay!gay", "join", "uptime", "count", "about", "played", "stats"):
+    for name in ("spot", "plworld", "gay!gay!gay", "join", "uptime", "count", "played", "stats"):
         assert name not in SOURCE_MAP
 
 
