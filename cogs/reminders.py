@@ -1,4 +1,4 @@
-"""Personal reminders: /remind set, list, cancel, and timezone."""
+"""Stores reminders, fires them, and ingests trusted PS-REMIND v1 blocks from /grok."""
 
 from __future__ import annotations
 
@@ -15,7 +15,6 @@ from pathlib import Path
 from zoneinfo import ZoneInfoNotFoundError
 
 import discord
-from discord import app_commands
 from discord.ext import commands, tasks
 from discord.ext.commands import Cog
 
@@ -30,7 +29,6 @@ from cogs.utils.grok_refs import (
 )
 from cogs.utils.remind_parse import (
     DEFAULT_TIMEZONE,
-    EXAMPLES,
     ParsedWhen,
     ParseError,
     RepeatRule,
@@ -51,9 +49,7 @@ LOOP_SECONDS = 45
 LATE_GRACE = timedelta(seconds=60)
 FIRED_KEEP = timedelta(days=30)
 MISSED_KEEP = timedelta(hours=24)
-PRIVATE_FALLBACK = (
-    "I couldn't DM you your private reminder. Turn on DMs, or use `/remind list` to see it."
-)
+PRIVATE_FALLBACK = "I couldn't DM you your private reminder. Turn on DMs."
 JOIN_TEMPLATE = r"remind:join:(?P<id>[0-9a-f]{8})"
 SNOOZE_TEMPLATE = r"remind:snooze:(?P<id>[0-9a-f]{8}):(?P<delay>10m|1h|tomorrow)"
 CANCEL_TEMPLATE = r"remind:cancel:(?P<id>[0-9a-f]{8})"
@@ -74,7 +70,7 @@ _ID_RE = re.compile(r"^[0-9a-f]{8}$")
 class CapError(Exception):
     message = (
         "You already have 25 active reminders. "
-        "Cancel one with `/remind cancel` before adding another."
+        "Cancel one with the Cancel button before adding another."
     )
 
 
@@ -87,7 +83,7 @@ class EmptyReminder(Exception):
 
 
 class ReminderNotFound(Exception):
-    message = "No active reminder with that id. Use `/remind list` to see yours."
+    message = "No active reminder with that id."
 
 
 class NotYourReminder(Exception):
@@ -434,7 +430,7 @@ class ReminderStore:
         return fired
 
     def mark_missed(self, reminder_id: str, user_ids: list[int], when: datetime) -> None:
-        """Keep a one-off whose private DM failed so /remind list can show the text."""
+        """Keep a one-off whose private DM failed so it can still be inspected in the store."""
         reminder = self.get(reminder_id)
         if reminder is None or reminder.repeat is not None or not reminder.private:
             return
@@ -810,28 +806,8 @@ def render_ping(fired: FiredReminder) -> str:
     return "\n".join(lines)
 
 
-def render_list(reminders: list[Reminder]) -> list[str]:
-    if not reminders:
-        return ["You don't have any reminders. Set one with `/remind set`."]
-    lines = ["Your reminders:"]
-    for reminder in reminders:
-        stamp = int(reminder.next_fire_at.timestamp())
-        text = reminder.text.replace("\n", " ")
-        missed = reminder.status == "fired" and reminder.private and bool(reminder.missed_ids)
-        if missed:
-            kind = "missed (private)"
-        else:
-            if len(text) > 80:
-                text = text[:79] + "…"
-            kind = "once" if reminder.repeat is None else describe_repeat(reminder.repeat)
-            if reminder.private:
-                kind = f"{kind} (private)"
-        lines.append(f"`{reminder.id}` — <t:{stamp}:F> (<t:{stamp}:R>) — {text} — {kind}")
-    return _chunk_lines(lines)
-
-
 class Reminders(Cog):
-    """Set personal reminders and ping whoever asked to be included."""
+    """Stores reminders, fires them, and ingests trusted PS-REMIND v1 blocks from /grok."""
 
     def __init__(
         self,
@@ -849,8 +825,6 @@ class Reminders(Cog):
         self._webhook_trust: dict[int, tuple[bool, object | None, float]] = {}
         self._refs = refs
         self._refs_path = None if refs_path is None else Path(refs_path)
-
-    remind_group = app_commands.Group(name="remind", description="Personal reminders.")
 
     async def cog_load(self) -> None:
         self.bot.add_dynamic_items(RemindMeButton, SnoozeButton, CancelButton)
@@ -987,159 +961,6 @@ class Reminders(Cog):
         else:
             content = f"Cancelled reminder `{reminder.id}`: {reminder.text}"
         await interaction.response.send_message(content, ephemeral=True)
-
-    @remind_group.command(name="set", description="Set a reminder.")
-    @app_commands.describe(
-        when="When to remind you, in plain words.",
-        what="What to remind you about.",
-        private="DM this reminder instead of posting it in the channel.",
-    )
-    async def remind_set(
-        self,
-        interaction: discord.Interaction,
-        when: str,
-        what: str,
-        private: bool = False,
-    ) -> None:
-        context = _interaction_context(interaction)
-        when_text = repr(_one_line(when, 200))
-        preview = _preview_text(what, private=private)
-        if interaction.channel_id is None:
-            _log_info(
-                f"remind set rejected {context} when={when_text} private={private} {preview} reason=no channel"
-            )
-            await interaction.response.send_message("I need a channel to send this reminder in.", ephemeral=True)
-            return
-        try:
-            _validate_text(what)
-        except (EmptyReminder, TextTooLong) as exc:
-            reason = "too long" if isinstance(exc, TextTooLong) else "empty"
-            _log_info(
-                f"remind set rejected {context} when={when_text} private={private} {preview} reason={reason}"
-            )
-            await interaction.response.send_message(exc.message, ephemeral=True)
-            return
-        try:
-            parsed = parse_when(when, now=discord.utils.utcnow(), timezone_name=self.store.timezone_for(interaction.user.id))
-        except ParseError as exc:
-            reason = "past time" if "past" in exc.reason.lower() else "parse failure"
-            _log_info(
-                f"remind set rejected {context} when={when_text} private={private} {preview} "
-                f"reason={reason} detail={_one_line(exc.reason, 200)!r}"
-            )
-            await interaction.response.send_message(exc.message, ephemeral=True)
-            return
-        try:
-            async with self._lock:
-                reminder = self.store.create(
-                    creator_id=interaction.user.id,
-                    channel_id=interaction.channel_id,
-                    guild_id=interaction.guild_id,
-                    text=what,
-                    parsed=parsed,
-                    private=private,
-                )
-        except CapError:
-            _log_info(
-                f"remind set rejected {context} when={when_text} private={private} {preview} reason=cap reached"
-            )
-            await interaction.response.send_message(CapError.message, ephemeral=True)
-            return
-        _log_info(
-            "remind set "
-            f"{_interaction_context(interaction, reminder_id=reminder.id)} "
-            f"when={when_text} {_format_schedule(parsed)} private={private} "
-            f"{_preview_text(reminder.text, private=reminder.private)}"
-        )
-        payload: dict = {
-            "allowed_mentions": allowed_mentions_for(reminder),
-            "ephemeral": reminder.private,
-        }
-        if not reminder.private:
-            payload["view"] = RemindMeView(reminder.id)
-        await interaction.response.send_message(render_confirmation(reminder), **payload)
-
-    @remind_group.command(name="list", description="Show your reminders.")
-    async def remind_list(self, interaction: discord.Interaction) -> None:
-        now = discord.utils.utcnow()
-        async with self._lock:
-            reminders = self.store.visible_for(interaction.user.id, now)
-        _log_info(f"remind list {_interaction_context(interaction)} count={len(reminders)}")
-        chunks = render_list(reminders)
-        await interaction.response.send_message(chunks[0], ephemeral=True)
-        for chunk in chunks[1:]:
-            await interaction.followup.send(chunk, ephemeral=True)
-
-    @remind_group.command(name="cancel", description="Cancel one of your reminders.")
-    @app_commands.describe(id="Reminder id from /remind list.")
-    async def remind_cancel(self, interaction: discord.Interaction, id: str) -> None:
-        requested = id.strip()
-        try:
-            async with self._lock:
-                reminder = self.store.cancel(requested, interaction.user.id)
-        except (ReminderNotFound, NotYourReminder) as exc:
-            reason = "not found" if isinstance(exc, ReminderNotFound) else "not yours"
-            _log_info(
-                "remind cancel "
-                f"{_interaction_context(interaction, reminder_id=requested or id)} result={reason}"
-            )
-            await interaction.response.send_message(exc.message, ephemeral=True)
-            return
-        _log_info(
-            "remind cancel "
-            f"{_interaction_context(interaction, reminder_id=reminder.id)} result=cancelled "
-            f"{_preview_text(reminder.text, private=reminder.private)}"
-        )
-        await interaction.response.send_message(
-            f"Cancelled reminder `{reminder.id}`: {reminder.text}",
-            ephemeral=True,
-        )
-
-    @remind_cancel.autocomplete("id")
-    async def remind_cancel_autocomplete(
-        self,
-        interaction: discord.Interaction,
-        current: str,
-    ) -> list[app_commands.Choice[str]]:
-        needle = current.strip().lower()
-        async with self._lock:
-            reminders = self.store.active_for(interaction.user.id)
-        choices: list[app_commands.Choice[str]] = []
-        for reminder in reminders:
-            preview = reminder.text.replace("\n", " ")
-            name = f"{reminder.id} — {preview}"
-            if len(name) > 100:
-                name = name[:99] + "…"
-            if needle and needle not in name.lower():
-                continue
-            choices.append(app_commands.Choice(name=name, value=reminder.id))
-            if len(choices) == 25:
-                break
-        return choices
-
-    @remind_group.command(name="timezone", description="Set the timezone I use for your reminders.")
-    @app_commands.describe(tz="IANA timezone name, like America/Los_Angeles.")
-    async def remind_timezone(self, interaction: discord.Interaction, tz: str) -> None:
-        requested = _one_line(tz, 200)
-        try:
-            async with self._lock:
-                old = self.store.timezone_for(interaction.user.id)
-                canonical = self.store.set_timezone(interaction.user.id, tz)
-        except ValueError:
-            _log_info(
-                "remind timezone rejected "
-                f"{_interaction_context(interaction)} tz={requested!r} reason=bad timezone"
-            )
-            await interaction.response.send_message(
-                f"`{tz.strip()}` is not a valid IANA timezone. Example: `America/Los_Angeles`.",
-                ephemeral=True,
-            )
-            return
-        _log_info(f"remind timezone {_interaction_context(interaction)} old={old} -> new={canonical}")
-        await interaction.response.send_message(
-            f"Your reminder timezone is now `{canonical}`.",
-            ephemeral=True,
-        )
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
@@ -1936,23 +1757,6 @@ def _grok_source(bot, message) -> str:
     if bot_id is not None and author_id == bot_id:
         return "interaction"
     return "webhook"
-
-
-def _chunk_lines(lines: list[str], limit: int = 1900) -> list[str]:
-    chunks: list[str] = []
-    current = ""
-    for line in lines:
-        if len(line) > limit:
-            line = line[: limit - 1] + "…"
-        piece = line if not current else f"{current}\n{line}"
-        if current and len(piece) > limit:
-            chunks.append(current)
-            current = line
-        else:
-            current = piece
-    if current:
-        chunks.append(current)
-    return chunks
 
 
 async def setup(bot: commands.Bot) -> None:

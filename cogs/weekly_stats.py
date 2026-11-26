@@ -1,6 +1,6 @@
 """Weekly stats card for enabled servers.
 
-Tracks aggregate counters, this week's active members, and an opt-out list.
+Tracks aggregate counters and this week's active members only.
 Message text, prompts, and per-person totals are not stored. The card posts
 once a week. The first time an enabled guild has no posted week, the latest
 week that is already due is recorded as a baseline and nothing is posted.
@@ -18,7 +18,6 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import discord
-from discord import app_commands
 from discord.ext import commands, tasks
 
 from cogs.utils.constants import POOPER_APP_ID
@@ -465,8 +464,8 @@ class WeeklyStats(commands.Cog):
     def _seed_open_voice(self, now: datetime | None = None) -> None:
         """Start sessions for people already in voice when the cog comes up.
 
-        Runs once. Bots are skipped. Opted-out users stay in the session map
-        so their minutes still land on the channel totals.
+        Runs once. Bots are skipped. Everyone else in voice still gets a
+        session so minutes land on the channel totals.
         """
         if self._voice_seeded:
             return
@@ -714,49 +713,6 @@ class WeeklyStats(commands.Cog):
         if callable(waiter):
             await waiter()
         self._seed_open_voice()
-
-    stats = app_commands.Group(
-        name="stats",
-        description="Weekly stats privacy for this server.",
-        guild_only=True,
-    )
-
-    @stats.command(name="optout", description="Stop counting you as an active member in this server.")
-    @app_commands.guild_only()
-    async def stats_optout(self, interaction: discord.Interaction) -> None:
-        guild_id = interaction.guild_id
-        if guild_id is None:
-            await interaction.response.send_message("Use this in a server.", ephemeral=True)
-            return
-        user_id = interaction.user.id
-        self.store.opt_out(guild_id, user_id)
-        session = self._voice.pop((int(guild_id), int(user_id)), None)
-        if session is not None:
-            channel_id, joined = session
-            self.store.record_voice(guild_id, channel_id, user_id, joined, self._now())
-        await interaction.response.send_message(
-            "You're opted out in this server. You won't be counted as an active member from now on.",
-            ephemeral=True,
-        )
-
-    @stats.command(name="optin", description="Resume weekly stats tracking for you in this server.")
-    @app_commands.guild_only()
-    async def stats_optin(self, interaction: discord.Interaction) -> None:
-        guild_id = interaction.guild_id
-        if guild_id is None:
-            await interaction.response.send_message("Use this in a server.", ephemeral=True)
-            return
-        user_id = interaction.user.id
-        self.store.opt_in(guild_id, user_id)
-        voice = getattr(interaction.user, "voice", None)
-        channel = getattr(voice, "channel", None) if voice is not None else None
-        channel_id = getattr(channel, "id", None)
-        if channel_id is not None:
-            self._voice[(int(guild_id), int(user_id))] = (int(channel_id), self._now())
-        await interaction.response.send_message(
-            "You're opted back in. New activity in this server counts toward the weekly card.",
-            ephemeral=True,
-        )
 
     @commands.command(name="statscard")
     @commands.is_owner()

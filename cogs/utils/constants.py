@@ -4,7 +4,7 @@ Constants file
 import os
 from pathlib import Path
 
-VERSION = '2.8.5'
+VERSION = '2.8.6'
 __version__ = VERSION
 # Public Discord application id for this bot. Not a token.
 POOPER_APP_ID = 394432249598312459

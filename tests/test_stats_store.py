@@ -296,55 +296,6 @@ def test_every_message_counts_without_a_cooldown(tmp_path):
         reopened.close()
 
 
-def test_opt_out_removes_active_member_and_blocks_future_active_marking(store):
-    store.record_message(1, 10, 5, WHEN)
-    store.record_reaction(1, 5, "wave", name="wave", is_custom=False, when=WHEN)
-    store.flush()
-    assert store._conn.execute("SELECT COUNT(*) FROM active_members").fetchone()[0] == 1
-
-    later = WHEN + timedelta(seconds=1)
-    store.record_message(1, 10, 5, later)
-    store.record_message(1, 10, 6, later)
-    store.opt_out(1, 5)
-
-    assert store.is_opted_out(1, 5) is True
-    assert (1, 5) not in store._buffer.active
-    assert (1, 6) in store._buffer.active
-    assert store._conn.execute(
-        "SELECT COUNT(*) FROM active_members WHERE guild_id = 1 AND user_id = 5"
-    ).fetchone()[0] == 0
-    assert store._conn.execute(
-        "SELECT COUNT(*) FROM opt_outs WHERE guild_id = 1 AND user_id = 5"
-    ).fetchone()[0] == 1
-
-    store.record_message(1, 11, 5, later + timedelta(seconds=1))
-    store.record_reaction(1, 5, "wave", name="wave", is_custom=False, when=later)
-    store.record_voice(1, 50, 5, later, later + timedelta(minutes=2))
-    stats = store.build_stats(1, later)
-    assert stats.messages_weekly == 4
-    assert stats.reactions_weekly == 2
-    assert stats.voice_minutes == 2
-    assert stats.active_members == 1
-    active_ids = {
-        row["user_id"]
-        for row in store._conn.execute("SELECT user_id FROM active_members WHERE guild_id = 1")
-    }
-    assert active_ids == {6}
-
-    store.opt_in(1, 5)
-    assert store.is_opted_out(1, 5) is False
-    resumed = later + timedelta(minutes=2)
-    store.record_message(1, 10, 5, resumed)
-    store.record_reaction(1, 5, "wave", name="wave", is_custom=False, when=resumed)
-    resumed_stats = store.build_stats(1, resumed)
-    assert resumed_stats.active_members == 2
-    resumed_ids = {
-        row["user_id"]
-        for row in store._conn.execute("SELECT user_id FROM active_members WHERE guild_id = 1")
-    }
-    assert resumed_ids == {5, 6}
-
-
 def test_imagegen_summary_has_no_prompt_and_derives_kept_first(store):
     signature = inspect.signature(StatsStore.record_imagegen)
     assert "prompt" not in signature.parameters
@@ -396,7 +347,7 @@ def test_schema_columns_do_not_store_content_prompt_or_text(store):
     assert tables
     names = {row["name"] for row in tables}
     assert "user_counters" not in names
-    assert _user_id_tables(store._conn) == {"active_members", "opt_outs"}
+    assert _user_id_tables(store._conn) == {"active_members"}
     for row in tables:
         info = store._conn.execute(f"PRAGMA table_info({row['name']})").fetchall()
         for column in info:
@@ -464,7 +415,7 @@ def test_opening_drops_a_leftover_user_counters_table(tmp_path):
     store = StatsStore(path)
     try:
         assert "user_counters" not in _table_names(path)
-        assert _user_id_tables(store._conn) == {"active_members", "opt_outs"}
+        assert _user_id_tables(store._conn) == {"active_members"}
         store.record_message(1, 10, 5, WHEN)
         stats = store.build_stats(1, WHEN)
         assert stats.messages_weekly == 1

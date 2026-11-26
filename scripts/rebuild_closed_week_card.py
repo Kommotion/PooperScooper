@@ -43,7 +43,6 @@ from scripts.backfill_weekly_stats import (
     _author_is_bot,
     _backup_db,
     _history,
-    _read_opt_outs,
     _request_trace,
     _targets,
     message_created_at,
@@ -234,7 +233,7 @@ def card_from_tallies(
     }
 
 
-def _fold_message(payload: dict, parent_id: int, opted: set[int], end: datetime, command_map: dict[str, str], acc: dict) -> bool:
+def _fold_message(payload: dict, parent_id: int, end: datetime, command_map: dict[str, str], acc: dict) -> bool:
     when = message_created_at(payload)
     if not message_in_closed_window(when, WINDOW_START, end) or _author_is_bot(payload):
         return False
@@ -244,7 +243,7 @@ def _fold_message(payload: dict, parent_id: int, opted: set[int], end: datetime,
     acc["heatmap"][heat_key] = acc["heatmap"].get(heat_key, 0) + 1
     author = payload.get("author") or {}
     author_id = author.get("id")
-    if author_id is not None and int(author_id) not in opted:
+    if author_id is not None:
         acc["authors"].add(int(author_id))
     command = prefix_command_name(payload.get("content"))
     if command:
@@ -266,7 +265,7 @@ def _fold_message(payload: dict, parent_id: int, opted: set[int], end: datetime,
     return True
 
 
-async def _walk(http, guild_id: int, end: datetime, opted: set[int], tally: dict) -> tuple[dict, list[int], list[tuple[str, str]]]:
+async def _walk(http, guild_id: int, end: datetime, tally: dict) -> tuple[dict, list[int], list[tuple[str, str]]]:
     targets, names, emoji_names, _guild_name = await _targets(http, guild_id)
     command_map = alias_map_from_source(ROOT)
     acc = {"channels": {}, "reactions": {}, "commands": {}, "heatmap": {}, "authors": set()}
@@ -275,7 +274,7 @@ async def _walk(http, guild_id: int, end: datetime, opted: set[int], tally: dict
         try:
             async for kept, _exhausted in _history(http, channel_id, after, before):
                 for msg in kept:
-                    if _fold_message(msg, parent_id, opted, end, command_map, acc):
+                    if _fold_message(msg, parent_id, end, command_map, acc):
                         tally["messages"] += 1
                 tally["requests"] += 0
         except _Unreadable:
@@ -332,8 +331,7 @@ async def _async_main(args) -> int:
     try:
         await http.static_login(token)
         token = ""
-        opted = _read_opt_outs(db_path, args.guild_id)
-        payload, _channels, _emojis = await _walk(http, args.guild_id, end, opted, tally)
+        payload, _channels, _emojis = await _walk(http, args.guild_id, end, tally)
         payload = overlay_snapshot_totals(payload, summary)
     finally:
         await http.close()

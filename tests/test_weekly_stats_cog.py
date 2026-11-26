@@ -158,11 +158,6 @@ def test_loops_listeners_and_commands_are_wired(tmp_path):
             "on_app_command_completion",
             "on_command_completion",
         } <= listener_names
-        assert cog.stats.name == "stats"
-        assert cog.stats.guild_only is True
-        assert {command.name for command in cog.stats.commands} == {"optout", "optin"}
-        assert cog.stats_optout.guild_only is True
-        assert cog.stats_optin.guild_only is True
         assert any("is_owner" in getattr(check, "__qualname__", "") for check in cog.statscard.checks)
         signature = inspect.signature(WeeklyStats.record_imagegen)
         assert "prompt" not in signature.parameters
@@ -248,69 +243,6 @@ def test_tracking_ignores_disabled_guilds_dms_and_bots(tmp_path):
         assert stats.imagegen.models[0].key == "krea2_turbo"
         assert store.build_stats(DISABLED, WHEN).messages_weekly == 0
         assert store.build_stats(DISABLED, WHEN).commands_weekly == 0
-    finally:
-        store.close()
-
-
-def test_opt_out_and_opt_in_are_ephemeral_and_per_user(tmp_path):
-    store = StatsStore(tmp_path / "weekly_stats.sqlite3")
-
-    async def scenario():
-        cog = _cog(store)
-        await cog.on_message(_message(ENABLED, 5, 10))
-        sent = {}
-
-        async def send_message(content, *, ephemeral=False):
-            sent["content"] = content
-            sent["ephemeral"] = ephemeral
-
-        interaction = SimpleNamespace(
-            guild_id=ENABLED,
-            user=SimpleNamespace(id=5, voice=None),
-            response=SimpleNamespace(send_message=send_message),
-        )
-        await cog.stats_optout.callback(cog, interaction)
-        assert sent["ephemeral"] is True
-        assert sent["content"] == (
-            "You're opted out in this server. You won't be counted as an active member from now on."
-        )
-        assert "counts" not in sent["content"].lower()
-        assert "delete" not in sent["content"].lower()
-        assert cog.stats_optout.description == "Stop counting you as an active member in this server."
-        assert store.is_opted_out(ENABLED, 5) is True
-
-        await cog.on_message(_message(ENABLED, 5, 10, when=WHEN + timedelta(seconds=5)))
-        await cog.on_message(_message(ENABLED, 6, 10, when=WHEN))
-        hidden = store.build_stats(ENABLED, WHEN)
-        assert hidden.messages_weekly == 3
-        assert hidden.active_members == 1
-        hidden_ids = {
-            row["user_id"]
-            for row in store._conn.execute(
-                "SELECT user_id FROM active_members WHERE guild_id = ?",
-                (ENABLED,),
-            )
-        }
-        assert hidden_ids == {6}
-
-        await cog.stats_optin.callback(cog, interaction)
-        assert sent["ephemeral"] is True
-        assert "opted back in" in sent["content"].lower()
-        assert store.is_opted_out(ENABLED, 5) is False
-        await cog.on_message(_message(ENABLED, 5, 10, when=WHEN + timedelta(seconds=40)))
-        resumed = store.build_stats(ENABLED, WHEN)
-        assert resumed.active_members == 2
-        resumed_ids = {
-            row["user_id"]
-            for row in store._conn.execute(
-                "SELECT user_id FROM active_members WHERE guild_id = ?",
-                (ENABLED,),
-            )
-        }
-        assert resumed_ids == {5, 6}
-
-    try:
-        asyncio.run(scenario())
     finally:
         store.close()
 
@@ -873,7 +805,6 @@ def test_card_names_cover_all_time_lists_and_guild_channels():
 
 def test_voice_restarts_seed_open_sessions_and_unload_flushes_them(tmp_path):
     store = StatsStore(tmp_path / "weekly_stats.sqlite3")
-    store.opt_out(ENABLED, 8)
     channel = SimpleNamespace(id=70)
     members = {
         5: SimpleNamespace(id=5, bot=False),

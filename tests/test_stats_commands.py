@@ -73,7 +73,6 @@ def _tally(contents: list[str], command_map: dict[str, str]) -> dict[str, int]:
             _payload(content),
             7,
             backfill.DEFAULT_CUTOFF,
-            set(),
             tally,
             weeks,
             command_map,

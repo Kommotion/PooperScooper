@@ -4,6 +4,17 @@ This is the first versioned changelog for PooperScooper, covering about Oct 14�
 
 ## Unreleased
 
+## v2.8.6 — 2026-11-25
+
+### New stuff
+
+- `/remind` is gone (Discord has built-in reminders now). `/grok` can still set reminders.
+- `/stats optout` and `/stats optin` are removed.
+
+### Background
+
+- Opt-out storage is removed. The reminder engine is kept for `/grok`.
+
 ## v2.8.5 — 2026-11-23
 
 ### New stuff

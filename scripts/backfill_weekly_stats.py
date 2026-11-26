@@ -261,7 +261,6 @@ def _tally_message(
     payload: dict,
     parent_id: int,
     cutoff: datetime,
-    opted: set[int],
     tally: WindowTally,
     weeks: dict[date, _WeekAcc],
     command_map: dict[str, str] | None = None,
@@ -288,9 +287,8 @@ def _tally_message(
     author_id = author.get("id")
     if author_id is not None:
         user_id = int(author_id)
-        if user_id not in opted:
-            bucket.authors.add(user_id)
-            tally.authors.add(user_id)
+        bucket.authors.add(user_id)
+        tally.authors.add(user_id)
     command = prefix_command_name(payload.get("content"))
     if command and command_map is not None:
         command = command_map.get(command.casefold())
@@ -394,27 +392,6 @@ def _read_live_at(path: Path, guild_id: int) -> datetime | None:
     if not row or not row[0]:
         return None
     return parse_cutoff(str(row[0]))
-
-
-def _read_opt_outs(path: Path, guild_id: int) -> set[int]:
-    if not path.exists():
-        return set()
-    conn = sqlite3.connect(path, timeout=30)
-    try:
-        found = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'opt_outs'"
-        ).fetchone()
-        if not found:
-            return set()
-        rows = conn.execute(
-            "SELECT user_id FROM opt_outs WHERE guild_id = ?",
-            (int(guild_id),),
-        ).fetchall()
-    except sqlite3.Error:
-        return set()
-    finally:
-        conn.close()
-    return {int(row[0]) for row in rows}
 
 
 def _print_tally(tally: WindowTally, elapsed_s: float, *, dry_run: bool) -> None:
@@ -580,7 +557,6 @@ async def _history(http, channel_id: int, after: int, before: int):
 async def _walk(http, store: StatsStore | None, args, tally: WindowTally, start: datetime, cutoff: datetime) -> tuple[dict[int, str], dict[str, str], str]:
     targets, names, emoji_names, guild_name = await _targets(http, args.guild_id)
     command_map = alias_map_from_source(ROOT)
-    opted = _read_opt_outs(Path(args.db), args.guild_id)
     seen_historical: dict[date, set[int]] = {}
     for index, (channel_id, parent_id) in enumerate(targets):
         spans = [] if store is None else store.backfill_spans(args.guild_id, channel_id)
@@ -604,7 +580,7 @@ async def _walk(http, store: StatsStore | None, args, tally: WindowTally, start:
                         message_id = int(msg["id"])
                         if not _id_in_ranges(message_id, pieces):
                             continue
-                        _tally_message(msg, parent_id, cutoff, opted, tally, weeks, command_map)
+                        _tally_message(msg, parent_id, cutoff, tally, weeks, command_map)
                         counted_ids.append(message_id)
                     if store is not None and counted_ids:
                         parts = _parts_from_weeks(weeks, cutoff, seen_historical)

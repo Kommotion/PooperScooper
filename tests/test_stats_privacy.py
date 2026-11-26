@@ -1,7 +1,6 @@
 """Weekly stats stay aggregate. No message text and no user ids in the snapshot.
 
-The only tables that store a user id are this week's active members and the
-opt-out list.
+The only table that stores a user id is this week's active_members.
 """
 
 from __future__ import annotations
@@ -86,15 +85,17 @@ def test_weekly_snapshot_json_has_no_user_ids(tmp_path):
         store.close()
 
 
-def test_only_active_members_and_opt_outs_contain_user_ids(tmp_path):
+def test_only_active_members_contain_user_ids(tmp_path):
     active_id = 867530986
-    opted_id = 867530987
+    other_id = 867530987
     store = StatsStore(tmp_path / "weekly_stats.sqlite3")
     try:
         tables = store._conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
         ).fetchall()
         assert tables
+        names = {table["name"] for table in tables}
+        assert not any(name.startswith("opt_") for name in names)
         with_user_id = set()
         for table in tables:
             name = table["name"]
@@ -105,26 +106,21 @@ def test_only_active_members_and_opt_outs_contain_user_ids(tmp_path):
                 if "user" in lowered:
                     assert lowered == "user_id", (name, column["name"])
                     with_user_id.add(name)
-        assert with_user_id == {"active_members", "opt_outs"}
+        assert with_user_id == {"active_members"}
 
         store.record_message(1, 10, active_id, WHEN)
         store.record_reaction(1, active_id, "111", name="spark", is_custom=True, when=WHEN)
         store.record_voice(1, 50, active_id, WHEN, WHEN + timedelta(minutes=5))
-        store.record_message(1, 11, opted_id, WHEN)
-        store.record_reaction(1, opted_id, "222", name="quiet", is_custom=True, when=WHEN)
-        store.opt_out(1, opted_id)
-        store.record_message(1, 12, opted_id, WHEN + timedelta(seconds=1))
+        store.record_message(1, 11, other_id, WHEN)
+        store.record_reaction(1, other_id, "222", name="quiet", is_custom=True, when=WHEN)
+        store.record_message(1, 12, other_id, WHEN + timedelta(seconds=1))
         store.flush()
 
         active_ids = {
             row["user_id"]
             for row in store._conn.execute("SELECT user_id FROM active_members")
         }
-        opted_ids = {
-            row["user_id"] for row in store._conn.execute("SELECT user_id FROM opt_outs")
-        }
-        assert active_ids == {active_id}
-        assert opted_ids == {opted_id}
+        assert active_ids == {active_id, other_id}
 
         for table in tables:
             name = table["name"]
@@ -133,6 +129,6 @@ def test_only_active_members_and_opt_outs_contain_user_ids(tmp_path):
             rows = store._conn.execute(f"SELECT * FROM {name}").fetchall()
             blob = " ".join(str(tuple(row)) for row in rows)
             assert str(active_id) not in blob
-            assert str(opted_id) not in blob
+            assert str(other_id) not in blob
     finally:
         store.close()

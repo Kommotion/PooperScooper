@@ -1,4 +1,4 @@
-"""Parsing, storage, and delivery for /remind."""
+"""Parsing, storage, firing, and delivery for reminders."""
 
 from __future__ import annotations
 
@@ -13,15 +13,12 @@ from unittest.mock import AsyncMock
 
 import discord
 import pytest
-from discord.ext import commands
 
 from cogs.reminders import (
     MAX_ACTIVE,
     LOOP_SECONDS,
     CapError,
-    NotYourReminder,
     Reminder,
-    ReminderNotFound,
     ReminderStore,
     RemindMeButton,
     RemindMeView,
@@ -468,69 +465,8 @@ def test_per_user_cap(tmp_path):
         raise AssertionError("cap should have been enforced")
     except CapError as exc:
         assert "25" in exc.message
-        assert "/remind cancel" in exc.message
+        assert "/remind" not in exc.message
     assert store.active_count(1) == MAX_ACTIVE
-
-    async def command():
-        cog, _bot = _cog(tmp_path)
-        cog.store = store
-        interaction = _interaction(1)
-        await cog.remind_set.callback(cog, interaction, "in 2h", "another one")
-        content, kwargs = _sent(interaction.response.send_message)
-        assert kwargs["ephemeral"] is True
-        assert "25" in content
-        assert store.active_count(1) == MAX_ACTIVE
-
-    asyncio.run(command())
-
-
-def test_list_and_cancel_are_limited_to_the_owner(tmp_path):
-    async def scenario():
-        cog, _bot = _cog(tmp_path)
-        _add(
-            cog.store,
-            creator=1,
-            text="my secret task",
-            reminder_id="1111aaaa",
-            repeat=RepeatRule(kind="daily", hour=20, minute=0),
-        )
-        _add(cog.store, creator=2, text="their secret task", reminder_id="2222bbbb")
-
-        mine = _interaction(1)
-        await cog.remind_list.callback(cog, mine)
-        content, kwargs = _sent(mine.response.send_message)
-        assert kwargs["ephemeral"] is True
-        assert "1111aaaa" in content
-        assert "my secret task" in content
-        assert "<t:" in content and ":F>" in content and ":R>" in content
-        assert "every day at 8pm" in content
-        assert "their secret task" not in content
-        assert "2222bbbb" not in content
-
-        choices = await cog.remind_cancel_autocomplete(mine, "secret")
-        assert [choice.value for choice in choices] == ["1111aaaa"]
-        assert await cog.remind_cancel_autocomplete(mine, "their") == []
-
-        stolen = _interaction(2)
-        await cog.remind_cancel.callback(cog, stolen, "1111aaaa")
-        denial, denial_kwargs = _sent(stolen.response.send_message)
-        assert denial_kwargs["ephemeral"] is True
-        assert denial == NotYourReminder.message
-        assert cog.store.get("1111aaaa") is not None
-
-        await cog.remind_cancel.callback(cog, mine, "1111aaaa")
-        cancelled, cancelled_kwargs = _sent(mine.response.send_message)
-        assert cancelled_kwargs["ephemeral"] is True
-        assert "1111aaaa" in cancelled
-        assert cog.store.get("1111aaaa") is None
-        assert cog.store.get("2222bbbb") is not None
-
-        missing = _interaction(1)
-        await cog.remind_cancel.callback(cog, missing, "deadbeef")
-        missing_text, _missing_kwargs = _sent(missing.response.send_message)
-        assert missing_text == ReminderNotFound.message
-
-    asyncio.run(scenario())
 
 
 def test_allowed_mentions_are_only_creator_and_participants(tmp_path):
@@ -576,78 +512,26 @@ def test_allowed_mentions_are_only_creator_and_participants(tmp_path):
     asyncio.run(scenario())
 
 
-def test_set_command_is_public_and_rejects_bad_times(tmp_path, monkeypatch):
-    async def scenario():
-        _freeze(monkeypatch, NOW)
-        cog, _bot = _cog(tmp_path)
-        bad = _interaction(1)
-        await cog.remind_set.callback(cog, bad, "not a time", "hello")
-        content, kwargs = _sent(bad.response.send_message)
-        assert kwargs["ephemeral"] is True
-        assert "Friday 8pm" in content and "in 2h" in content
-        assert cog.store.reminders == []
+def test_set_timezone_changes_later_parsing(tmp_path):
+    store = _store(tmp_path)
+    with pytest.raises(ValueError):
+        store.set_timezone(5, "Not/AZone")
+    assert store.timezone_for(5) == LA
 
-        past = _interaction(1)
-        await cog.remind_set.callback(cog, past, "today at 2pm", "hello")
-        past_text, past_kwargs = _sent(past.response.send_message)
-        assert past_kwargs["ephemeral"] is True
-        assert "past" in past_text.lower()
-        assert "Oct 30 at noon" in past_text
+    assert store.set_timezone(5, "america/new_york") == NY
+    assert store.timezone_for(5) == NY
 
-        long_text = _interaction(1)
-        await cog.remind_set.callback(cog, long_text, "in 2h", "x" * 501)
-        long_message, long_kwargs = _sent(long_text.response.send_message)
-        assert long_kwargs["ephemeral"] is True
-        assert "500" in long_message
-
-        ok = _interaction(1)
-        await cog.remind_set.callback(cog, ok, "in 2h", "  hello @everyone <@&9>  ")
-        confirmation, confirm_kwargs = _sent(ok.response.send_message)
-        assert confirm_kwargs["ephemeral"] is False
-        reminder = cog.store.active_for(1)[0]
-        assert reminder.text == "hello @everyone <@&9>"
-        assert reminder.private is False
-        assert reminder.next_fire_at == NOW + timedelta(hours=2)
-        assert reminder.timezone == LA
-        assert f"`{reminder.id}`" in confirmation
-        assert "<t:" in confirmation
-        view = confirm_kwargs["view"]
-        assert isinstance(view, RemindMeView)
-        assert view.timeout is None
-        assert view.is_persistent()
-        assert view.children[0].custom_id == f"remind:join:{reminder.id}"
-        allowed = confirm_kwargs["allowed_mentions"].to_dict()
-        assert allowed["users"] == [1]
-        assert "everyone" not in allowed["parse"]
-        assert "roles" not in allowed["parse"]
-
-    asyncio.run(scenario())
-
-
-def test_timezone_command_changes_later_parsing(tmp_path, monkeypatch):
-    async def scenario():
-        _freeze(monkeypatch, NOW)
-        cog, _bot = _cog(tmp_path)
-        bad = _interaction(5)
-        await cog.remind_timezone.callback(cog, bad, "Not/AZone")
-        message, kwargs = _sent(bad.response.send_message)
-        assert kwargs["ephemeral"] is True
-        assert "America/Los_Angeles" in message
-        assert cog.store.timezone_for(5) == LA
-
-        good = _interaction(5)
-        await cog.remind_timezone.callback(cog, good, "america/new_york")
-        updated, updated_kwargs = _sent(good.response.send_message)
-        assert updated_kwargs["ephemeral"] is True
-        assert "America/New_York" in updated
-        assert cog.store.timezone_for(5) == NY
-
-        created = _interaction(5)
-        await cog.remind_set.callback(cog, created, "tomorrow at 7", "wake up")
-        assert cog.store.active_for(5)[0].next_fire_at == _utc(2026, 10, 20, 11)
-        assert cog.store.active_for(5)[0].timezone == NY
-
-    asyncio.run(scenario())
+    parsed = parse_when("tomorrow at 7", now=NOW, timezone_name=store.timezone_for(5))
+    created = store.create(
+        creator_id=5,
+        channel_id=555,
+        guild_id=42,
+        text="wake up",
+        parsed=parsed,
+        created_at=NOW,
+    )
+    assert created.next_fire_at == _utc(2026, 10, 20, 11)
+    assert created.timezone == NY
 
 
 def test_remind_me_too_toggles_and_survives_reload(tmp_path):
@@ -775,18 +659,18 @@ def test_snooze_creates_or_reschedules_a_personal_one_off(tmp_path):
     asyncio.run(button_path())
 
 
-def test_commands_are_a_global_remind_group():
-    group = Reminders.remind_group
-    assert group.name == "remind"
-    assert group.guild_only is False
-    assert group.default_permissions is None
-    assert group._guild_ids is None
-    assert sorted(command.name for command in group.commands) == ["cancel", "list", "set", "timezone"]
-    assert 30 <= Reminders.reminder_loop.seconds <= 60
-
+def test_reminders_cog_stays_loaded_without_slash_commands():
     import PooperScooper
+    from discord import app_commands
 
     assert "cogs.reminders" in PooperScooper.initial_extensions
+    assert 30 <= Reminders.reminder_loop.seconds <= 60
+    slash = [
+        name
+        for name, value in vars(Reminders).items()
+        if isinstance(value, (app_commands.Command, app_commands.Group))
+    ]
+    assert slash == []
 
 
 def test_cog_load_registers_persistent_items(tmp_path):
@@ -805,40 +689,6 @@ def test_cog_load_registers_persistent_items(tmp_path):
                     await task
                 except asyncio.CancelledError:
                     pass
-
-    asyncio.run(scenario())
-
-
-def test_private_confirmation_is_ephemeral_without_button(tmp_path, monkeypatch):
-    async def scenario():
-        _freeze(monkeypatch, NOW)
-        cog, _bot = _cog(tmp_path)
-        private = _interaction(1)
-        await cog.remind_set.callback(cog, private, "in 2h", "hidden task", True)
-        content, kwargs = _sent(private.response.send_message)
-        assert kwargs["ephemeral"] is True
-        assert "view" not in kwargs
-        assert "hidden task" in content
-        stored = cog.store.active_for(1)[0]
-        assert stored.private is True
-        assert stored.text == "hidden task"
-
-        public = _interaction(1)
-        await cog.remind_set.callback(cog, public, "in 3h", "visible task")
-        _public_text, public_kwargs = _sent(public.response.send_message)
-        assert public_kwargs["ephemeral"] is False
-        assert isinstance(public_kwargs["view"], RemindMeView)
-        assert cog.store.get(cog.store.active_for(1)[1].id).private is False
-
-        listed = _interaction(1)
-        await cog.remind_list.callback(cog, listed)
-        listing, list_kwargs = _sent(listed.response.send_message)
-        assert list_kwargs["ephemeral"] is True
-        hidden = next(line for line in listing.splitlines() if "hidden task" in line)
-        visible = next(line for line in listing.splitlines() if "visible task" in line)
-        assert "once (private)" in hidden
-        assert "missed" not in hidden
-        assert "(private)" not in visible
 
     asyncio.run(scenario())
 
@@ -948,9 +798,8 @@ def test_private_reminder_dms_each_person_with_snooze(tmp_path, monkeypatch):
     asyncio.run(scenario())
 
 
-def test_private_dm_failure_falls_back_without_reminder_text(tmp_path, monkeypatch):
+def test_private_dm_failure_falls_back_without_reminder_text(tmp_path):
     async def scenario():
-        _freeze(monkeypatch, NOW)
         cog, bot = _cog(tmp_path)
         creator = FakeChannel(error=discord.Forbidden(_HTTPResponse(), "DMs closed"))
         broken = FakeChannel(error=_http_error())
@@ -983,11 +832,9 @@ def test_private_dm_failure_falls_back_without_reminder_text(tmp_path, monkeypat
         }
         assert len(channel.sent) == 1
         fallback, kwargs = channel.sent[0]
-        assert fallback == (
-            "<@1> <@2>, I couldn't DM you your private reminder. "
-            "Turn on DMs, or use `/remind list` to see it."
-        )
+        assert fallback == "<@1> <@2>, I couldn't DM you your private reminder. Turn on DMs."
         assert secret not in fallback
+        assert "/remind" not in fallback
         assert "unique-secret-phrase" not in fallback
         assert "<@3>" not in fallback
         assert "view" not in kwargs
@@ -1000,38 +847,25 @@ def test_private_dm_failure_falls_back_without_reminder_text(tmp_path, monkeypat
         stored = cog.store.get("abcd9999")
         assert stored is not None
         assert stored.status == "fired"
+        assert stored.private is True
+        assert stored.text == secret
         assert stored.missed_ids == [1, 2]
 
         for user_id in (1, 2):
-            interaction = _interaction(user_id)
-            await cog.remind_list.callback(cog, interaction)
-            content, list_kwargs = _sent(interaction.response.send_message)
-            assert list_kwargs["ephemeral"] is True
-            assert secret in content
-            assert "missed (private)" in content
-            assert "abcd9999" in content
+            visible = cog.store.visible_for(user_id, NOW)
+            assert [item.id for item in visible] == ["abcd9999"]
+            assert visible[0].text == secret
 
-        spared = _interaction(3)
-        await cog.remind_list.callback(cog, spared)
-        spared_content, _spared_kwargs = _sent(spared.response.send_message)
-        assert secret not in spared_content
-        assert "abcd9999" not in spared_content
+        spared = cog.store.visible_for(3, NOW)
+        assert all(item.id != "abcd9999" for item in spared)
 
-        _freeze(monkeypatch, NOW + timedelta(hours=24) - timedelta(seconds=1))
-        still = _interaction(1)
-        await cog.remind_list.callback(cog, still)
-        still_content, _still_kwargs = _sent(still.response.send_message)
-        assert secret in still_content
-        assert "missed (private)" in still_content
+        still = cog.store.visible_for(1, NOW + timedelta(hours=24) - timedelta(seconds=1))
+        assert [item.id for item in still] == ["abcd9999"]
+        assert still[0].text == secret
         assert cog.store.get("abcd9999") is not None
 
-        _freeze(monkeypatch, NOW + timedelta(hours=24))
-        gone = _interaction(1)
-        await cog.remind_list.callback(cog, gone)
-        gone_content, _gone_kwargs = _sent(gone.response.send_message)
-        assert secret not in gone_content
-        assert "abcd9999" not in gone_content
-        assert "missed (private)" not in gone_content
+        gone = cog.store.visible_for(1, NOW + timedelta(hours=24))
+        assert all(item.id != "abcd9999" for item in gone)
         assert cog.store.get("abcd9999") is None
 
     asyncio.run(scenario())
@@ -1099,90 +933,6 @@ def _logged(caplog, *, level: int | None = None) -> str:
         chunks.append(repr(record.args))
         chunks.append(str(record.msg))
     return "\n".join(chunks)
-
-
-def test_remind_set_is_logged_and_private_text_is_hidden(tmp_path, monkeypatch, caplog):
-    async def scenario():
-        _freeze(monkeypatch, NOW)
-        cog, _bot = _cog(tmp_path)
-        secret = "private-secret-do-not-log"
-        interaction = _interaction(7, username="ada", guild_name="Pooper Guild", channel_name="general")
-        with caplog.at_level(logging.INFO, logger="cogs.reminders"):
-            caplog.clear()
-            await cog.remind_set.callback(cog, interaction, "in 2h", secret, True)
-        blob = _logged(caplog)
-        assert secret not in blob
-        set_records = [
-            record
-            for record in caplog.records
-            if record.name == "cogs.reminders" and record.getMessage().startswith("remind set ")
-        ]
-        assert len(set_records) == 1
-        assert set_records[0].levelno == logging.INFO
-        line = set_records[0].getMessage()
-        assert "\n" not in line
-        reminder = cog.store.active_for(7)[0]
-        assert f"id={reminder.id}" in line
-        assert "user=7" in line
-        assert "username=ada" in line
-        assert "guild=42" in line
-        assert "guild_name=Pooper Guild" in line
-        assert "channel=555" in line
-        assert "channel_name=general" in line
-        assert "when='in 2h'" in line
-        assert "private=True" in line
-        assert f"text_len={len(secret)}" in line
-        assert "text=" not in line
-        assert "utc=2026-10-20T00:00:00+00:00" in line
-        assert "local=2026-10-19T17:00:00-07:00" in line
-        assert "repeat=once" in line
-
-        public = ("P" * 80) + "TAIL"
-        public_interaction = _interaction(8, username="bea", guild_name="Pooper Guild", channel_name="general")
-        with caplog.at_level(logging.INFO, logger="cogs.reminders"):
-            caplog.clear()
-            await cog.remind_set.callback(cog, public_interaction, "in 3h", public, False)
-        public_records = [
-            record
-            for record in caplog.records
-            if record.name == "cogs.reminders"
-            and record.getMessage().startswith("remind set ")
-            and "rejected" not in record.getMessage()
-        ]
-        assert len(public_records) == 1
-        public_line = public_records[0].getMessage()
-        assert "\n" not in public_line
-        assert ("P" * 80) in public_line
-        assert "TAIL" not in public_line
-        assert "text_len=84" in public_line
-        assert "private=False" in public_line
-
-        past_secret = "past-secret-do-not-log"
-        past = _interaction(8, username="bea", guild_name="Pooper Guild", channel_name="general")
-        with caplog.at_level(logging.INFO, logger="cogs.reminders"):
-            caplog.clear()
-            await cog.remind_set.callback(cog, past, "today at 2pm", past_secret, True)
-        past_blob = _logged(caplog)
-        assert past_secret not in past_blob
-        assert "remind set rejected" in past_blob
-        assert "reason=past time" in past_blob
-        assert "user=8" in past_blob
-        assert "username=bea" in past_blob
-
-        listed = _interaction(7, username="ada", guild_name="Pooper Guild", channel_name="general")
-        with caplog.at_level(logging.INFO, logger="cogs.reminders"):
-            caplog.clear()
-            await cog.remind_list.callback(cog, listed)
-            await cog.remind_cancel.callback(cog, listed, reminder.id)
-        follow_blob = _logged(caplog)
-        assert secret not in follow_blob
-        assert "remind list" in follow_blob
-        assert "count=1" in follow_blob
-        assert f"id={reminder.id}" in follow_blob
-        assert "result=cancelled" in follow_blob
-        assert "text=" not in follow_blob
-
-    asyncio.run(scenario())
 
 
 def test_delivery_is_logged_and_private_text_is_hidden(tmp_path, caplog):

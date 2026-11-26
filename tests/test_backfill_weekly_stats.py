@@ -185,10 +185,9 @@ def test_historical_week_updates_all_time_and_snapshot_only(tmp_path):
         store.close()
 
 
-def test_opted_out_author_is_not_marked_active(tmp_path):
+def test_backfill_marks_every_listed_active_id(tmp_path):
     store = StatsStore(tmp_path / "weekly_stats.sqlite3")
     try:
-        store.opt_out(1, 99)
         store.apply_backfill(
             1,
             7,
@@ -196,6 +195,6 @@ def test_opted_out_author_is_not_marked_active(tmp_path):
             [BackfillPart(into_current_week=True, week_start=CURRENT, messages=1, active_ids=(99, 100))],
         )
         ids = {row["user_id"] for row in store._conn.execute("SELECT user_id FROM active_members")}
-        assert ids == {100}
+        assert ids == {99, 100}
     finally:
         store.close()

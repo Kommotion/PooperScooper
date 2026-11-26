@@ -3,9 +3,7 @@
 Counters live in an in-memory buffer until ``flush`` writes every pending
 delta in one transaction. Weekly columns reset in ``close_week``. All-time
 columns do not. This week's active-member list is cleared with the week.
-Opted-out users are removed from that list and are not marked active again.
-Channel, emoji, voice, and heatmap totals still count, because those rows
-have no user id.
+Channel, emoji, voice, and heatmap totals have no user id.
 """
 
 from __future__ import annotations
@@ -112,11 +110,6 @@ CREATE TABLE IF NOT EXISTS applied_corrections (
     guild_id INTEGER NOT NULL,
     key TEXT NOT NULL,
     PRIMARY KEY (guild_id, key)
-);
-CREATE TABLE IF NOT EXISTS opt_outs (
-    guild_id INTEGER NOT NULL,
-    user_id INTEGER NOT NULL,
-    PRIMARY KEY (guild_id, user_id)
 );
 CREATE TABLE IF NOT EXISTS backfill_span (
     guild_id INTEGER NOT NULL,
@@ -424,9 +417,6 @@ class _Buffer:
     def add_active(self, guild_id: int, user_id: int) -> None:
         self.active.add((guild_id, user_id))
 
-    def drop_user(self, guild_id: int, user_id: int) -> None:
-        self.active.discard((guild_id, user_id))
-
 
 def _known_emoji_pairs(known) -> list[tuple[str, str]]:
     if not known:
@@ -513,8 +503,6 @@ class StatsStore:
         # Earlier builds stored per-person totals. Drop that table if it is still here.
         self._conn.execute("DROP TABLE IF EXISTS user_counters")
         self._buffer = _Buffer()
-        self._opted: set[tuple[int, int]] = set()
-        self._load_opt_outs()
 
     def _migrate_command_counts(self) -> None:
         """Add app_id to command_counts. Prefix rows are this bot. Old slash stays untagged."""
@@ -574,47 +562,10 @@ class StatsStore:
         else:
             self._conn.execute("COMMIT")
 
-    def _load_opt_outs(self) -> None:
-        rows = self._conn.execute("SELECT guild_id, user_id FROM opt_outs").fetchall()
-        self._opted = {(int(row["guild_id"]), int(row["user_id"])) for row in rows}
-
-    def is_opted_out(self, guild_id: int, user_id: int) -> bool:
-        return (int(guild_id), int(user_id)) in self._opted
-
-    def opt_out(self, guild_id: int, user_id: int) -> None:
-        """Opt this user out and remove them from this week's active members.
-
-        Later messages and reactions still move aggregate totals. They do not
-        mark this user active.
-        """
-        guild_id = int(guild_id)
-        user_id = int(user_id)
-        self._opted.add((guild_id, user_id))
-        self._buffer.drop_user(guild_id, user_id)
-        with self._transaction():
-            self._conn.execute(
-                "INSERT OR IGNORE INTO opt_outs (guild_id, user_id) VALUES (?, ?)",
-                (guild_id, user_id),
-            )
-            self._conn.execute(
-                "DELETE FROM active_members WHERE guild_id = ? AND user_id = ?",
-                (guild_id, user_id),
-            )
-
-    def opt_in(self, guild_id: int, user_id: int) -> None:
-        guild_id = int(guild_id)
-        user_id = int(user_id)
-        self._opted.discard((guild_id, user_id))
-        with self._transaction():
-            self._conn.execute(
-                "DELETE FROM opt_outs WHERE guild_id = ? AND user_id = ?",
-                (guild_id, user_id),
-            )
-
     def record_message(self, guild_id: int, channel_id: int, user_id: int, when: datetime) -> bool:
         """Count one message toward the channel total and the activity heatmap.
 
-        Every message counts. Opted-out authors are not marked active.
+        Every message counts. The author is marked active when the week is open.
         Returns True.
         """
         guild_id = int(guild_id)
@@ -625,7 +576,7 @@ class StatsStore:
         self._buffer.add_channel(guild_id, channel_id, 1, weekly=weekly)
         local = when.astimezone(LA)
         self._buffer.add_heatmap(guild_id, local.weekday(), local.hour, 1, weekly=weekly)
-        if weekly and not self.is_opted_out(guild_id, user_id):
+        if weekly:
             self._buffer.add_active(guild_id, user_id)
         return True
 
@@ -649,10 +600,7 @@ class StatsStore:
         self._buffer.add_heatmap(guild_id, local.weekday(), local.hour, 1, weekly=weekly)
         if not weekly or user_id is None:
             return
-        user_id = int(user_id)
-        if self.is_opted_out(guild_id, user_id):
-            return
-        self._buffer.add_active(guild_id, user_id)
+        self._buffer.add_active(guild_id, int(user_id))
 
     def record_command(
         self,
@@ -912,12 +860,9 @@ class StatsStore:
                         self._add_week_bucket(guild_id, week, "heat", f"{weekday}:{hour}", "", 0, count)
                 if part.into_current_week:
                     for user_id in part.active_ids or ():
-                        user_id = int(user_id)
-                        if self.is_opted_out(guild_id, user_id):
-                            continue
                         self._conn.execute(
                             "INSERT OR IGNORE INTO active_members (guild_id, user_id) VALUES (?, ?)",
-                            (guild_id, user_id),
+                            (guild_id, int(user_id)),
                         )
                 elif int(part.member_delta) > 0:
                     self._add_week_bucket(guild_id, week, "members", "n", "", 0, int(part.member_delta))
